@@ -25,6 +25,15 @@ test.beforeAll(async () => {
     store.appendEvent({ run_id: id, task_id: e.task_id, agent_id: e.task_id, type: e.type, payload: e.payload });
   }
   for (const r of fixture.reports) store.saveReport(id, r.task_id, r.body);
+  // A separate run with a long feed (60 finished Reads) for the follow-latest test.
+  store.createRun("r2", "Long feed", "/tmp/repo");
+  store.savePlan("r2", { tasks: [{ id: "big", role: "implementer", runtime: "codex", tier: "mid", goal: "Read a lot", dependsOn: [], needs: [] }] });
+  store.setTaskStatus("r2", "big", "running");
+  store.appendEvent({ run_id: "r2", task_id: "big", agent_id: "big", type: "task_started", payload: { role: "implementer", runtime: "codex", tier: "mid" } });
+  for (let i = 0; i < 60; i++) {
+    store.appendEvent({ run_id: "r2", task_id: "big", agent_id: "big", type: "tool_call", payload: { name: "Read", input: { file_path: `src/f${i}.ts` } } });
+    store.appendEvent({ run_id: "r2", task_id: "big", agent_id: "big", type: "tool_result", payload: { name: "Read", output: `content ${i}\nline2`, isError: false } });
+  }
   srv = await startServer(store, { port: 0, staticDir: dist });
   base = `http://127.0.0.1:${srv.port}`;
 });
@@ -33,6 +42,13 @@ test.afterAll(async () => { await srv.close(); });
 const flowEdge = (page: import("@playwright/test").Page) => page.locator(".react-flow__edge.animated");
 
 test.beforeEach(async ({ page }) => { await page.goto(`${base}/?run=r1`); });
+
+const openActivity = async (page: import("@playwright/test").Page, node = "impl") => {
+  await page.getByTestId(`node-${node}`).click();
+  await page.getByRole("tab", { name: "Activity" }).click();
+  await expect(page.locator(".feed-list")).toBeVisible();
+};
+const stepRow = (page: import("@playwright/test").Page, text: string | RegExp) => page.locator("li.step.tool").filter({ hasText: text });
 
 test("graph shows both agents with runtime badges and a labelled animated flow edge", async ({ page }) => {
   await expect(page.getByRole("heading", { level: 1 })).toHaveText(fixture.run.goal);
@@ -72,7 +88,7 @@ test("keyboard: arrow keys switch inspector tabs", async ({ page }) => {
 test("untrusted event text renders as literal text and never executes", async ({ page }) => {
   await page.getByTestId("node-rev").click();
   await page.getByRole("tab", { name: "Activity" }).click();
-  await expect(page.locator(".act-text")).toHaveText('<img src=x onerror="window.__pwned=1">');
+  await expect(page.locator(".say-text")).toHaveText('<img src=x onerror="window.__pwned=1">');
   expect(await page.evaluate(() => (window as unknown as { __pwned?: number }).__pwned)).toBeUndefined();
   await expect(page.locator('img[src="x"]')).toHaveCount(0);
 });
@@ -238,4 +254,112 @@ test("an HTML-looking report renders as literal text", async ({ page }) => {
   await expect(page.locator(".panel img")).toHaveCount(0);
   await expect(page.locator(".panel b")).toHaveCount(0);
   expect(await page.evaluate(() => (window as unknown as { __pwned?: number }).__pwned)).toBeUndefined();
+});
+
+test("activity: a collapsed Read row shows the repo-relative path and line range, not raw JSON or the worktree prefix", async ({ page }) => {
+  await openActivity(page);
+  const row = stepRow(page, "src/a.py (lines 20–109)");
+  await expect(row).toHaveCount(1);
+  const summary = row.locator("summary");
+  await expect(summary).not.toContainText(".mar/worktrees");
+  await expect(summary).not.toContainText("file_path");
+  await expect(summary).toContainText("Read");
+  await expect(summary).toContainText("24 lines");
+  await expect(row.locator("details")).not.toHaveAttribute("open", "");
+});
+
+test("activity: expanding a row reveals the full output and the input JSON", async ({ page }) => {
+  await openActivity(page);
+  const row = stepRow(page, "src/a.py (lines 20–109)");
+  await row.locator("summary").click();
+  const out = (await row.locator("pre.out").textContent()) ?? "";
+  expect(out.length).toBeGreaterThan(1700);
+  expect(out).toContain("field_23");
+  await expect(row.locator("pre.io").first()).toContainText('"offset": 20');
+  await expect(row.locator("pre.io").first()).toContainText('"file_path"');
+  await page.getByRole("button", { name: "Copy" }).first().click();
+  await expect(row.locator(".copied")).toHaveText(/Copied|Copy unavailable/);
+});
+
+test("activity: Errors chip shows only the failing step; counts are right; errors start expanded", async ({ page }) => {
+  await openActivity(page);
+  const chip = (n: string) => page.getByRole("button", { name: new RegExp(`^${n}`) });
+  await expect(chip("All")).toContainText("7");
+  await expect(chip("Messages")).toContainText("1");
+  await expect(chip("Tools")).toContainText("6");
+  await expect(chip("Errors")).toContainText("1");
+  await expect(stepRow(page, "tests/test_a.py").locator("details")).toHaveAttribute("open", "");
+  await chip("Errors").click();
+  await expect(chip("Errors")).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator(".feed-list > li")).toHaveCount(1);
+  await expect(page.locator(".feed-list > li")).toContainText("pytest -q tests/test_a.py");
+  await expect(page.locator(".feed-list > li")).toContainText("FAILED tests/test_a.py::test_x");
+});
+
+test("activity: Messages chip shows only the say row", async ({ page }) => {
+  await openActivity(page);
+  await page.getByRole("button", { name: /^Messages/ }).click();
+  await expect(page.locator(".feed-list > li")).toHaveCount(1);
+  await expect(page.locator("li.step.say")).toContainText("Reading the schema before editing.");
+  await page.getByRole("button", { name: /^Tools/ }).click();
+  await expect(page.locator("li.step.say")).toHaveCount(0);
+  await expect(page.locator("li.step.tool")).toHaveCount(6);
+});
+
+test("activity: HTML-looking tool output renders as literal text and never executes", async ({ page }) => {
+  await openActivity(page);
+  const row = stepRow(page, "src/c.py");
+  await row.locator("summary").click();
+  await expect(row.locator("pre.out")).toHaveText('<img src=x onerror="window.__pwned=1">');
+  await expect(page.locator('.feed img')).toHaveCount(0);
+  expect(await page.evaluate(() => (window as unknown as { __pwned?: number }).__pwned)).toBeUndefined();
+});
+
+test("activity: parallel Reads pair in order and a call with no result shows the running indicator", async ({ page }) => {
+  await openActivity(page);
+  const b = stepRow(page, "src/b.py"), c = stepRow(page, "src/c.py");
+  await b.locator("summary").click(); await c.locator("summary").click();
+  await expect(b.locator("pre.out")).toHaveText("b-content");
+  await expect(c.locator("pre.out")).toContainText("<img");
+  const pending = stepRow(page, "sleep 600");
+  await expect(pending).toHaveAttribute("data-state", "running");
+  await expect(pending.getByRole("img", { name: "running" })).toBeVisible();
+  await expect(stepRow(page, "missing_symbol")).toContainText("no matches");
+});
+
+test("activity: reduced motion applies no animation inline styles to rows", async ({ browser }) => {
+  const ctx = await browser.newContext({ reducedMotion: "reduce" });
+  const page = await ctx.newPage();
+  await page.goto(`${base}/?run=r1`);
+  await openActivity(page);
+  const styles = await page.locator(".feed-list > li").evaluateAll((els) => els.map((e) => e.getAttribute("style") ?? ""));
+  expect(styles.length).toBeGreaterThan(0);
+  for (const st of styles) expect(st).not.toMatch(/translate|opacity/);
+  expect(await page.locator(".dot-run").first().evaluate((e) => getComputedStyle(e).animationName)).toBe("none");
+  await ctx.close();
+});
+
+test("activity: scrolling up stops following and shows a jump button that returns to the bottom", async ({ page }) => {
+  await page.goto(`${base}/?run=r2`);
+  await openActivity(page, "big");
+  const list = page.locator(".feed-list");
+  const gap = () => list.evaluate((e) => e.scrollHeight - e.scrollTop - e.clientHeight);
+  await expect.poll(gap).toBeLessThanOrEqual(24);
+  await expect(page.getByRole("button", { name: "Jump to latest" })).toHaveCount(0);
+  await list.evaluate((e) => { e.scrollTop = 0; });
+  const jump = page.getByRole("button", { name: "Jump to latest" });
+  await expect(jump).toBeVisible();
+  expect(await gap()).toBeGreaterThan(200);
+  await jump.click();
+  await expect.poll(gap).toBeLessThanOrEqual(24);
+  await expect(jump).toHaveCount(0);
+});
+
+test("activity: screenshot of the expanded feed", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await openActivity(page);
+  await stepRow(page, "src/a.py (lines 20–109)").locator("summary").click();
+  await page.locator("li.step.say").scrollIntoViewIfNeeded();
+  await page.waitForTimeout(500);
+  await page.screenshot({ path: "test-results/activity-1280.png" });
 });

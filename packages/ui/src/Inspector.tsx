@@ -1,13 +1,13 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import type { BbEntry, Dag, StoredEvent } from "@mar/core";
-import { deriveActivity, deriveContext, type AgentView } from "./derive.js";
+import { deriveContext, type AgentView } from "./derive.js";
 import { budgetUsage, fmtCost, fmtTokens } from "./fmt.js";
 import type { ReportRow } from "./runClient.js";
-import { drawerIn, rowsIn } from "./motion.js";
+import { drawerIn } from "./motion.js";
+import { ActivityFeed } from "./ActivityFeed.js";
 
 const TABS = ["Context", "Activity", "Output", "Usage"] as const;
 type Tab = (typeof TABS)[number];
-const MAX_ACTIVITY = 500;
 
 type Props = { agent: AgentView; events: StoredEvent[]; blackboard: BbEntry[]; plan: Dag | null; reports?: ReportRow[]; onClose: () => void };
 
@@ -37,7 +37,7 @@ export function Inspector({ agent, events, blackboard, plan, reports = [], onClo
       </div>
       <div role="tabpanel" id={`panel-${tab}`} aria-labelledby={`tab-${tab}`} className="panel">
         {tab === "Context" && <ContextTab id={agent.id} events={events} blackboard={blackboard} />}
-        {tab === "Activity" && <ActivityTab id={agent.id} events={events} />}
+        {tab === "Activity" && <ActivityFeed id={agent.id} events={events} status={agent.status} />}
         {tab === "Output" && <OutputTab id={agent.id} blackboard={blackboard} reports={reports} />}
         {tab === "Usage" && <UsageTab agent={agent} budget={spec?.budgetTokens} />}
       </div>
@@ -59,34 +59,6 @@ function ContextTab({ id, events, blackboard }: { id: string; events: StoredEven
       )}
       <h3>Not given</h3>
       {ctx.notGiven.length === 0 ? <p className="muted">Nothing withheld.</p> : <ul className="keys">{ctx.notGiven.map((k) => <li key={k} className="mono">{k}</li>)}</ul>}
-    </>
-  );
-}
-
-function ActivityTab({ id, events }: { id: string; events: StoredEvent[] }) {
-  const all = useMemo(() => deriveActivity(events, id), [events, id]);
-  const items = all.length > MAX_ACTIVITY ? all.slice(-MAX_ACTIVITY) : all;
-  const box = useRef<HTMLOListElement>(null);
-  const shown = useRef(items.length); // rows already on screen; only rows appended later animate
-  useEffect(() => {
-    const el = box.current; if (!el) return;
-    const fresh = items.length > shown.current ? Array.from(el.children).slice(shown.current - items.length) : [];
-    shown.current = items.length;
-    el.scrollTop = el.scrollHeight;
-    return rowsIn(fresh);
-  }, [items.length]);
-  if (all.length === 0) return <p className="muted">No activity yet.</p>;
-  return (
-    <>
-      {all.length > items.length && <p className="muted">Showing the latest {MAX_ACTIVITY} of {all.length}.</p>}
-      <ol className="activity" ref={box}>
-        {items.map((a) => (
-          <li key={a.id} className={`kind-${a.kind}${a.isError ? " err" : ""}`}>
-            <span className="act-kind">{a.kind === "text" ? "say" : a.kind === "tool_call" ? "call" : a.isError ? "error" : "result"}</span>
-            <span className="act-text">{a.text}</span>
-          </li>
-        ))}
-      </ol>
     </>
   );
 }

@@ -85,6 +85,10 @@ A task may return a long markdown `report` alongside its short `summary`. At the
 
 Reports are stored (redacted, up to 100,000 characters) in their own SQLite table, not on the blackboard, so they never add to other agents' context. Blackboard entries stay capped at about 1,200 characters.
 
+### Activity tab
+
+The inspector's Activity tab shows one row per step: each tool call is paired with its result (a call with no result yet shows as running), with repo-relative paths, a short result summary and a relative time. Filter chips (All / Messages / Tools / Errors) show counts; click a row to expand its input and the full output (up to the 2,000 characters the runner stores), with a Copy button. Errors start expanded. The feed follows the latest step only while you are at the bottom; scroll up and a "Jump to latest" button appears. All content is rendered as plain text.
+
 ## How it saves tokens
 
 - The planner runs once per run (on the planner model, Sonnet by default). The plan is stored and reused by `resume`.

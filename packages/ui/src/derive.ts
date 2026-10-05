@@ -23,7 +23,7 @@ const isEnd = (t: string) => t === "task_finished" || t === "task_failed";
 
 // Only true cycles (a value that is its own ancestor) are marked; a repeated, non-circular reference serializes normally.
 // JSON.stringify calls the replacer with `this` = the holder, which lets us track the current ancestor chain.
-function safeStringify(v: unknown): string {
+export function safeStringify(v: unknown): string {
   if (typeof v === "string") return v;
   const stack: { orig: object; conv: object }[] = [];
   try {

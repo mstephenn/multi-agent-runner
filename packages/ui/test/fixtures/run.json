@@ -73,6 +73,121 @@
     },
     {
       "task_id": "impl",
+      "type": "assistant_text",
+      "payload": {
+        "text": "Reading the schema before editing."
+      }
+    },
+    {
+      "task_id": "impl",
+      "type": "tool_call",
+      "payload": {
+        "name": "Read",
+        "input": {
+          "file_path": "/Users/stephenm/workspace/ibeam/squad-lead-agent/.mar/worktrees/r1/.shared/src/a.py",
+          "offset": 20,
+          "limit": 90
+        }
+      }
+    },
+    {
+      "task_id": "impl",
+      "type": "tool_result",
+      "payload": {
+        "name": "Read",
+        "output": "  1  def field_0(self): return self._signal[0]  # padding line for a long output\n  2  def field_1(self): return self._signal[1]  # padding line for a long output\n  3  def field_2(self): return self._signal[2]  # padding line for a long output\n  4  def field_3(self): return self._signal[3]  # padding line for a long output\n  5  def field_4(self): return self._signal[4]  # padding line for a long output\n  6  def field_5(self): return self._signal[5]  # padding line for a long output\n  7  def field_6(self): return self._signal[6]  # padding line for a long output\n  8  def field_7(self): return self._signal[7]  # padding line for a long output\n  9  def field_8(self): return self._signal[8]  # padding line for a long output\n 10  def field_9(self): return self._signal[9]  # padding line for a long output\n 11  def field_10(self): return self._signal[10]  # padding line for a long output\n 12  def field_11(self): return self._signal[11]  # padding line for a long output\n 13  def field_12(self): return self._signal[12]  # padding line for a long output\n 14  def field_13(self): return self._signal[13]  # padding line for a long output\n 15  def field_14(self): return self._signal[14]  # padding line for a long output\n 16  def field_15(self): return self._signal[15]  # padding line for a long output\n 17  def field_16(self): return self._signal[16]  # padding line for a long output\n 18  def field_17(self): return self._signal[17]  # padding line for a long output\n 19  def field_18(self): return self._signal[18]  # padding line for a long output\n 20  def field_19(self): return self._signal[19]  # padding line for a long output\n 21  def field_20(self): return self._signal[20]  # padding line for a long output\n 22  def field_21(self): return self._signal[21]  # padding line for a long output\n 23  def field_22(self): return self._signal[22]  # padding line for a long output\n 24  def field_23(self): return self._signal[23]  # padding line for a long output",
+        "isError": false
+      }
+    },
+    {
+      "task_id": "impl",
+      "type": "tool_call",
+      "payload": {
+        "name": "Grep",
+        "input": {
+          "pattern": "missing_symbol",
+          "path": "/Users/stephenm/workspace/ibeam/squad-lead-agent/.mar/worktrees/r1/.shared/src/a.py"
+        }
+      }
+    },
+    {
+      "task_id": "impl",
+      "type": "tool_result",
+      "payload": {
+        "name": "Grep",
+        "output": "No matches found",
+        "isError": false
+      }
+    },
+    {
+      "task_id": "impl",
+      "type": "tool_call",
+      "payload": {
+        "name": "Bash",
+        "input": {
+          "command": "pytest -q tests/test_a.py\necho done"
+        }
+      }
+    },
+    {
+      "task_id": "impl",
+      "type": "tool_result",
+      "payload": {
+        "name": "Bash",
+        "output": "FAILED tests/test_a.py::test_x - AssertionError\n1 failed",
+        "isError": true
+      }
+    },
+    {
+      "task_id": "impl",
+      "type": "tool_call",
+      "payload": {
+        "name": "Read",
+        "input": {
+          "file_path": "/x/.mar/worktrees/r1/.shared/src/b.py"
+        }
+      }
+    },
+    {
+      "task_id": "impl",
+      "type": "tool_call",
+      "payload": {
+        "name": "Read",
+        "input": {
+          "file_path": "/x/.mar/worktrees/r1/.shared/src/c.py"
+        }
+      }
+    },
+    {
+      "task_id": "impl",
+      "type": "tool_result",
+      "payload": {
+        "name": "Read",
+        "output": "b-content",
+        "isError": false
+      }
+    },
+    {
+      "task_id": "impl",
+      "type": "tool_result",
+      "payload": {
+        "name": "Read",
+        "output": "<img src=x onerror=\"window.__pwned=1\">",
+        "isError": false
+      }
+    },
+    {
+      "task_id": "impl",
+      "type": "tool_call",
+      "payload": {
+        "name": "Bash",
+        "input": {
+          "command": "sleep 600"
+        }
+      }
+    },
+    {
+      "task_id": "impl",
       "type": "usage",
       "payload": {
         "input": 900,
