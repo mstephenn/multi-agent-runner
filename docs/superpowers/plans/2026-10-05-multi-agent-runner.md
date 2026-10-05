@@ -1856,3 +1856,15 @@ describe.skipIf(!process.env.MAR_LIVE)("live smoke", () => {
 **Spec coverage:** architecture/run flow → Tasks 4, 7, 8, 10; event schema + blackboard + budgets → Tasks 1–4; adapters for both runtimes → Tasks 5–6; UI graph/inspector/timeline/blackboard/header/stop/replay → Tasks 11–12; error handling (retry, repair, budget, invalid DAG, preflight, resume, crash) → Tasks 1, 4, 7, 8, 10; safety (worktrees, tool allowlists, no unsafe default, never merge to main, `.env`, redaction, loopback) → Tasks 3, 5, 6, 7, 9, 10; testing tiers (unit, fixtures, integration, UI smoke, live) → every task + Task 13. Spec open items resolved: flags confirmed against Claude Code 2.1.289 and Codex 0.156.1; tier defaults set in `config.ts`.
 
 **Known gaps to confirm at execution:** Codex tier model ids default to the CLI's own default (`null`) until you choose; the Codex `--json` event field names are verified against a captured fixture in Task 6 Step 1 before the normalizer is trusted.
+
+---
+
+### Task 14 (PROPOSED, pending user OK): verify gates, path ownership, integration branch
+
+**Files:** Modify `packages/core/src/{schemas.ts,dag.ts}`, `packages/orchestrator/src/{scheduler.ts,planner.ts}`, `packages/cli/src/{config.ts,main.ts}`; Create `packages/orchestrator/src/{verify.ts,integrate.ts}`; Tests beside each.
+
+- [ ] `TaskSpec.paths: string[]` (default `[]`); `parseDag` rejects two tasks with no dependency path between them whose `paths` globs overlap (test: overlapping parallel tasks rejected; overlapping but dependent tasks accepted; empty `paths` never conflicts).
+- [ ] `MarConfig.verify: string[]` (default `[]`); `runVerify(cwd, commands, signal): Promise<{ok: boolean; tail: string}>` runs each command via argv split (no shell), stops at first failure, returns last 1500 chars of output (test with real `node -e` commands: pass, fail, tail truncation, abort).
+- [ ] Scheduler: after a worker's result is parsed and before publishing, run the verify gate in its worktree; on failure retry the task once with `Verify failed:\n<tail>` appended, emit `verify_started`/`verify_passed`/`verify_failed` events (add to `EventTypes`); a second failure fails the task (`failed:verify`). Implementer/tester tasks only (reviewers/researchers skip). Tests with the fake adapter and a fake verifier.
+- [ ] `integrate(repo, runId, order: string[]): Promise<{branch: string; conflicts: string[]}>` merges task branches in topological order into `mar/<runId>/integration` using a temporary worktree; on conflict, aborts that merge and reports the files; then runs the verify gate on the result. Tests in a throwaway repo: clean merge, conflicting merge reported, never touches `main`/`master`/`beta`.
+- [ ] Planner prompt asks for `paths` and prefers parallelizing only disjoint work; UI shows gate status on nodes and the integration result in the run header (extend `derive.ts` + tests).

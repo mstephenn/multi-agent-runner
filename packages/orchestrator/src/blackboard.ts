@@ -1,18 +1,30 @@
 import { MAX_BB_BODY_CHARS, estimateTokens, type BbEntry, type TaskResult, type TaskSpec } from "@mar/core";
+import { redact } from "./redact.js";
 import type { Store } from "../../server/src/store.js";
 
-const clip = (s: string) => (s.length <= MAX_BB_BODY_CHARS ? s : s.slice(0, MAX_BB_BODY_CHARS - 1) + "…");
+export const clip = (s: string) => (s.length <= MAX_BB_BODY_CHARS ? s : s.slice(0, MAX_BB_BODY_CHARS - 1) + "…");
+
+// Whole items only; if any are dropped, end with "…(+N more)" (marker included in the cap).
+export function fitList(items: string[]): string {
+  const n = items.length;
+  for (let k = n; k >= 0; k--) {
+    const kept = items.slice(0, k).join("\n");
+    const body = k === n ? kept : `${kept}${k ? "\n" : ""}…(+${n - k} more)`;
+    if (body.length <= MAX_BB_BODY_CHARS) return body;
+  }
+  return clip(`…(+${n} more)`);
+}
 
 export function publishResult(store: Store, runId: string, taskId: string, r: TaskResult): BbEntry[] {
   const out: BbEntry[] = [];
   const put = (suffix: string, kind: BbEntry["kind"], body: string, refs: string[] = []) => {
-    const e = store.writeBb({ run_id: runId, key: `${taskId}/${suffix}`, author_task: taskId, kind, body: clip(body), refs });
+    const e = store.writeBb({ run_id: runId, key: `${taskId}/${suffix}`, author_task: taskId, kind, body: clip(redact(body)), refs });
     store.appendEvent({ run_id: runId, task_id: taskId, agent_id: taskId, type: "blackboard_write", payload: { key: e.key, version: e.version, kind } });
     out.push(e);
   };
   put("summary", "summary", r.summary);
-  if (r.decisions.length) put("decisions", "decision", r.decisions.map((d) => `- ${d}`).join("\n"));
-  if (r.openQuestions.length) put("open_questions", "open_question", r.openQuestions.map((q) => `- ${q}`).join("\n"));
+  if (r.decisions.length) put("decisions", "decision", fitList(r.decisions.map((d) => `- ${redact(d)}`)));
+  if (r.openQuestions.length) put("open_questions", "open_question", fitList(r.openQuestions.map((q) => `- ${redact(q)}`)));
   if (r.filesChanged.length) {
     const list = r.filesChanged.join("\n");
     if (list.length <= MAX_BB_BODY_CHARS) put("files", "file_change", list, r.filesChanged);

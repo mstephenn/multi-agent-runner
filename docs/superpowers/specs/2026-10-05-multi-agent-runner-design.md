@@ -111,3 +111,12 @@ Safety:
 
 - Exact Claude/Codex flag names and stream formats to be confirmed against installed CLI versions during planning.
 - Default model tiers per runtime to be set from what the user's logins can access.
+
+## Addendum (2026-10-05, user requirement): parallel + fast + correct for coding
+
+Requirement: the runner is mainly for coding; parallel execution and fast development must not cost correctness. Proposed additions (pending user approval of the plan change):
+
+- **Verify gate per task.** After an implementer finishes, the orchestrator itself (no model tokens) runs the repo's configured commands (`verify: ["pnpm typecheck", "pnpm test"]` in `.mar.json`) inside that task's worktree. A failing gate feeds a trimmed failure tail (<= 1500 chars) back to the same task for one fix attempt before the task is marked failed. Reviewer tasks only start after the gate passes.
+- **Conflict-aware planning.** The planner must give each parallel task a disjoint `paths` ownership list (globs); the DAG validator rejects two tasks without a dependency path between them whose `paths` overlap. Tasks that must touch the same files are serialized by `dependsOn`.
+- **Integration step.** After all tasks pass, the orchestrator merges the per-task branches in dependency order into an `mar/<runId>/integration` branch (never main/master/beta), runs the verify gate on the merged result, and reports conflicts or failures in the UI. Landing the integration branch stays a user-confirmed step.
+- **Speed.** Default concurrency raised to the number of independent ready tasks up to a configurable cap (default 4); cheap tiers for gate-fix retries; no extra model calls for gating.

@@ -39,3 +39,37 @@ describe("blackboard", () => {
     expect(reads[0].payload).toMatchObject({ key: "a/summary", version: 2 });
   });
 });
+
+import { clip, fitList } from "../src/blackboard.js";
+describe("hardening", () => {
+  it("redacts secrets in stored bodies", () => {
+    const s = setup();
+    const [sum] = publishResult(s, "r", "a", { summary: "k sk-abc1234567890abcdef DB_PASSWORD=hunter2", filesChanged: [], decisions: ["use sk-abc1234567890abcdef"], openQuestions: [] });
+    expect(sum.body).not.toMatch(/sk-abc|hunter2/);
+    expect(s.latestBb("r", "a/decisions")!.body).not.toMatch(/sk-abc/);
+  });
+  it("clip boundary", () => {
+    expect(clip("x".repeat(1200))).toHaveLength(1200);
+    const c = clip("x".repeat(1201));
+    expect(c).toHaveLength(1199 + 1);
+    expect(c.endsWith("…")).toBe(true);
+  });
+  it("lists drop whole items with explicit marker", () => {
+    const s = setup();
+    const decisions = Array.from({ length: 200 }, (_, i) => `decision number ${i} ${"y".repeat(60)}`);
+    const e = publishResult(s, "r", "a", { summary: "s", filesChanged: [], decisions, openQuestions: [] });
+    const body = e.find((x) => x.key === "a/decisions")!.body;
+    expect(body.length).toBeLessThanOrEqual(1200);
+    const m = body.match(/…\(\+(\d+) more\)$/)!;
+    expect(m).toBeTruthy();
+    const kept = body.split("\n").length - 1;
+    expect(kept + Number(m[1])).toBe(200);
+  });
+  it("exactly-fitting list is unchanged", () => {
+    const items = ["a".repeat(598), "b".repeat(598)]; // 600+1+600 = 1201? "- " added below
+    const fits = [items[0].slice(0, 597), items[1].slice(0, 598)]; // 597+1+598 = 1196
+    expect(fitList(fits)).toBe(fits.join("\n"));
+    const exact = ["a".repeat(600), "b".repeat(599)]; // 600+1+599 = 1200
+    expect(fitList(exact)).toBe(exact.join("\n"));
+  });
+});
