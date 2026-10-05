@@ -1,17 +1,29 @@
-import { memo, useMemo } from "react";
-import { Background, Handle, Position, ReactFlow, type Edge, type Node, type NodeProps } from "@xyflow/react";
+import { memo, useEffect, useMemo, useRef } from "react";
+import { Background, Handle, Position, ReactFlow, useReactFlow, type Edge, type Node, type NodeProps } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import type { Dag } from "@mar/core";
 import type { AgentView, FlowEdge } from "./derive.js";
 import { fmtTokens, STATUS_ICON } from "./fmt.js";
 import { depths, positions } from "./layout.js";
+import { nodeIn, pulseRing, reducedMotion, statusFlash } from "./motion.js";
 
 type NodeData = { agent: AgentView; selected: boolean };
 
 const AgentNode = memo(function AgentNode({ data }: NodeProps<Node<NodeData>>) {
   const a = data.agent;
+  const root = useRef<HTMLDivElement>(null);
+  const ring = useRef<HTMLSpanElement>(null);
+  const prevStatus = useRef(a.status);
+  useEffect(() => nodeIn(root.current), []); // first appearance only
+  useEffect(() => {
+    if (prevStatus.current === a.status) return;
+    prevStatus.current = a.status;
+    return statusFlash(root.current);
+  }, [a.status]);
+  useEffect(() => (a.status === "running" ? pulseRing(ring.current) : undefined), [a.status]);
   return (
-    <div className={`agent status-${a.status}${data.selected ? " selected" : ""}`} data-testid={`node-${a.id}`}>
+    <div ref={root} className={`agent status-${a.status}${data.selected ? " selected" : ""}`} data-testid={`node-${a.id}`}>
+      {a.status === "running" && <span ref={ring} className="pulse-ring" aria-hidden="true" />}
       <Handle type="target" position={Position.Left} isConnectable={false} />
       <button type="button" className="agent-btn" aria-pressed={data.selected} aria-label={`Inspect ${a.id}, ${a.status}`}>
         <span className="agent-id mono">{a.id}</span>
@@ -30,6 +42,24 @@ const AgentNode = memo(function AgentNode({ data }: NodeProps<Node<NodeData>>) {
   );
 });
 const nodeTypes = { agent: AgentNode };
+
+// Re-centres the graph whenever its pane is resized (e.g. the inspector drawer opens or closes), so no node ends up hidden.
+function RefitOnResize() {
+  const { fitView } = useReactFlow();
+  const host = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const pane = host.current?.closest(".graph");
+    if (!pane || typeof ResizeObserver === "undefined") return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const ro = new ResizeObserver(() => {
+      clearTimeout(timer);
+      timer = setTimeout(() => { void fitView({ padding: 0.25, maxZoom: 1, duration: reducedMotion() ? 0 : 300 }); }, 80);
+    });
+    ro.observe(pane);
+    return () => { clearTimeout(timer); ro.disconnect(); };
+  }, [fitView]);
+  return <div ref={host} hidden />;
+}
 
 type Props = { agents: AgentView[]; plan: Dag | null; flow: FlowEdge[]; selected: string | null; onSelect: (id: string) => void };
 
@@ -68,6 +98,7 @@ export function GraphView({ agents, plan, flow, selected, onSelect }: Props) {
         onNodeClick={(_e, n) => onSelect(n.id)} minZoom={0.3}
       >
         <Background gap={20} />
+        <RefitOnResize />
       </ReactFlow>
     </div>
   );

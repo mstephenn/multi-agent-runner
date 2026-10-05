@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react"
 import type { BbEntry, Dag, StoredEvent } from "@mar/core";
 import { deriveActivity, deriveContext, type AgentView } from "./derive.js";
 import { budgetUsage, fmtCost, fmtTokens } from "./fmt.js";
+import { drawerIn, rowsIn } from "./motion.js";
 
 const TABS = ["Context", "Activity", "Output", "Usage"] as const;
 type Tab = (typeof TABS)[number];
@@ -19,8 +20,10 @@ export function Inspector({ agent, events, blackboard, plan, onClose }: Props) {
     e.preventDefault(); setTab(TABS[next]!);
     document.getElementById(`tab-${TABS[next]}`)?.focus();
   };
+  const aside = useRef<HTMLElement>(null);
+  useEffect(() => drawerIn(aside.current), []);
   return (
-    <aside className="inspector" aria-label={`Inspector for ${agent.id}`}>
+    <aside ref={aside} className="inspector" aria-label={`Inspector for ${agent.id}`}>
       <header className="insp-head">
         <div><h2 className="mono">{agent.id}</h2><span className="status-text" data-status={agent.status}>{agent.status}{agent.detail ? `: ${agent.detail}` : ""}</span></div>
         <button type="button" onClick={onClose} aria-label="Close inspector">Close</button>
@@ -63,7 +66,14 @@ function ActivityTab({ id, events }: { id: string; events: StoredEvent[] }) {
   const all = useMemo(() => deriveActivity(events, id), [events, id]);
   const items = all.length > MAX_ACTIVITY ? all.slice(-MAX_ACTIVITY) : all;
   const box = useRef<HTMLOListElement>(null);
-  useEffect(() => { const el = box.current; if (el) el.scrollTop = el.scrollHeight; }, [items.length]);
+  const shown = useRef(items.length); // rows already on screen; only rows appended later animate
+  useEffect(() => {
+    const el = box.current; if (!el) return;
+    const fresh = items.length > shown.current ? Array.from(el.children).slice(shown.current - items.length) : [];
+    shown.current = items.length;
+    el.scrollTop = el.scrollHeight;
+    return rowsIn(fresh);
+  }, [items.length]);
   if (all.length === 0) return <p className="muted">No activity yet.</p>;
   return (
     <>

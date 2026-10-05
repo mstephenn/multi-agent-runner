@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { fmtCost, fmtDuration, fmtTokens } from "./fmt.js";
 import { totals, type AgentView } from "./derive.js";
+import { countTo } from "./motion.js";
 import type { Conn } from "./useRun.js";
 
 export type RunInfo = { id: string; goal: string; repo: string; created: number };
@@ -33,8 +34,21 @@ function StopButton({ runId }: { runId: string }) {
 
 type Props = { runs: RunInfo[]; run: RunInfo | undefined; runId: string; onRun: (id: string) => void; agents: AgentView[]; elapsedMs: number; conn: Conn; partial?: boolean };
 
+// Displays `value`, tweening from the previous value whenever it changes (no tween on first render).
+function useCountUp(value: number): number {
+  const [shown, setShown] = useState(value);
+  const prev = useRef(value);
+  useEffect(() => {
+    const from = prev.current;
+    prev.current = value;
+    return countTo(from, value, setShown);
+  }, [value]);
+  return shown;
+}
+
 export function Header({ runs, run, runId, onRun, agents, elapsedMs, conn, partial = false }: Props) {
   const t = totals(agents);
+  const shownTokens = useCountUp(t.tokens);
   const lead = partial ? "≥ " : "";
   const anyTokens = agents.some((a) => a.tokens !== null);
   return (
@@ -49,7 +63,7 @@ export function Header({ runs, run, runId, onRun, agents, elapsedMs, conn, parti
         {agents.some((a) => a.unsafe) && <span className="badge unsafe" role="status" title="Codex tasks do not map unsafe mode">unsafe mode (Claude workers)</span>}
       </div>
       <dl className="stats">
-        <div><dt>Tokens{partial ? " (partial)" : ""}</dt><dd className="mono" data-testid="total-tokens">{anyTokens ? `${lead}${fmtTokens(t.tokens)}` : "n/a"}</dd></div>
+        <div><dt>Tokens{partial ? " (partial)" : ""}</dt><dd className="mono" data-testid="total-tokens">{anyTokens ? `${lead}${fmtTokens(shownTokens)}` : "n/a"}</dd></div>
         <div><dt>Spend{partial ? " (partial)" : ""}</dt><dd className="mono" data-testid="total-cost">{t.costUsd === null ? fmtCost(t.costUsd) : `${lead}${fmtCost(t.costUsd)}`}</dd></div>
         <div><dt>Elapsed</dt><dd className="mono">{fmtDuration(elapsedMs)}</dd></div>
       </dl>

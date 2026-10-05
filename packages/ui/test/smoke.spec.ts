@@ -118,8 +118,11 @@ test("narrow width (800px): the inspector opens and the page does not scroll hor
   await page.setViewportSize({ width: 800, height: 700 });
   await page.getByTestId("node-impl").click();
   await expect(page.getByRole("tablist")).toBeVisible();
-  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
-  expect(overflow).toBeLessThanOrEqual(1);
+  // checked immediately (while the drawer is still sliding in) and again once it has settled
+  const overflow = () => page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  expect(await overflow()).toBeLessThanOrEqual(1);
+  await page.waitForTimeout(500);
+  expect(await overflow()).toBeLessThanOrEqual(1);
   await page.screenshot({ path: "test-results/narrow-800.png" });
 });
 
@@ -168,4 +171,47 @@ test("a truncated snapshot shows the banner and marks header totals as partial",
 
 test("the page sends no referrer", async ({ page }) => {
   await expect(page.locator('meta[name="referrer"]')).toHaveAttribute("content", "no-referrer");
+});
+
+test("the inspector drawer is wide enough to read activity (>= 520px at 1280 wide)", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.getByTestId("node-impl").click();
+  await expect(page.locator(".inspector")).toBeVisible();
+  await expect.poll(async () => (await page.locator(".inspector").boundingBox())!.width).toBeGreaterThanOrEqual(520);
+  // opening the drawer shrinks the graph pane; every node must still end up inside it
+  await expect.poll(async () => {
+    const pane = (await page.locator(".graph").boundingBox())!;
+    const boxes = await Promise.all(["impl", "rev"].map((id) => page.getByTestId(`node-${id}`).boundingBox()));
+    return boxes.every((b) => b !== null && b.x >= pane.x - 1 && b.x + b.width <= pane.x + pane.width + 1);
+  }, { timeout: 5000 }).toBe(true);
+  await page.screenshot({ path: "test-results/drawer-1280.png" });
+});
+
+test("animations run with motion enabled and leave no inline styles behind", async ({ page }) => {
+  await page.evaluate(() => {
+    (window as unknown as { __motion: boolean }).__motion = false;
+    new MutationObserver((muts) => {
+      for (const m of muts) if (m.target instanceof HTMLElement && m.target.classList.contains("inspector") && /translate/.test(m.target.getAttribute("style") ?? "")) (window as unknown as { __motion: boolean }).__motion = true;
+    }).observe(document.body, { subtree: true, attributes: true, attributeFilter: ["style"] });
+  });
+  await page.getByTestId("node-impl").click();
+  await expect(page.locator(".inspector")).toBeVisible();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __motion: boolean }).__motion)).toBe(true);
+  // once finished, anime's inline transform/opacity are cleared and the drawer is fully opaque
+  await expect.poll(() => page.locator(".inspector").evaluate((el) => (el as HTMLElement).style.transform + (el as HTMLElement).style.opacity)).toBe("");
+  await expect(page.getByTestId("node-impl")).toBeVisible();
+  await expect(page.getByTestId("total-tokens")).toHaveText("1,200"); // the count-up ends on the exact total
+});
+
+test("reduced motion: no animation styles are ever applied", async ({ browser }) => {
+  const ctx = await browser.newContext({ reducedMotion: "reduce" });
+  const page = await ctx.newPage();
+  await page.goto(`${base}/?run=r1`);
+  await expect(page.getByTestId("node-impl")).toBeVisible();
+  await page.getByTestId("node-impl").click();
+  await expect(page.locator(".inspector")).toBeVisible();
+  expect(await page.locator(".inspector").evaluate((el) => (el as HTMLElement).getAttribute("style") ?? "")).not.toMatch(/translate|opacity/);
+  expect(await page.getByTestId("node-impl").evaluate((el) => (el as HTMLElement).getAttribute("style") ?? "")).not.toMatch(/scale|translate|opacity/);
+  await expect(page.getByTestId("total-tokens")).toHaveText("1,200");
+  await ctx.close();
 });

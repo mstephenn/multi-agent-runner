@@ -52,7 +52,7 @@ button.danger.armed { background: var(--err); color: var(--panel); }
 .rt-claude { color: var(--claude); } .rt-codex { color: var(--codex); } .tier { color: var(--muted); }
 .badge.unsafe { color: var(--panel); background: var(--err); border-color: var(--err); font-weight: 700; }
 
-.main { position: relative; display: flex; min-height: 0; }
+.main { position: relative; display: flex; min-height: 0; overflow: hidden; } /* clips the drawer while it slides in */
 .graph { flex: 1; min-width: 0; min-height: 260px; }
 .empty { flex: 1; display: grid; place-items: center; color: var(--muted); }
 .react-flow { --xy-background-color: var(--bg); --xy-edge-stroke: var(--muted); --xy-edge-label-color: var(--ink); --xy-edge-label-background-color: var(--panel); background: var(--bg); }
@@ -76,7 +76,7 @@ button.danger.armed { background: var(--err); color: var(--panel); }
 [data-status="running"] { color: var(--run); } [data-status="done"] { color: var(--ok); }
 [data-status="failed"] { color: var(--err); } [data-status="blocked"] { color: var(--warn); } [data-status="pending"] { color: var(--pend); }
 
-.inspector { width: 440px; max-width: 50%; display: flex; flex-direction: column; background: var(--panel); border-left: 1px solid var(--line); min-height: 0; }
+.inspector { width: clamp(520px, 44vw, 860px); max-width: 65%; display: flex; flex-direction: column; background: var(--panel); border-left: 1px solid var(--line); min-height: 0; }
 .insp-head { display: flex; justify-content: space-between; align-items: flex-start; padding: 10px 12px 0; }
 .insp-head h2 { margin: 0; font-size: 15px; }
 .goal { margin: 6px 12px; color: var(--muted); }
@@ -114,8 +114,13 @@ th { font-size: 11px; color: var(--muted); font-weight: 600; }
 .bar.status-blocked { fill: var(--warn); } .bar.status-pending { fill: var(--pend); }
 
 @media (max-width: 900px) {
-  .inspector { position: absolute; inset: 0 0 0 auto; width: min(92%, 440px); max-width: none; z-index: 10; box-shadow: -8px 0 24px rgba(0, 0, 0, 0.35); }
+  .inspector { position: absolute; inset: 0 0 0 auto; width: min(96%, 640px); max-width: none; z-index: 10; box-shadow: -8px 0 24px rgba(0, 0, 0, 0.35); }
   .stats { gap: 12px; }
   .lanes li { grid-template-columns: 80px 1fr 60px; }
 }
 .over-budget { color: var(--err); font-weight: 700; }
+
+/* Soft ring behind a running node; scaled/faded by anime.js (see motion.ts). Static and hidden when motion is reduced. */
+.agent { position: relative; }
+.pulse-ring { position: absolute; inset: -2px; border-radius: 10px; border: 2px solid var(--accent); pointer-events: none; opacity: 0.35; }
+@media (prefers-reduced-motion: reduce) { .pulse-ring { display: none; } }
