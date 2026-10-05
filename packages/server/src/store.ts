@@ -28,7 +28,7 @@ export class Store {
     const r = this.db.prepare("INSERT INTO events (run_id, task_id, agent_id, ts, type, payload) VALUES (?,?,?,?,?,?)")
       .run(e.run_id, e.task_id, e.agent_id, ts, e.type, JSON.stringify(e.payload));
     const stored = { ...e, id: Number(r.lastInsertRowid), ts };
-    for (const cb of this.subs) cb(stored);
+    for (const cb of this.subs) { try { cb(stored); } catch { /* a failing subscriber must not break the append or starve others */ } }
     return stored;
   }
   listEvents(runId: string, afterId = 0): StoredEvent[] {

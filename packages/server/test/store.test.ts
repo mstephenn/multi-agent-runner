@@ -53,4 +53,12 @@ describe("Store", () => {
     s.savePlan("r1", second);
     expect(s.loadPlan("r1")).toEqual(second);
   });
+  it("isolates subscriber errors from the append", () => {
+    const s = mk(); const seen: number[] = [];
+    s.onEvent(() => { throw new Error("socket closed"); });
+    s.onEvent((e) => seen.push(e.id));
+    const e = s.appendEvent({ run_id: "r1", task_id: null, agent_id: null, type: "task_started", payload: {} });
+    expect(seen).toEqual([e.id]);
+    expect(s.listEvents("r1").map((x) => x.id)).toEqual([e.id]);
+  });
 });
