@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "test": "vitest run",
+    "mar": "node packages/cli/bin/mar.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test:live": "MAR_LIVE=1 vitest run packages/cli/test/live.test.ts"
   },

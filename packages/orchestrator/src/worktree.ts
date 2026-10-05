@@ -24,20 +24,22 @@ export interface Worktrees {
   branchFor(taskId: string): string;
 }
 
+// Keep untracked `.mar/` from making the tree "dirty" without touching the tracked .gitignore.
+export async function ensureMarExcluded(repo: string): Promise<void> {
+  const p = resolve(repo, (await git(["rev-parse", "--git-path", "info/exclude"], repo)).trim());
+  const cur = await readFile(p, "utf8").catch(() => "");
+  if (cur.split(/\r?\n/).some((l) => l.trim() === ".mar/" || l.trim() === ".mar")) return;
+  await mkdir(dirname(p), { recursive: true });
+  await appendFile(p, `${cur === "" || cur.endsWith("\n") ? "" : "\n"}.mar/\n`);
+}
+
 export function createWorktrees(repo: string, runId: string): Worktrees {
   if (!SAFE.test(runId)) throw new Error(`invalid run id: ${runId}`);
   const dirFor = (t: string) => join(repo, ".mar", "worktrees", runId, t);
   const branchFor = (t: string) => `mar/${runId}/${t}`;
   const check = (t: string, what = "task") => { if (!SAFE.test(t)) throw new Error(`invalid ${what} id: ${t}`); };
 
-  // Keep untracked `.mar/` from making the tree "dirty" without touching the tracked .gitignore.
-  async function ensureExcluded() {
-    const p = resolve(repo, (await git(["rev-parse", "--git-path", "info/exclude"], repo)).trim());
-    const cur = await readFile(p, "utf8").catch(() => "");
-    if (cur.split(/\r?\n/).some((l) => l.trim() === ".mar/" || l.trim() === ".mar")) return;
-    await mkdir(dirname(p), { recursive: true });
-    await appendFile(p, `${cur === "" || cur.endsWith("\n") ? "" : "\n"}.mar/\n`);
-  }
+  const ensureExcluded = () => ensureMarExcluded(repo);
 
   async function discard(dir: string) {
     await ok(["worktree", "remove", "--force", dir], repo);
