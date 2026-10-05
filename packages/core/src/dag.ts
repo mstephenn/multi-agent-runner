@@ -4,6 +4,9 @@ import { TaskSpec } from "./schemas.js";
 export type Dag = { tasks: TaskSpec[] };
 export class DagError extends Error {}
 
+// Keys the blackboard publishes for every finished task (see orchestrator publishResult).
+const NEEDS_SUFFIXES = new Set(["summary", "decisions", "open_questions", "files"]);
+
 export function parseDag(input: unknown): Dag {
   const dag = z.object({ tasks: z.array(TaskSpec).min(1) }).parse(input);
   const byId = new Map<string, TaskSpec>();
@@ -31,7 +34,9 @@ export function parseDag(input: unknown): Dag {
   for (const t of dag.tasks) walk(t.id);
   for (const t of dag.tasks)
     for (const key of t.needs) {
-      const owner = key.split("/")[0];
+      const [owner, suffix, ...rest] = key.split("/");
+      if (suffix === undefined || rest.length || !NEEDS_SUFFIXES.has(suffix))
+        throw new DagError(`task ${t.id} needs "${key}": suffix must be one of ${[...NEEDS_SUFFIXES].join("|")}`);
       if (!ancestors.get(t.id)!.has(owner))
         throw new DagError(`task ${t.id} needs ${key} but ${owner} is a non-ancestor`);
     }

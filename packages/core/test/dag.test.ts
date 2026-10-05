@@ -26,4 +26,12 @@ describe("parseDag", () => {
   it("rejects unknown runtime", () => {
     expect(() => parseDag({ tasks: [t("a", { runtime: "gpt" })] })).toThrow();
   });
+  it("rejects needs keys with an unknown suffix, naming task and key", () => {
+    expect(() => parseDag({ tasks: [t("a"), t("b", { dependsOn: ["a"], needs: ["a/diff"] })] })).toThrow(/task b.*a\/diff/);
+    expect(() => parseDag({ tasks: [t("a"), t("b", { dependsOn: ["a"], needs: ["a"] })] })).toThrow(/task b.*"a"/);
+  });
+  it("accepts every known needs suffix", () => {
+    const needs = ["summary", "decisions", "open_questions", "files"].map((s) => `a/${s}`);
+    expect(parseDag({ tasks: [t("a"), t("b", { dependsOn: ["a"], needs })] }).tasks[1].needs).toEqual(needs);
+  });
 });
