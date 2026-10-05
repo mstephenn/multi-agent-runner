@@ -12,6 +12,7 @@ export function buildPrompt(task: TaskSpec, slices: Slice[]): string {
 ${task.goal}
 ${ctx}
 ## Output contract
-When finished, reply with ONLY a JSON object: {"summary": string (<=900 chars), "filesChanged": string[], "decisions": string[], "openQuestions": string[]}.
-Keep it terse; do not restate the task or paste code.`;
+When finished, reply with ONLY a JSON object: {"summary": string (<=900 chars), "report"?: string, "filesChanged": string[], "decisions": string[], "openQuestions": string[]}.
+Keep summary and the lists terse; do not restate the task or paste code.
+If the task asks you to explain, investigate, analyse or answer a question, put your COMPLETE answer in \`report\` as markdown (headings, bullet lists, file:line references; no size limit within reason) and keep \`summary\` to a short abstract. Do not put code diffs or file contents in \`report\`.`;
 }

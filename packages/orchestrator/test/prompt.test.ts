@@ -13,6 +13,13 @@ describe("buildPrompt", () => {
     expect(p).toContain("Review the diff");
     expect(p).toMatch(/summary.*filesChanged.*decisions.*openQuestions/s);
   });
+  it("documents the optional report field and when to use it", () => {
+    const p = buildPrompt(t, []);
+    expect(p).toContain('"report"?: string');
+    expect(p).toContain("COMPLETE answer in `report` as markdown");
+    expect(p).toContain("Do not put code diffs or file contents in `report`");
+    expect(p).toContain("<=900 chars");
+  });
   it("keeps goals with quotes/unicode/newlines verbatim", () => {
     const g = 'Fix "naïve" bug\nin `x y/z`';
     expect(buildPrompt({ ...t, goal: g }, [])).toContain(g);

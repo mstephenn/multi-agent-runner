@@ -167,8 +167,16 @@ async function runDagInner(d: RunDeps): Promise<Record<string, Outcome>> {
     for (let n = 1; n <= max; n++) {
       try {
         const res = await attemptOnce(task, extra, budget);
+        // Full report goes to its own table (redacted), never the blackboard. A failed save must not fail a good task.
+        let reportSaved = false;
+        const report = res.report ? redact(res.report) : "";
+        const reportChars = report.length;
+        if (report) {
+          try { store.saveReport(runId, task.id, report); reportSaved = true; }
+          catch { /* report dropped; recorded as reportSaved:false below */ }
+        }
         publishResult(store, runId, task.id, res);
-        emit(task, "task_finished", { tokens: budget.used });
+        emit(task, "task_finished", { tokens: budget.used, report_chars: reportChars, reportSaved });
         store.setTaskStatus(runId, task.id, "done");
         outcome.set(task.id, "done");
         return;

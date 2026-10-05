@@ -21,6 +21,7 @@ export type Role = z.infer<typeof Role>;
 
 export const TaskResultSchema = z.object({
   summary: z.string().min(1),
+  report: z.string().max(100_000).optional(), // long-form markdown answer; stored outside the blackboard
   filesChanged: z.array(z.string()).default([]),
   decisions: z.array(z.string()).default([]),
   openQuestions: z.array(z.string()).default([]),

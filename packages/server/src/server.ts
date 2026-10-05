@@ -86,7 +86,8 @@ export async function startServer(store: Store, opts: { port: number; staticDir?
     const rawLimit = new URLSearchParams(query).get("limit") ?? "";
     const limit = /^\d{1,9}$/.test(rawLimit) && Number(rawLimit) > 0 ? Math.min(Number(rawLimit), MAX_LIMIT) : DEFAULT_LIMIT;
     const { events, truncated } = store.recentEvents(id, limit);
-    return json(res, 200, { events, truncated, blackboard: store.listBb(id), tasks: store.taskStatuses(id), plan: store.loadPlan(id) ?? null });
+    return json(res, 200, { events, truncated, blackboard: store.listBb(id), tasks: store.taskStatuses(id), plan: store.loadPlan(id) ?? null,
+      reports: store.listReports(id).map(({ task_id, body }) => ({ task_id, body })) });
   };
 
   const http = createServer((req, res) => {

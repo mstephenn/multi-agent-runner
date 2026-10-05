@@ -9,7 +9,7 @@ import { Store } from "../src/store.js";
 import { startServer } from "../src/server.js";
 
 type RunSummary = { id: string };
-type Snapshot = { events: { id: number }[]; blackboard: unknown[]; tasks: unknown[]; plan: unknown; truncated?: boolean };
+type Snapshot = { events: { id: number }[]; blackboard: unknown[]; tasks: unknown[]; plan: unknown; reports?: { task_id: string; body: string }[]; truncated?: boolean };
 const asJson = <T>(res: Response) => res.json() as Promise<T>;
 
 let srv: Awaited<ReturnType<typeof startServer>> | undefined;
@@ -78,6 +78,9 @@ describe("server", () => {
     expect(snap.blackboard).toEqual([]);
     expect(snap.tasks).toEqual([]);
     expect(snap.plan).toBeNull();
+    expect(snap.reports).toEqual([]);
+    s.saveReport("r", "a", "FULL REPORT");
+    expect((await asJson<Snapshot>(await fetch(`http://127.0.0.1:${srv.port}/api/runs/r`))).reports).toEqual([{ task_id: "a", body: "FULL REPORT" }]);
     s.savePlan("r", { tasks: [] } as any);
     expect((await asJson<Snapshot>(await fetch(`http://127.0.0.1:${srv.port}/api/runs/r`))).plan).toEqual({ tasks: [] });
   });

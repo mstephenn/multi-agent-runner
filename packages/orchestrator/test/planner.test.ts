@@ -193,4 +193,9 @@ describe("repoMap errors and prompt wording", () => {
     expect(p).toContain('ONE "researcher" task');
     expect(p).toContain('separate "synthesize" task');
   });
+  it("asks for a complete, well-structured researcher answer with file references", async () => {
+    const f = fakeAdapter(() => [{ type: "result", text: JSON.stringify(valid) }]);
+    await planGoal({ goal: "how does auth work?", repoMap: "a.ts", adapter: f.adapter, model: null, cwd: "/r" });
+    expect(f.calls[0]!.prompt).toContain("complete, well-structured answer with file references");
+  });
 });

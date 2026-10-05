@@ -1,6 +1,7 @@
 import Database from "better-sqlite3";
 import { MAX_BB_BODY_CHARS, type BbEntry, type BbWrite, type Dag, type NewEvent, type StoredEvent } from "@mar/core";
 
+const MAX_REPORT_CHARS = 100_000;
 type EventRow = Omit<StoredEvent, "payload"> & { payload: string };
 type BbRow = Omit<BbEntry, "refs"> & { refs: string };
 const eventFromRow = (r: EventRow): StoredEvent => {
@@ -24,6 +25,7 @@ export class Store {
       CREATE UNIQUE INDEX IF NOT EXISTS bb_run_key_version ON bb_entries(run_id, key, version);
       CREATE TABLE IF NOT EXISTS task_status (run_id TEXT, task_id TEXT, status TEXT, detail TEXT, PRIMARY KEY (run_id, task_id));
       CREATE TABLE IF NOT EXISTS plans (run_id TEXT PRIMARY KEY, dag TEXT);
+      CREATE TABLE IF NOT EXISTS reports (run_id TEXT, task_id TEXT, body TEXT NOT NULL, ts INTEGER, PRIMARY KEY (run_id, task_id));
     `);
   }
 
@@ -93,6 +95,18 @@ export class Store {
   }
   taskStatuses(runId: string) {
     return this.db.prepare("SELECT task_id, status, detail FROM task_status WHERE run_id=?").all(runId) as { task_id: string; status: string; detail: string | null }[];
+  }
+
+  /** Long-form task answer, kept outside the blackboard. Upserts (a retry overwrites); capped defensively with a visible marker. */
+  saveReport(runId: string, taskId: string, body: string): void {
+    const MARK = "…[truncated]";
+    const text = body.length > MAX_REPORT_CHARS ? body.slice(0, MAX_REPORT_CHARS - MARK.length) + MARK : body;
+    this.db.prepare("INSERT INTO reports (run_id, task_id, body, ts) VALUES (?,?,?,?) ON CONFLICT(run_id,task_id) DO UPDATE SET body=excluded.body, ts=excluded.ts")
+      .run(runId, taskId, text, Date.now());
+  }
+  /** Reports of a run in first-insertion order. */
+  listReports(runId: string): { task_id: string; body: string; ts: number }[] {
+    return this.db.prepare("SELECT task_id, body, ts FROM reports WHERE run_id=? ORDER BY rowid").all(runId) as { task_id: string; body: string; ts: number }[];
   }
 
   savePlan(runId: string, dag: Dag): void {

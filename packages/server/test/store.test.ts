@@ -159,3 +159,27 @@ describe("Store", () => {
   });
 });
 const mk2 = (f: string) => { const s = new Store(f); s.createRun("r1", "goal", "/repo"); return s; };
+
+describe("Store reports", () => {
+  it("saves, upserts and lists reports in insertion order, isolated per run", () => {
+    const s = mk(); s.createRun("r2", "g", "/repo");
+    s.saveReport("r1", "b", "B1");
+    s.saveReport("r1", "a", "A1");
+    s.saveReport("r2", "a", "OTHER");
+    s.saveReport("r1", "b", "B2"); // upsert keeps position
+    const l = s.listReports("r1");
+    expect(l.map((r) => [r.task_id, r.body])).toEqual([["b", "B2"], ["a", "A1"]]);
+    expect(typeof l[0]!.ts).toBe("number");
+    expect(s.listReports("r2").map((r) => r.body)).toEqual(["OTHER"]);
+    expect(s.listReports("none")).toEqual([]);
+  });
+  it("stores long reports in full and truncates beyond 100k with a visible marker", () => {
+    const s = mk();
+    s.saveReport("r1", "a", "y".repeat(100_000));
+    expect(s.listReports("r1")[0]!.body).toHaveLength(100_000);
+    s.saveReport("r1", "b", "y".repeat(100_001));
+    const b = s.listReports("r1")[1]!.body;
+    expect(b.length).toBeLessThanOrEqual(100_000);
+    expect(b.endsWith("…[truncated]")).toBe(true);
+  });
+});

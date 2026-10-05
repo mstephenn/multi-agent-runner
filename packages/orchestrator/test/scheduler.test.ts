@@ -471,3 +471,42 @@ describe("runDag shared read-only worktree", () => {
   });
 });
 
+
+describe("runDag reports", () => {
+  const withReport = (report?: string, summary = "short") => [
+    { type: "usage", input: 1, output: 1, cached: null, costUsd: null },
+    { type: "result", text: JSON.stringify({ summary, ...(report !== undefined ? { report } : {}), filesChanged: [], decisions: [], openQuestions: [] }) },
+  ];
+  it("stores the redacted report outside the blackboard and reports its size", async () => {
+    const report = "# Answer\n" + "long text ".repeat(300) + "\nDB_PASSWORD=hunter2\n";
+    const { store, deps } = harness([T("a")], () => withReport(report));
+    expect(await runDag(deps)).toEqual({ a: "done" });
+    const [r] = store.listReports("r");
+    expect(r!.task_id).toBe("a");
+    expect(r!.body).not.toContain("hunter2");
+    expect(r!.body.length).toBeGreaterThan(1200);
+    expect(store.listBb("r").some((e) => e.key.includes("report") || e.body.includes("long text"))).toBe(false);
+    const fin = store.listEvents("r").find((e) => e.type === "task_finished")!;
+    expect(fin.payload).toMatchObject({ report_chars: r!.body.length, reportSaved: true });
+  });
+  it("stores nothing when the task has no report", async () => {
+    const { store, deps } = harness([T("a")], () => withReport(undefined));
+    await runDag(deps);
+    expect(store.listReports("r")).toEqual([]);
+    const fin = store.listEvents("r").find((e) => e.type === "task_finished")!;
+    expect(fin.payload).toMatchObject({ report_chars: 0, reportSaved: false });
+  });
+  it("does not fail an otherwise good task when saveReport throws", async () => {
+    const { store, deps } = harness([T("a")], () => withReport("some report"));
+    vi.spyOn(store, "saveReport").mockImplementation(() => { throw new Error("disk full"); });
+    expect(await runDag(deps)).toEqual({ a: "done" });
+    const fin = store.listEvents("r").find((e) => e.type === "task_finished")!;
+    expect(fin.payload).toMatchObject({ reportSaved: false, report_chars: 11 });
+  });
+  it("a retry attempt overwrites the earlier attempt's report", async () => {
+    const { store, deps } = harness([T("a")], (_i: any, n: number) => withReport(`report ${n}`), { maxAttempts: 2 });
+    vi.spyOn(store, "writeBb").mockImplementationOnce(() => { throw new Error("bb down"); });
+    expect(await runDag(deps)).toEqual({ a: "done" });
+    expect(store.listReports("r").map((r) => r.body)).toEqual(["report 2"]);
+  });
+});

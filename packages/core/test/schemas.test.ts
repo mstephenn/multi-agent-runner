@@ -14,4 +14,9 @@ describe("core", () => {
     expect(r.filesChanged).toEqual([]);
     expect(() => TaskResultSchema.parse({})).toThrow();
   });
+  it("TaskResult accepts an optional long report up to 100k chars", () => {
+    expect(TaskResultSchema.parse({ summary: "s" }).report).toBeUndefined();
+    expect(TaskResultSchema.parse({ summary: "s", report: "x".repeat(100_000) }).report).toHaveLength(100_000);
+    expect(() => TaskResultSchema.parse({ summary: "s", report: "x".repeat(100_001) })).toThrow();
+  });
 });
