@@ -263,3 +263,19 @@ describe("worktrees", () => {
     });
   });
 });
+
+describe("run folder tidy-up", () => {
+  it("removes the empty per-run folder after the last worktree is gone, but not while another remains", async () => {
+    const { existsSync } = await import("node:fs");
+    const w = createWorktrees(repo, "tidy"); // `repo` is the initialised temp repo from beforeEach
+    const runDir = join(repo, ".mar", "worktrees", "tidy");
+    await w.shared.acquire();
+    const a = await w.create("a");
+    await w.shared.release();
+    expect(existsSync(runDir)).toBe(true);   // task "a" still has its worktree
+    await w.remove("a");
+    expect(existsSync(a)).toBe(false);
+    expect(existsSync(runDir)).toBe(false);  // last one gone -> folder tidied
+    await w.shared.release();                // idempotent, still fine
+  }, 60000);
+});

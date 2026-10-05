@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
-import { appendFile, mkdir, readFile, rm } from "node:fs/promises";
+import { appendFile, mkdir, readFile, rm, rmdir } from "node:fs/promises";
 
 const SAFE = /^[A-Za-z0-9_-]+$/;
 const IDENT = ["-c", "user.name=mar", "-c", "user.email=mar@localhost"];
@@ -103,6 +103,9 @@ export function createWorktrees(repoPath: string, runId: string): Worktrees {
 
   // Dot-prefixed: can never match a task id (SAFE has no "."), so it cannot collide with a task worktree.
   const sharedDir = join(root, ".mar", "worktrees", runId, ".shared");
+  // rmdir only succeeds on an empty directory, so this tidies the run folder once its last worktree is gone and is a
+  // harmless no-op (ENOTEMPTY/ENOENT) while others are still in use.
+  const pruneRunDir = () => rmdir(join(root, ".mar", "worktrees", runId)).catch(() => {});
   async function createShared(): Promise<string> {
     await ensureExcluded();
     await ok(["worktree", "prune"], root);
@@ -135,6 +138,7 @@ export function createWorktrees(repoPath: string, runId: string): Worktrees {
         await pending?.catch(() => {});
         await ok(["worktree", "remove", "--force", "--", sharedDir], root);
         await rm(sharedDir, { recursive: true, force: true });
+        await pruneRunDir();
       },
     },
     create(taskId: string, dependsOn: string[] = []) {
@@ -154,6 +158,7 @@ export function createWorktrees(repoPath: string, runId: string): Worktrees {
       check(taskId);
       await ok(["worktree", "remove", "--force", "--", dirFor(taskId)], root);
       await rm(dirFor(taskId), { recursive: true, force: true });
+      await pruneRunDir();
     },
   };
 }
