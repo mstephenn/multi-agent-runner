@@ -180,6 +180,6 @@ describe("repoMap errors and prompt wording", () => {
     const huge = "z".repeat(5000);
     const f = fakeAdapter(() => [{ type: "result", text: JSON.stringify({ tasks: [{ id: "a", role: huge, runtime: "claude", tier: "mid", goal: "g" }] }) }]);
     await expect(planGoal({ goal: "g", repoMap: "a.ts", adapter: f.adapter, model: null, cwd: "/r" }))
-      .rejects.toSatisfy((e: Error) => e.message.length <= 400);
+      .rejects.toSatisfy((e: unknown) => e instanceof Error && e.message.length <= 400);
   });
 });
