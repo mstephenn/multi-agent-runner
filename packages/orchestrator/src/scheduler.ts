@@ -1,4 +1,4 @@
-import { TaskResultSchema, estimateTokens, type Dag, type Role, type Runtime, type TaskResult, type TaskSpec, type Tier } from "@mar/core";
+import { TaskResultSchema, WRITER_ROLES, estimateTokens, matchesAnyGlob, type Dag, type EventType, type Role, type Runtime, type TaskResult, type TaskSpec, type Tier } from "@mar/core";
 import type { Adapter } from "@mar/adapters";
 import type { Store } from "../../server/src/store.js";
 import { BudgetTracker } from "./budget.js";
@@ -6,14 +6,21 @@ import { buildPrompt } from "./prompt.js";
 import { injectSlices, publishResult } from "./blackboard.js";
 import { redact } from "./redact.js";
 import { usesSharedWorktree } from "./readonly.js";
+import { runVerify } from "./verify.js";
 
 export interface RunDeps {
   store: Store; runId: string; dag: Dag; repo: string;
   adapters: Record<Runtime, Adapter>;
   worktrees: { create(taskId: string, dependsOn?: string[]): Promise<string>; commit(taskId: string, message: string): Promise<void>; remove(taskId: string): Promise<void>;
+    // Optional: writer-task helpers. Absent = no dependency links / no ownership enforcement.
+    link?(taskId: string): Promise<string[]>;                              // symlink configured dependency paths (node_modules...)
+    head?(taskId: string): Promise<string>;                                // HEAD sha of the task's worktree
+    changedFiles?(taskId: string, sinceSha: string): Promise<string[]>;    // files changed on the task branch since a sha
     // Optional: one detached worktree for read-only tasks (no branch, no commits). Absent = a worktree per task.
     shared?: { acquire(): Promise<string>; release(): Promise<void> } };
   modelFor(runtime: Runtime, tier: Tier): string | null;
+  /** Try the other CLI when the selected runtime fails, unless a USD cap is configured. Defaults to false for library callers. */
+  fallbackRuntime?: boolean;
   toolsFor(role: Role): string[];
   concurrency: number; defaultBudgetTokens?: number; unsafe?: boolean;
   maxAttempts?: number;                     // attempts per worker task; default 1 (no retry)
@@ -25,9 +32,18 @@ export interface RunDeps {
   // Forwarded to the adapter as `maxBudgetUsd`. Claude only reports usage at the end of a run, so the token budget
   // (`budgetTokens`) is enforced post-hoc; this USD cap is the only real mid-run guard.
   maxBudgetUsdPerTask?: number;
+  // Verify gate: writer tasks (implementer/tester) must pass these commands in their own worktree before dependents see
+  // their output. Empty/absent = gate off. `runVerify` is injectable for tests.
+  verify?: { commands: string[]; timeoutMs: number };
+  runVerify?: typeof runVerify;
+  // What to do when a writer changed files outside its declared `paths`: "warn" (default) only emits an event.
+  ownership?: "warn" | "enforce";
 }
 type Outcome = "done" | "failed" | "blocked";
-class TaskFailure extends Error { constructor(m: string, public retryable = true) { super(m); } }
+// `note` replaces the generic "Previous attempt failed" text in the retry prompt.
+class TaskFailure extends Error { constructor(m: string, public retryable = true, public note?: string) { super(m); } }
+const VERIFY_TAIL_CHARS = 1500;
+const MAX_VIOLATION_FILES = 50;
 
 const TIMEOUT = Symbol("timeout");
 const stripFence = (s: string) => s.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
@@ -84,7 +100,7 @@ async function runDagInner(d: RunDeps): Promise<Record<string, Outcome>> {
   bestEffort(() => { for (const s of store.taskStatuses(runId)) if (s.status === "done") outcome.set(s.task_id, "done"); });
   const byId = new Map(d.dag.tasks.map((t) => [t.id, t]));
   const running = new Map<string, Promise<void>>();
-  const emit = (task: TaskSpec, type: any, payload: Record<string, unknown> = {}) =>
+  const emit = (task: TaskSpec, type: EventType, payload: Record<string, unknown> = {}) =>
     store.appendEvent({ run_id: runId, task_id: task.id, agent_id: task.id, type, payload });
 
   // Read-only tasks (see usesSharedWorktree: no writer role, no writer ancestor, no Edit/Write/Bash tools) run
@@ -97,11 +113,42 @@ async function runDagInner(d: RunDeps): Promise<Record<string, Outcome>> {
     return sharedP;
   };
 
+  const startShaOf = new Map<string, string>();
+  // Post-hoc path ownership: files this writer changed (committed) outside every declared glob.
+  async function checkOwnership(task: TaskSpec, startSha: string | undefined) {
+    if (task.paths.length === 0 || startSha === undefined || !d.worktrees.changedFiles) return;
+    const enforce = d.ownership === "enforce";
+    let outside: string[];
+    try { outside = (await d.worktrees.changedFiles(task.id, startSha)).filter((f) => !matchesAnyGlob(f, task.paths)); }
+    catch (e) { if (enforce) throw e; return; } // advisory mode never fails a task over bookkeeping
+    if (outside.length === 0) return;
+    emit(task, "ownership_violation", { files: outside.slice(0, MAX_VIOLATION_FILES).map(redact), count: outside.length, paths: task.paths, enforced: enforce });
+    if (enforce)
+      throw new TaskFailure("failed:ownership", true,
+        `\n\nYou changed files outside your declared paths (${task.paths.join(", ")}): ${outside.slice(0, 20).map(redact).join(", ")}. Only change files matching your paths.`);
+  }
+
+  async function runGate(task: TaskSpec, cwd: string, signal: AbortSignal) {
+    const v = d.verify;
+    if (!v || v.commands.length === 0) return;
+    emit(task, "verify_started", { commands: v.commands.map(redact) });
+    let r: Awaited<ReturnType<typeof runVerify>>;
+    try { r = await (d.runVerify ?? runVerify)(cwd, v.commands, { signal, timeoutMs: v.timeoutMs }); }
+    catch (e) { r = { ok: false, failed: { command: v.commands[0], code: null, timedOut: false }, tail: redact(e instanceof Error ? e.message : String(e)), ms: 0 }; }
+    if (r.ok) { emit(task, "verify_passed", { ms: r.ms }); return; }
+    const command = redact(r.failed?.command ?? v.commands[0]);
+    const tail = redact(r.tail).slice(-VERIFY_TAIL_CHARS);
+    const timedOut = r.failed?.timedOut ?? false;
+    emit(task, "verify_failed", { command, code: r.failed?.code ?? null, timedOut, tail, ms: r.ms });
+    // Not retried on timeout (it would just time out again).
+    throw new TaskFailure("failed:verify", !timedOut, `\n\nVerification failed (${command}):\n${tail}`);
+  }
+
   async function attemptOnce(task: TaskSpec, extra: string, budget: BudgetTracker): Promise<TaskResult> {
     const { slices, missing } = injectSlices(store, runId, task);
     if (missing.length) throw new TaskFailure(`missing:${missing[0]}`, false);
     const prompt = buildPrompt(task, slices) + extra;
-    emit(task, "prompt_sent", { prompt: redact(prompt), keys: slices.map((s) => s.key), tokens: estimateTokens(prompt) });
+    emit(task, "prompt_sent", { prompt: redact(prompt), keys: slices.map((s) => s.key), tokens: estimateTokens(prompt), runtime: task.runtime });
     const shared = useShared(task);
     const cwd = shared ? await acquireShared() : await d.worktrees.create(task.id, task.dependsOn);
     const ac = new AbortController();
@@ -110,25 +157,47 @@ async function runDagInner(d: RunDeps): Promise<Record<string, Outcome>> {
     if (d.signal?.aborted) ac.abort();
     let timer: ReturnType<typeof setTimeout> | undefined;
     let committed = false;
+    const gated = !shared && WRITER_ROLES.has(task.role);
     try {
-      const consume = async (): Promise<string | undefined> => {
+      // Writers get the configured dependency links, and remember where their branch started (for ownership checks).
+      let startSha: string | undefined;
+      if (gated) {
+        await d.worktrees.link?.(task.id).catch(() => {}); // best effort: the task may still work without links
+        // Kept across retries: a retry resumes the same branch, so earlier out-of-bounds commits must stay visible.
+        startSha = startShaOf.get(task.id) ?? await d.worktrees.head?.(task.id).catch(() => undefined);
+        if (startSha !== undefined) startShaOf.set(task.id, startSha);
+      }
+      const consume = async (runtime: Runtime): Promise<string | undefined> => {
         let raw: string | undefined;
-        for await (const ev of d.adapters[task.runtime].run({
-          taskId: task.id, prompt, cwd, model: d.modelFor(task.runtime, task.tier),
+        let overBudget = false;
+        for await (const ev of d.adapters[runtime].run({
+          taskId: task.id, prompt, cwd, model: d.modelFor(runtime, task.tier),
           allowedTools: d.toolsFor(task.role), signal: ac.signal, unsafe: d.unsafe,
           maxBudgetUsd: d.maxBudgetUsdPerTask,
         })) {
+          // A final usage event can arrive adjacent to a completed result. Keep that result, but stop
+          // if the agent tries to do any further work after the cap was crossed.
+          if (overBudget && ev.type !== "result") { ac.abort(); throw new TaskFailure("failed:budget", false); }
           if (ev.type === "usage") { budget.add(ev); emit(task, "usage", { ...ev }); }
           else if (ev.type === "assistant_text") emit(task, "assistant_text", { text: redact(ev.text) });
           else if (ev.type === "tool_call") emit(task, "tool_call", { name: redact(ev.name), input: boundedToolInput(ev.input) });
           else if (ev.type === "tool_result") emit(task, "tool_result", { name: redact(ev.name), output: redact(ev.output).slice(0, 2000), isError: ev.isError ?? false });
           else raw = ev.text;
-          // Budget is a hard cap: even if the final `result` event arrives after the cap was crossed, the task fails.
-          if (budget.exceeded) { ac.abort(); throw new TaskFailure("failed:budget", false); }
+          if (budget.exceeded) overBudget = true;
         }
+        if (overBudget && raw === undefined) throw new TaskFailure("failed:budget", false);
         return raw;
       };
-      const work = consume();
+      const work = (async () => {
+        try { return await consume(task.runtime); }
+        catch (e) {
+          // Codex cannot enforce maxBudgetUsd; switching CLIs would bypass a configured spend cap.
+          if (!d.fallbackRuntime || d.maxBudgetUsdPerTask !== undefined || budget.exceeded || ac.signal.aborted || d.signal?.aborted) throw e;
+          const alternate: Runtime = task.runtime === "claude" ? "codex" : "claude";
+          emit(task, "runtime_fallback", { from: task.runtime, to: alternate, reason: redact(e instanceof Error ? e.message : String(e)).slice(0, 500) });
+          return consume(alternate);
+        }
+      })();
       let raw: string | undefined;
       if (d.taskTimeoutMs === undefined) raw = await work;
       else {
@@ -143,6 +212,10 @@ async function runDagInner(d: RunDeps): Promise<Record<string, Outcome>> {
       const res = await parseResult(raw, d.repairResult);
       if (!shared) await d.worktrees.commit(task.id, `mar(${task.id}): ${task.goal.split("\n")[0].slice(0, 60)}`);
       committed = true;
+      if (gated) {
+        await checkOwnership(task, startSha);
+        await runGate(task, cwd, ac.signal); // before publishResult: dependents never see unverified output
+      }
       return res;
     } catch (e) {
       // Keep partial work on the per-task branch: the worktree is removed below. Best effort: a failing commit
@@ -189,7 +262,7 @@ async function runDagInner(d: RunDeps): Promise<Record<string, Outcome>> {
           bestEffort(() => store.setTaskStatus(runId, task.id, "failed", msg));
           return;
         }
-        extra = `\n\nPrevious attempt failed: ${msg}`;
+        extra = e instanceof TaskFailure && e.note ? e.note : `\n\nPrevious attempt failed: ${msg}`;
       }
     }
   }

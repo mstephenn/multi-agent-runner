@@ -6,3 +6,5 @@ export * from "./scheduler.js";
 export * from "./worktree.js";
 export * from "./planner.js";
 export * from "./readonly.js";
+export * from "./verify.js";
+export * from "./integrate.js";

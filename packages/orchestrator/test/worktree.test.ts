@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeAll, beforeEach, afterAll, afterEach, vi } from "vitest";
-import { mkdtempSync, writeFileSync, existsSync, rmSync, mkdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, existsSync, rmSync, mkdirSync, readFileSync, lstatSync, readlinkSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
-import { createWorktrees } from "../src/worktree.js";
+import { createWorktrees, linkPathProblem } from "../src/worktree.js";
 
 vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
 // Tests must not depend on the developer's global/system git config.
@@ -278,4 +278,118 @@ describe("run folder tidy-up", () => {
     expect(existsSync(runDir)).toBe(false);  // last one gone -> folder tidied
     await w.shared.release();                // idempotent, still fine
   }, 60000);
+});
+
+describe("head / changedFiles", () => {
+  it("lists files changed on the task branch since the start sha (adds, edits, deletes, renames)", async () => {
+    const w = createWorktrees(repo, "cf");
+    const a = await w.create("a");
+    const start = await w.head("a");
+    expect(start).toMatch(/^[0-9a-f]{40}$/);
+    expect(await w.changedFiles("a", start)).toEqual([]);
+    mkdirSync(join(a, "src"));
+    writeFileSync(join(a, "src", "new.ts"), "x");
+    writeFileSync(join(a, "a.txt"), "changed");
+    await w.commit("a", "mar(a): work");
+    expect((await w.changedFiles("a", start)).sort()).toEqual(["a.txt", "src/new.ts"]);
+    execFileSync("git", ["mv", "a.txt", "moved.txt"], { cwd: a });
+    await w.commit("a", "mar(a): mv");
+    expect((await w.changedFiles("a", start)).sort()).toEqual(["a.txt", "moved.txt", "src/new.ts"].sort());
+  });
+  it("a start sha taken after merging dependencies excludes the dependency's files", async () => {
+    const w = createWorktrees(repo, "cf");
+    const a = await w.create("a"); writeFileSync(join(a, "from-a.txt"), "A"); await w.commit("a", "c"); await w.remove("a");
+    const b = await w.create("b", ["a"]);
+    const start = await w.head("b");
+    writeFileSync(join(b, "b.txt"), "B"); await w.commit("b", "c");
+    expect(await w.changedFiles("b", start)).toEqual(["b.txt"]);
+  });
+  it("validates ids and shas", async () => {
+    const w = createWorktrees(repo, "cf");
+    await w.create("a");
+    await expect(w.head("../x")).rejects.toThrow(/invalid/i);
+    await expect(w.changedFiles("../x", "abc1234")).rejects.toThrow(/invalid/i);
+    await expect(w.changedFiles("a", "--output=/tmp/x")).rejects.toThrow(/invalid/i);
+  });
+});
+
+describe("linked dependency paths", () => {
+  const sh = (cwd: string, ...a: string[]) => execFileSync("git", a, { cwd }).toString();
+  function depsRepo() {
+    mkdirSync(join(repo, "node_modules", "dep"), { recursive: true });
+    writeFileSync(join(repo, "node_modules", "dep", "index.js"), "module.exports=1");
+    for (const p of ["a", "b"]) {
+      mkdirSync(join(repo, "packages", p), { recursive: true });
+      writeFileSync(join(repo, "packages", p, "package.json"), "{}");
+    }
+    mkdirSync(join(repo, "packages", "a", "node_modules"));
+    writeFileSync(join(repo, "packages", "a", "node_modules", "x.js"), "1");
+    sh(repo, "add", "-f", "packages"); sh(repo, "commit", "-qm", "pkgs");
+  }
+  it("symlinks existing paths (absolute target) into a created worktree and never commits them", async () => {
+    depsRepo();
+    // trailing-slash rule: does NOT ignore a symlink named node_modules, so only our exclusion keeps it out
+    writeFileSync(join(repo, ".gitignore"), ".env\n.mar/\nnode_modules/\n"); sh(repo, "add", ".gitignore"); sh(repo, "commit", "-qm", "ign");
+    const w = createWorktrees(repo, "lk", { linkPaths: ["node_modules", "packages/*/node_modules", "missing"] });
+    const a = await w.create("a");
+    expect(await w.link("a")).toEqual(["node_modules"]); // packages/a/node_modules is tracked: skipped
+    expect(lstatSync(join(a, "node_modules")).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(join(a, "node_modules"))).toBe(join(repo, "node_modules"));
+    expect(readFileSync(join(a, "node_modules", "dep", "index.js"), "utf8")).toBe("module.exports=1");
+    writeFileSync(join(a, "real.txt"), "r");
+    await w.commit("a", "mar(a): real");
+    const tree = sh(repo, "ls-tree", "-r", "--name-only", "mar/lk/a");
+    expect(tree).toContain("real.txt");
+    expect(tree).not.toMatch(/^node_modules/m);
+    await w.remove("a"); // removing the worktree must not delete the main repo's deps
+    expect(existsSync(join(repo, "node_modules", "dep", "index.js"))).toBe(true);
+  });
+  it("expands single-segment globs against the main repo and links only paths that exist there", async () => {
+    mkdirSync(join(repo, "pkgs", "a", "node_modules"), { recursive: true });
+    mkdirSync(join(repo, "pkgs", "b"), { recursive: true });
+    writeFileSync(join(repo, "pkgs", "a", "node_modules", "x"), "1");
+    writeFileSync(join(repo, "pkgs", "a", "keep"), "k"); writeFileSync(join(repo, "pkgs", "b", "keep"), "k");
+    sh(repo, "add", "pkgs/a/keep", "pkgs/b/keep"); sh(repo, "commit", "-qm", "pk");
+    const w = createWorktrees(repo, "lk", { linkPaths: ["pkgs/*/node_modules"] });
+    const a = await w.create("a");
+    expect(await w.link("a")).toEqual(["pkgs/a/node_modules"]);
+    expect(lstatSync(join(a, "pkgs", "a", "node_modules")).isSymbolicLink()).toBe(true);
+    expect(existsSync(join(a, "pkgs", "b", "node_modules"))).toBe(false);
+    writeFileSync(join(a, "z.txt"), "z"); await w.commit("a", "c");
+    expect(sh(repo, "ls-tree", "-r", "--name-only", "mar/lk/a")).not.toContain("node_modules");
+  });
+  it("skips a destination that already exists in the worktree (tracked)", async () => {
+    depsRepo();
+    const w = createWorktrees(repo, "lk", { linkPaths: ["packages/*/node_modules"] });
+    const a = await w.create("a");
+    expect(await w.link("a")).toEqual([]);
+    expect(lstatSync(join(a, "packages", "a", "node_modules")).isSymbolicLink()).toBe(false);
+  });
+  it("link is a no-op without configured paths, and never touches the shared read-only worktree", async () => {
+    depsRepo();
+    const none = createWorktrees(repo, "lk");
+    await none.create("a");
+    expect(await none.link("a")).toEqual([]);
+    const w = createWorktrees(repo, "lk2", { linkPaths: ["node_modules"] });
+    const s = await w.shared.acquire();
+    expect(existsSync(join(s, "node_modules"))).toBe(false);
+    await w.shared.release();
+  });
+  it.each(["/etc", "../x", "a/../b", ".git", "x/.git", ".env", ".env.local", "a/.env", "keys/server.pem", "id_rsa", "id_rsa.pub", "", "**", "a/**/b", "a\\b", ".mar"])(
+    "rejects unsafe link path %j", (p) => {
+      expect(linkPathProblem(p)).toEqual(expect.any(String));
+      expect(() => createWorktrees(repo, "lk", { linkPaths: [p] })).toThrow(/link/i);
+    });
+  it.each(["node_modules", "packages/*/node_modules", "apps/*/.next"])("accepts %j", (p) => expect(linkPathProblem(p)).toBeNull());
+  it("never links secret-ish names that a glob expands to", async () => {
+    mkdirSync(join(repo, "cfg"));
+    writeFileSync(join(repo, "cfg", "a.pem"), "k"); writeFileSync(join(repo, "cfg", "a.txt"), "t");
+    sh(repo, "add", "cfg/a.txt"); sh(repo, "commit", "-qm", "cfg"); // cfg/ exists in the worktree
+    const w = createWorktrees(repo, "lk", { linkPaths: ["cfg/*"] });
+    await w.create("a");
+    expect(await w.link("a")).toEqual([]); // a.txt tracked (skipped), a.pem never linked
+  });
+  it("link validates the task id", async () => {
+    await expect(createWorktrees(repo, "lk").link("../x")).rejects.toThrow(/invalid/i);
+  });
 });

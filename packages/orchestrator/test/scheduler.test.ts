@@ -4,7 +4,7 @@ import { parseDag } from "@mar/core";
 import { runDag } from "../src/scheduler.js";
 import { fakeAdapter, ok } from "./fakeAdapter.js";
 
-const T = (id: string, extra: object = {}) => ({ id, role: "implementer", runtime: "claude", tier: "mid", goal: `do ${id}`, ...extra });
+const T = (id: string, extra: object = {}) => ({ id, role: "implementer", runtime: "claude", tier: "mid", goal: `do ${id}`, paths: [`${id}/**`], ...extra });
 function harness(tasks: any[], script: any, over: object = {}) {
   const store = new Store(":memory:"); store.createRun("r", "g", "/repo");
   const f = fakeAdapter(script);
@@ -46,6 +46,23 @@ describe("runDag", () => {
     const { f, deps } = harness([T("a")], () => new Error("boom"));
     expect(await runDag(deps)).toEqual({ a: "failed" });
     expect(f.calls).toHaveLength(1);
+  });
+  it("falls back to the alternate runtime with its model when enabled", async () => {
+    const { store, deps } = harness([T("a")], () => new Error("session limit"), { fallbackRuntime: true });
+    const codex = fakeAdapter(() => ok(), "codex");
+    deps.adapters.codex = codex.adapter;
+    deps.modelFor = ((runtime: string) => runtime === "codex" ? "codex-model" : "claude-model") as any;
+    expect(await runDag(deps)).toEqual({ a: "done" });
+    expect(codex.calls[0]).toMatchObject({ taskId: "a", model: "codex-model" });
+    expect(store.listEvents("r").find((e) => e.type === "runtime_fallback")?.payload).toMatchObject({ from: "claude", to: "codex" });
+  });
+  it("does not switch runtimes when a USD cap is configured", async () => {
+    const { store, deps } = harness([T("a")], () => new Error("USD budget reached"), { fallbackRuntime: true, maxBudgetUsdPerTask: 2 });
+    const codex = fakeAdapter(() => ok(), "codex");
+    deps.adapters.codex = codex.adapter;
+    expect(await runDag(deps)).toEqual({ a: "failed" });
+    expect(codex.calls).toHaveLength(0);
+    expect(store.listEvents("r").some((e) => e.type === "runtime_fallback")).toBe(false);
   });
   it("retries with the error summary when maxAttempts is 2", async () => {
     const { f, deps } = harness([T("a")], (_i: any, n: number) => (n === 1 ? new Error("boom") : ok()), { maxAttempts: 2 });
@@ -241,11 +258,23 @@ describe("runDag", () => {
     expect(await runDag(deps)).toEqual({ a: "failed" });
     expect(order).toEqual(["commit:a:mar(a): wip (failed attempt)", "remove:a"]);
   });
-  it("a result arriving after the budget cap still fails the task (hard cap)", async () => {
-    const evs = [{ type: "usage", input: 500, output: 500, cached: null, costUsd: null }, ...ok()];
+  it("keeps a completed result when final usage crosses the token budget", async () => {
+    const result = { type: "result", text: JSON.stringify({ summary: "finished" }) };
+    const usage = { type: "usage", input: 500, output: 500, cached: null, costUsd: null };
+    const evs = [result, usage];
     const { store, deps } = harness([T("a", { budgetTokens: 100 })], () => evs as any);
+    expect(await runDag(deps)).toEqual({ a: "done" });
+    expect(store.latestBb("r", "a/summary")?.body).toBe("finished");
+    const afterUsage = harness([T("a", { budgetTokens: 100 })], () => [usage, result] as any);
+    expect(await runDag(afterUsage.deps)).toEqual({ a: "done" });
+  });
+  it("does not fall back after a token budget breach without a completed result", async () => {
+    const usage = { type: "usage", input: 500, output: 500, cached: null, costUsd: null };
+    const { deps } = harness([T("a", { budgetTokens: 100 })], () => [usage] as any, { fallbackRuntime: true });
+    const codex = fakeAdapter(() => ok(), "codex");
+    deps.adapters.codex = codex.adapter;
     expect(await runDag(deps)).toEqual({ a: "failed" });
-    expect(store.taskStatuses("r")[0].detail).toBe("failed:budget");
+    expect(codex.calls).toHaveLength(0);
   });
   it("shares one budget across attempts", async () => {
     const evs = [{ type: "usage", input: 60, output: 0, cached: null, costUsd: null }, { type: "assistant_text", text: "x" }]; // no result -> retryable
@@ -508,5 +537,216 @@ describe("runDag reports", () => {
     vi.spyOn(store, "writeBb").mockImplementationOnce(() => { throw new Error("bb down"); });
     expect(await runDag(deps)).toEqual({ a: "done" });
     expect(store.listReports("r").map((r) => r.body)).toEqual(["report 2"]);
+  });
+});
+
+describe("runDag verify gate", () => {
+  const PASS = { ok: true, tail: "", ms: 5 };
+  const FAIL = { ok: false, failed: { command: "pnpm test", code: 1, timedOut: false }, tail: "1 failed: API_KEY=abc", ms: 7 };
+  const VERIFY = { commands: ["pnpm test"], timeoutMs: 1000 };
+  type Fx = { calls: any[]; commits: string[]; removed: string[]; worktrees: any };
+  function fx(): Fx {
+    const o: Fx = { calls: [], commits: [], removed: [], worktrees: {} };
+    o.worktrees = {
+      create: async (id: string) => `/wt/${id}`,
+      commit: async (id: string, m: string) => { o.commits.push(`${id}:${m}`); },
+      remove: async (id: string) => { o.removed.push(id); },
+    };
+    return o;
+  }
+  const events = (store: Store, type: string) => store.listEvents("r").filter((e) => e.type === type);
+
+  it("passes: runs the gate in the task worktree after commit, emits started/passed, then publishes", async () => {
+    const o = fx();
+    const order: string[] = [];
+    o.worktrees.commit = async () => { order.push("commit"); };
+    const { store, deps } = harness([T("a")], () => ok("A-RESULT"), {
+      worktrees: o.worktrees, verify: VERIFY,
+      runVerify: async (cwd: string, commands: string[], opts: any) => {
+        order.push("verify"); o.calls.push({ cwd, commands, timeoutMs: opts.timeoutMs, signal: !!opts.signal });
+        expect(store.latestBb("r", "a/summary")).toBeUndefined(); // not published yet
+        return PASS;
+      },
+    });
+    expect(await runDag(deps)).toEqual({ a: "done" });
+    expect(order).toEqual(["commit", "verify"]);
+    expect(o.calls).toEqual([{ cwd: "/wt/a", commands: ["pnpm test"], timeoutMs: 1000, signal: true }]);
+    expect(events(store, "verify_started")[0].payload).toEqual({ commands: ["pnpm test"] });
+    expect(events(store, "verify_passed")[0].payload).toEqual({ ms: 5 });
+    expect(store.latestBb("r", "a/summary")?.body).toBe("A-RESULT");
+    expect(o.removed).toEqual(["a"]);
+  });
+  it("fails: failed:verify, tail only in the event (redacted), dependents blocked, wip kept, nothing published, worktree removed after", async () => {
+    const o = fx();
+    const { store, deps } = harness([T("a"), T("b", { dependsOn: ["a"] })], () => ok(), {
+      worktrees: o.worktrees, verify: VERIFY, runVerify: async () => FAIL,
+    });
+    expect(await runDag(deps)).toEqual({ a: "failed", b: "blocked" });
+    const st = store.taskStatuses("r").find((s) => s.task_id === "a")!;
+    expect(st.status).toBe("failed");
+    expect(st.detail).toBe("failed:verify");
+    const vf = events(store, "verify_failed")[0].payload as any;
+    expect(vf).toMatchObject({ command: "pnpm test", code: 1, timedOut: false, ms: 7 });
+    expect(vf.tail).toContain("1 failed");
+    expect(JSON.stringify(vf)).not.toContain("abc");  // redacted again at the scheduler boundary
+    expect(store.latestBb("r", "a/summary")).toBeUndefined();
+    expect(o.commits).toHaveLength(1);                  // the normal commit already kept the work on the branch
+    expect(o.removed).toEqual(["a"]);
+    expect(events(store, "task_failed").map((e) => e.task_id)).toEqual(["a"]);
+  });
+  it("retry (maxAttempts 2) appends the verification tail to the prompt instead of the generic message", async () => {
+    const o = fx();
+    let n = 0;
+    const { f, deps } = harness([T("a")], () => ok(), {
+      worktrees: o.worktrees, verify: VERIFY, maxAttempts: 2, runVerify: async () => (++n === 1 ? FAIL : PASS),
+    });
+    expect(await runDag(deps)).toEqual({ a: "done" });
+    expect(f.calls).toHaveLength(2);
+    expect(f.calls[1].prompt).toContain("\n\nVerification failed (pnpm test):\n1 failed: API_KEY=[REDACTED]");
+    expect(f.calls[1].prompt).not.toContain("Previous attempt failed");
+  });
+  it("caps the retry tail at 1500 chars", async () => {
+    const big = { ...FAIL, tail: "x".repeat(4000) };
+    let n = 0;
+    const { f, deps } = harness([T("a")], () => ok(), { verify: VERIFY, maxAttempts: 2, runVerify: async () => (++n === 1 ? big : PASS) });
+    await runDag(deps);
+    const tail = f.calls[1].prompt.split("Verification failed (pnpm test):\n")[1];
+    expect(tail.length).toBeLessThanOrEqual(1500);
+  });
+  it("a verify timeout is reported and not retried", async () => {
+    const t = { ok: false, failed: { command: "pnpm test", code: null, timedOut: true }, tail: "timed out", ms: 1000 };
+    const { f, store, deps } = harness([T("a")], () => ok(), { verify: VERIFY, maxAttempts: 2, runVerify: async () => t });
+    expect(await runDag(deps)).toEqual({ a: "failed" });
+    expect(f.calls).toHaveLength(1);
+    expect((events(store, "verify_failed")[0].payload as any).timedOut).toBe(true);
+    expect(store.taskStatuses("r")[0].detail).toBe("failed:verify");
+  });
+  it("skips the gate for reviewers and researchers, and when no commands are configured", async () => {
+    const runVerify = vi.fn(async () => PASS);
+    const { store, deps } = harness([T("a", { role: "researcher", paths: [] }), T("b", { role: "reviewer", paths: [] })], () => ok(), { verify: VERIFY, runVerify });
+    expect(await runDag(deps)).toEqual({ a: "done", b: "done" });
+    expect(runVerify).not.toHaveBeenCalled();
+    expect(events(store, "verify_started")).toEqual([]);
+    const h2 = harness([T("w")], () => ok(), { verify: { commands: [], timeoutMs: 1 }, runVerify });
+    await runDag(h2.deps);
+    const h3 = harness([T("w")], () => ok(), { runVerify });
+    await runDag(h3.deps);
+    expect(runVerify).not.toHaveBeenCalled();
+  });
+  it("gates testers too, and never shared read-only tasks", async () => {
+    const runVerify = vi.fn(async () => PASS);
+    const { deps } = harness([T("a", { role: "tester" })], () => ok(), { verify: VERIFY, runVerify });
+    await runDag(deps);
+    expect(runVerify).toHaveBeenCalledTimes(1);
+  });
+  it("abort during the gate fails the task cleanly and still removes the worktree", async () => {
+    const o = fx();
+    const ac = new AbortController();
+    const { store, deps } = harness([T("a")], () => ok(), {
+      worktrees: o.worktrees, verify: VERIFY, signal: ac.signal,
+      runVerify: (_c: string, _cmds: string[], opts: any) => new Promise((res) => {
+        setTimeout(() => ac.abort(), 10);
+        opts.signal.addEventListener("abort", () => res({ ok: false, failed: { command: "pnpm test", code: null, timedOut: false }, tail: "verification aborted", ms: 10 }));
+      }),
+    });
+    expect(await runDag(deps)).toEqual({ a: "failed" });
+    expect(store.taskStatuses("r")[0].detail).toBe("failed:verify");
+    expect(o.removed).toEqual(["a"]);
+    expect(store.taskStatuses("r").some((s) => s.status === "running")).toBe(false);
+  });
+  it("a throwing verifier fails the task with failed:verify rather than crashing the run", async () => {
+    const { store, deps } = harness([T("a"), T("b")], () => ok(), { verify: VERIFY, runVerify: async (cwd: string) => { if (cwd.endsWith("a")) throw new Error("kaboom"); return PASS; } });
+    expect(await runDag(deps)).toEqual({ a: "failed", b: "done" });
+    expect(store.taskStatuses("r").find((s) => s.task_id === "a")!.detail).toMatch(/failed:verify/);
+  });
+});
+
+describe("runDag path ownership enforcement", () => {
+  const withGit = (changed: Record<string, string[]>, over: object = {}) => {
+    const removed: string[] = [];
+    const worktrees = {
+      create: async (id: string) => `/wt/${id}`, remove: async (id: string) => { removed.push(id); }, commit: async () => {},
+      head: async (id: string) => `sha-start-${id}`,
+      changedFiles: async (id: string, since: string) => { expect(since).toBe(`sha-start-${id}`); return changed[id] ?? []; },
+    };
+    return { removed, over: { worktrees, ...over } };
+  };
+  const ev = (store: Store, type: string) => store.listEvents("r").filter((e) => e.type === type);
+
+  it("no violation: no event", async () => {
+    const { over } = withGit({ a: ["src/a/x.ts", "src/a/deep/y.ts"] });
+    const { store, deps } = harness([T("a", { paths: ["src/a/**"] })], () => ok(), { ...over, ownership: "enforce" });
+    expect(await runDag(deps)).toEqual({ a: "done" });
+    expect(ev(store, "ownership_violation")).toEqual([]);
+  });
+  it("warn (default): emits ownership_violation, task still done", async () => {
+    const { over } = withGit({ a: ["src/a/x.ts", "src/b/oops.ts", "README.md"] });
+    const { store, deps } = harness([T("a", { paths: ["src/a/**"] })], () => ok(), over);
+    expect(await runDag(deps)).toEqual({ a: "done" });
+    expect(ev(store, "ownership_violation")[0].payload).toMatchObject({ files: ["src/b/oops.ts", "README.md"], paths: ["src/a/**"], count: 2, enforced: false });
+  });
+  it("enforce: fails with failed:ownership, work stays on the branch, dependents blocked, nothing published", async () => {
+    const { over, removed } = withGit({ a: ["src/b/oops.ts"] });
+    const { store, deps } = harness([T("a", { paths: ["src/a/**"] }), T("b", { dependsOn: ["a"] })], () => ok(), { ...over, ownership: "enforce" });
+    expect(await runDag(deps)).toEqual({ a: "failed", b: "blocked" });
+    expect(store.taskStatuses("r").find((s) => s.task_id === "a")!.detail).toBe("failed:ownership");
+    expect(ev(store, "ownership_violation")[0].payload).toMatchObject({ enforced: true });
+    expect(store.latestBb("r", "a/summary")).toBeUndefined();
+    expect(removed).toEqual(["a"]);
+  });
+  it("caps the listed files at 50", async () => {
+    const many = Array.from({ length: 80 }, (_, i) => `out/f${i}.ts`);
+    const { over } = withGit({ a: many });
+    const { store, deps } = harness([T("a", { paths: ["src/**"] })], () => ok(), over);
+    await runDag(deps);
+    const p = ev(store, "ownership_violation")[0].payload as any;
+    expect(p.files).toHaveLength(50);
+    expect(p.count).toBe(80);
+  });
+  it("skips tasks without declared paths, non-writers, and worktrees lacking the optional methods", async () => {
+    const { over } = withGit({ a: ["anything.ts"] });
+    const h1 = harness([T("a", { paths: [] })], () => ok(), { ...over, ownership: "enforce" });
+    expect(await runDag(h1.deps)).toEqual({ a: "done" });
+    const h2 = harness([T("a", { paths: ["src/**"] })], () => ok(), { ownership: "enforce" }); // default fake worktrees: no head/changedFiles
+    expect(await runDag(h2.deps)).toEqual({ a: "done" });
+    expect(ev(h1.store, "ownership_violation")).toEqual([]);
+  });
+  it("enforce failure retries with the offending files in the prompt when maxAttempts > 1", async () => {
+    let n = 0;
+    const base = withGit({});
+    base.over.worktrees.changedFiles = async () => (++n === 1 ? ["lib/x.ts"] : ["src/a/ok.ts"]);
+    const { f, deps } = harness([T("a", { paths: ["src/a/**"] })], () => ok(), { ...base.over, ownership: "enforce", maxAttempts: 2 });
+    expect(await runDag(deps)).toEqual({ a: "done" });
+    expect(f.calls[1].prompt).toContain("lib/x.ts");
+    expect(f.calls[1].prompt).toContain("src/a/**");
+  });
+  it("links dependency paths into writer worktrees only", async () => {
+    const linked: string[] = [];
+    const { deps } = harness([T("a"), T("r", { role: "researcher", paths: [] })], () => ok(), {
+      worktrees: { create: async (id: string) => `/wt/${id}`, remove: async () => {}, commit: async () => {}, link: async (id: string) => { linked.push(id); return []; } },
+    });
+    await runDag(deps);
+    expect(linked).toEqual(["a"]);
+  });
+  it("a failing link does not fail the task", async () => {
+    const { deps } = harness([T("a")], () => ok(), {
+      worktrees: { create: async (id: string) => `/wt/${id}`, remove: async () => {}, commit: async () => {}, link: async () => { throw new Error("nope"); } },
+    });
+    expect(await runDag(deps)).toEqual({ a: "done" });
+  });
+});
+
+describe("runDag ownership across retries", () => {
+  it("measures every attempt against the FIRST attempt's start sha", async () => {
+    const seen: string[] = [];
+    let head = 0;
+    const worktrees = {
+      create: async (id: string) => `/wt/${id}`, remove: async () => {}, commit: async () => {},
+      head: async () => `sha${++head}`,
+      changedFiles: async (_id: string, since: string) => { seen.push(since); return seen.length === 1 ? ["lib/x.ts"] : ["src/a/ok.ts"]; },
+    };
+    const { deps } = harness([T("a", { paths: ["src/a/**"] })], () => ok(), { worktrees, ownership: "enforce", maxAttempts: 2 });
+    await runDag(deps);
+    expect(seen).toEqual(["sha1", "sha1"]);
   });
 });

@@ -1,12 +1,12 @@
 import { execFile } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
-import { appendFile, mkdir, readFile, rm, rmdir } from "node:fs/promises";
+import { appendFile, lstat, mkdir, readFile, readdir, rm, rmdir, stat, symlink } from "node:fs/promises";
 
-const SAFE = /^[A-Za-z0-9_-]+$/;
-const IDENT = ["-c", "user.name=mar", "-c", "user.email=mar@localhost"];
+export const SAFE = /^[A-Za-z0-9_-]+$/;
+export const IDENT = ["-c", "user.name=mar", "-c", "user.email=mar@localhost"];
 
 // All git calls go through execFile (no shell). Failures carry a capped stderr, never the env.
-function git(args: string[], cwd: string): Promise<string> {
+export function git(args: string[], cwd: string): Promise<string> {
   return new Promise((res, rej) => {
     execFile("git", args, { cwd, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
       if (!err) return res(stdout);
@@ -15,10 +15,10 @@ function git(args: string[], cwd: string): Promise<string> {
     });
   });
 }
-const ok = (args: string[], cwd: string) => git(args, cwd).then(() => true, () => false);
+export const ok = (args: string[], cwd: string) => git(args, cwd).then(() => true, () => false);
 
 // Exit code of a git call: 0 / 1 are answers, anything else (128, spawn failure, ...) is an error.
-function gitExit(args: string[], cwd: string): Promise<number> {
+export function gitExit(args: string[], cwd: string): Promise<number> {
   return new Promise((res, rej) => {
     execFile("git", args, { cwd, maxBuffer: 16 * 1024 * 1024 }, (err, _out, stderr) => {
       if (!err) return res(0);
@@ -29,13 +29,92 @@ function gitExit(args: string[], cwd: string): Promise<number> {
   });
 }
 // true / false for exit 0 / 1; any other failure is rethrown (never read as "branch missing").
-const branchExists = async (name: string, cwd: string) => (await gitExit(["rev-parse", "--verify", "--quiet", `refs/heads/${name}`], cwd)) === 0;
+export const branchExists = async (name: string, cwd: string) => (await gitExit(["rev-parse", "--verify", "--quiet", `refs/heads/${name}`], cwd)) === 0;
+
+// --- dependency links (node_modules and friends) -------------------------------------------------------------------
+
+// Names that must never be linked into a worktree: secrets and git/mar internals.
+const secretName = (n: string) => /^\.env/.test(n) || /\.pem$/i.test(n) || /^id_rsa/.test(n) || n === ".git" || n === ".mar";
+
+/** Why `p` is not an acceptable `linkPaths` entry (repo-relative, single-segment `*` globs only), or null. */
+export function linkPathProblem(p: string): string | null {
+  if (p === "") return "is empty";
+  if (p.includes("\\")) return "contains a backslash";
+  if (p.startsWith("/") || /^[A-Za-z]:/.test(p)) return "is absolute";
+  for (const seg of p.split("/")) {
+    if (seg === "" || seg === "." || seg === "..") return `has an invalid segment "${seg}"`;
+    if (seg.includes("**")) return "uses **, only single-segment * globs are supported";
+    if (secretName(seg)) return `names a protected path ("${seg}")`;
+  }
+  return null;
+}
+
+const globRe = (seg: string) => new RegExp("^" + seg.split("*").map((x) => x.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join("[^/]*") + "$");
+
+/** Repo-relative paths (posix) under `root` matching `patterns`; only entries that exist. */
+export async function expandLinkPaths(root: string, patterns: string[]): Promise<string[]> {
+  const found = new Set<string>();
+  for (const pat of patterns) {
+    let bases = [""];
+    for (const seg of pat.split("/")) {
+      const next: string[] = [];
+      for (const b of bases) {
+        if (!seg.includes("*")) { next.push(b ? `${b}/${seg}` : seg); continue; }
+        const re = globRe(seg);
+        const names = await readdir(join(root, b)).catch(() => [] as string[]);
+        for (const n of names) if (re.test(n) && !secretName(n) && (seg.startsWith(".") || !n.startsWith("."))) next.push(b ? `${b}/${n}` : n);
+      }
+      bases = next;
+    }
+    for (const b of bases) if (await lstat(join(root, b)).then(() => true, () => false)) found.add(b);
+  }
+  return [...found].sort();
+}
+
+/** Symlinks (absolute target in `root`) each existing match into `dir`; skips destinations that already exist or whose parent is missing. */
+export async function linkInto(root: string, dir: string, patterns: string[]): Promise<string[]> {
+  const linked: string[] = [];
+  for (const rel of await expandLinkPaths(root, patterns)) {
+    const dest = join(dir, rel);
+    if (!(await stat(dirname(dest)).then((s) => s.isDirectory(), () => false))) continue;
+    if (await lstat(dest).then(() => true, () => false)) continue; // tracked (or otherwise present): never replace
+    await symlink(join(root, rel), dest);
+    linked.push(rel);
+  }
+  return linked;
+}
+
+// Pathspecs that keep our own symlinks out of `git add -A` (a trailing-slash ignore rule does not match a symlink).
+async function linkExcludes(root: string, dir: string, patterns: string[]): Promise<string[]> {
+  const out: string[] = [];
+  for (const rel of await expandLinkPaths(root, patterns))
+    if (await lstat(join(dir, rel)).then((s) => s.isSymbolicLink(), () => false)) out.push(`:(exclude,literal)${rel}`);
+  return out;
+}
+
+/** Removes a worktree directory (forced), prunes stale registrations. Never throws for a missing dir. */
+export async function discardWorktree(root: string, dir: string): Promise<void> {
+  await ok(["worktree", "remove", "--force", "--", dir], root);
+  await rm(dir, { recursive: true, force: true });
+  await ok(["worktree", "prune"], root);
+}
+
+export interface WorktreeOpts {
+  /** Repo-relative paths (single-segment `*` globs allowed) symlinked from the main repo into writer worktrees by `link`. */
+  linkPaths?: string[];
+}
 
 export interface Worktrees {
   create(taskId: string, dependsOn?: string[]): Promise<string>;
   commit(taskId: string, message: string): Promise<void>;
   remove(taskId: string): Promise<void>;
   branchFor(taskId: string): string;
+  /** HEAD sha of the task's worktree. */
+  head(taskId: string): Promise<string>;
+  /** Files changed on the task's branch since `sinceSha` (renames reported as delete + add). */
+  changedFiles(taskId: string, sinceSha: string): Promise<string[]>;
+  /** Symlinks the configured `linkPaths` into the task's worktree; returns the linked repo-relative paths. */
+  link(taskId: string): Promise<string[]>;
   // One detached (branchless) worktree at HEAD shared by all read-only tasks of the run.
   shared: { acquire(): Promise<string>; release(): Promise<void> };
 }
@@ -52,8 +131,10 @@ export async function ensureMarExcluded(repo: string): Promise<void> {
 // Ids are restricted to [A-Za-z0-9_-]. NOTE: ids that differ only by case (`A` / `a`) collide on
 // case-insensitive filesystems (macOS/Windows default): same worktree dir and loose branch ref file.
 // Planner ids are lowercase (`[a-z0-9_-]+`), so this only matters for hand-written DAGs.
-export function createWorktrees(repoPath: string, runId: string): Worktrees {
+export function createWorktrees(repoPath: string, runId: string, opts: WorktreeOpts = {}): Worktrees {
   if (!SAFE.test(runId)) throw new Error(`invalid run id: ${runId}`);
+  const links = opts.linkPaths ?? [];
+  for (const p of links) { const why = linkPathProblem(p); if (why) throw new Error(`invalid link path ${JSON.stringify(p)}: ${why}`); }
   const root = resolve(repoPath); // absolute once: git runs with cwd=root, so relative paths must never reach it
   const dirFor = (t: string) => join(root, ".mar", "worktrees", runId, t);
   const branchFor = (t: string) => `mar/${runId}/${t}`;
@@ -61,11 +142,7 @@ export function createWorktrees(repoPath: string, runId: string): Worktrees {
 
   const ensureExcluded = () => ensureMarExcluded(root);
 
-  async function discard(dir: string) {
-    await ok(["worktree", "remove", "--force", "--", dir], root);
-    await rm(dir, { recursive: true, force: true });
-    await ok(["worktree", "prune"], root);
-  }
+  const discard = (dir: string) => discardWorktree(root, dir);
 
   async function createOne(taskId: string, dependsOn: string[]): Promise<string> {
     check(taskId);
@@ -122,6 +199,17 @@ export function createWorktrees(repoPath: string, runId: string): Worktrees {
   let queue: Promise<unknown> = Promise.resolve();
   return {
     branchFor,
+    async head(taskId: string) { check(taskId); return (await git(["rev-parse", "HEAD"], dirFor(taskId))).trim(); },
+    async changedFiles(taskId: string, sinceSha: string) {
+      check(taskId);
+      if (!/^[0-9a-f]{7,64}$/.test(sinceSha)) throw new Error(`invalid sha: ${sinceSha}`);
+      const out = await git(["diff", "--name-only", "--no-renames", "-z", `${sinceSha}..HEAD`, "--"], dirFor(taskId));
+      return out.split("\0").filter(Boolean);
+    },
+    async link(taskId: string) {
+      check(taskId);
+      return links.length ? linkInto(root, dirFor(taskId), links) : [];
+    },
     shared: {
       acquire() {
         if (!sharedP) {
@@ -150,7 +238,7 @@ export function createWorktrees(repoPath: string, runId: string): Worktrees {
       check(taskId);
       const cwd = dirFor(taskId);
       // Never stage env files a worker created (secrets); they are discarded with the worktree.
-      await git(["add", "-A", "--", ".", ":(exclude,glob)**/.env*"], cwd);
+      await git(["add", "-A", "--", ".", ":(exclude,glob)**/.env*", ...(links.length ? await linkExcludes(root, cwd, links) : [])], cwd);
       if ((await gitExit(["diff", "--cached", "--quiet"], cwd)) === 0) return; // nothing staged
       await git([...IDENT, "commit", "-m", message], cwd);
     },
