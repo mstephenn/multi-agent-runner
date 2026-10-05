@@ -59,8 +59,30 @@ describe("planGoal", () => {
     const { p } = run(() => res(v));
     expect((await p).tasks[0]).not.toHaveProperty("evil");
   });
+  it("asks for disjoint paths on parallel writers", async () => {
+    const { f, p } = run(() => res(valid));
+    await p;
+    expect(f.calls[0].prompt).toContain("MUST list `paths`");
+    expect(f.calls[0].prompt).toContain('"paths":["repo-relative glob"]');
+    expect(f.calls[0].prompt).toMatch(/disjoint `paths`/);
+  });
+  it("feeds a path-overlap DagError back to the planner (capped), then fails with PlanError", async () => {
+    const overlap = { tasks: [{ ...valid.tasks[0], id: "a", paths: ["src/**"] }, { ...valid.tasks[0], id: "b", paths: ["src/x.ts"] }] };
+    const { f, p } = run(() => res(overlap));
+    await expect(p).rejects.toThrow(/paths overlap/);
+    expect(f.calls).toHaveLength(2);
+    expect(f.calls[1].prompt).toMatch(/rejected: .*paths overlap/);
+    const fed = f.calls[1].prompt.split("Your previous output was rejected: ")[1].split("\nReturn corrected")[0];
+    expect(fed.length).toBeLessThanOrEqual(300);
+  });
+  it("accepts a corrected plan on retry after an overlap error", async () => {
+    const bad = { tasks: [{ ...valid.tasks[0], id: "a" }, { ...valid.tasks[0], id: "b" }] };
+    const good = { tasks: [{ ...valid.tasks[0], id: "a", paths: ["a/**"] }, { ...valid.tasks[0], id: "b", paths: ["b/**"] }] };
+    const { p } = run((_i: any, n: number) => res(n === 1 ? bad : good));
+    expect((await p).tasks).toHaveLength(2);
+  });
   it("rejects more than 8 tasks (retry, then PlanError)", async () => {
-    const many = { tasks: Array.from({ length: 9 }, (_, i) => ({ ...valid.tasks[0], id: `t${i}` })) };
+    const many = { tasks: Array.from({ length: 9 }, (_, i) => ({ ...valid.tasks[0], id: `t${i}`, paths: [`d${i}/**`] })) };
     const { f, p } = run(() => res(many));
     await expect(p).rejects.toThrow(/at most 8/);
     expect(f.calls).toHaveLength(2);

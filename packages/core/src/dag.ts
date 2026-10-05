@@ -1,11 +1,23 @@
 import { z } from "zod";
-import { TaskSpec } from "./schemas.js";
+import { TaskSpec, WRITER_ROLES } from "./schemas.js";
+import { globsOverlap } from "./globs.js";
 
 export type Dag = { tasks: TaskSpec[] };
 export class DagError extends Error {}
 
 // Keys the blackboard publishes for every finished task (see orchestrator publishResult).
 const NEEDS_SUFFIXES = new Set(["summary", "decisions", "open_questions", "files"]);
+
+const badPath = (p: string): string | null => {
+  if (p === "") return "is empty";
+  if (p.includes("\\")) return "contains a backslash";
+  if (p.startsWith("/") || /^[A-Za-z]:/.test(p)) return "is absolute";
+  const segs = p.split("/");
+  if (segs.includes("..")) return 'contains a ".." segment';
+  if (segs.includes(".")) return 'contains a "." segment';
+  if (segs[0] === ".mar" || segs[0] === ".git") return "points into .mar/ or .git/";
+  return null;
+};
 
 export function parseDag(input: unknown): Dag {
   const dag = z.object({ tasks: z.array(TaskSpec).min(1) }).parse(input);
@@ -39,6 +51,25 @@ export function parseDag(input: unknown): Dag {
         throw new DagError(`task ${t.id} needs "${key}": suffix must be one of ${[...NEEDS_SUFFIXES].join("|")}`);
       if (!ancestors.get(t.id)!.has(owner))
         throw new DagError(`task ${t.id} needs ${key} but ${owner} is a non-ancestor`);
+    }
+  for (const t of dag.tasks)
+    for (const p of t.paths) {
+      const why = badPath(p);
+      if (why) throw new DagError(`task ${t.id}: invalid path ${JSON.stringify(p)} (${why}); paths must be repo-relative globs`);
+    }
+
+  // Writers with no dependency path between them run in parallel: they must declare disjoint paths.
+  const writers = dag.tasks.filter((t) => WRITER_ROLES.has(t.role));
+  for (let i = 0; i < writers.length; i++)
+    for (let j = i + 1; j < writers.length; j++) {
+      const a = writers[i], b = writers[j];
+      if (ancestors.get(a.id)!.has(b.id) || ancestors.get(b.id)!.has(a.id)) continue;
+      const missing = [a, b].filter((t) => t.paths.length === 0).map((t) => t.id);
+      if (missing.length)
+        throw new DagError(`tasks ${a.id} and ${b.id} can run in parallel but ${missing.join(" and ")} declare${missing.length === 1 ? "s" : ""} no paths: list repo-relative paths, or make one depend on the other`);
+      for (const pa of a.paths) for (const pb of b.paths)
+        if (globsOverlap(pa, pb))
+          throw new DagError(`tasks ${a.id} and ${b.id} can run in parallel but their paths overlap (${pa} vs ${pb}): make paths disjoint or make one depend on the other`);
     }
   return dag;
 }

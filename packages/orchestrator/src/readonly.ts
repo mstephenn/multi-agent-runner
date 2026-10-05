@@ -1,7 +1,7 @@
-import type { TaskSpec } from "@mar/core";
+import { WRITER_ROLES, type TaskSpec } from "@mar/core";
 
-// Roles whose tasks write code (see `toolsFor` in the CLI: implementer/tester get Edit/Write/Bash).
-export const WRITER_ROLES: ReadonlySet<string> = new Set(["implementer", "tester"]);
+// Roles whose tasks write code (see `toolsFor` in the CLI: implementer/tester get Edit/Write/Bash): defined in core.
+export { WRITER_ROLES };
 const WRITE_TOOLS: ReadonlySet<string> = new Set(["Edit", "Write", "Bash"]);
 
 /**

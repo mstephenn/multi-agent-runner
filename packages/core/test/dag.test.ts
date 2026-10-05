@@ -35,3 +35,36 @@ describe("parseDag", () => {
     expect(parseDag({ tasks: [t("a"), t("b", { dependsOn: ["a"], needs })] }).tasks[1].needs).toEqual(needs);
   });
 });
+
+describe("parseDag path ownership", () => {
+  const w = (id: string, paths?: string[], extra: object = {}) => t(id, { ...(paths ? { paths } : {}), ...extra });
+  it("defaults paths to []", () => {
+    expect(parseDag({ tasks: [t("a")] }).tasks[0].paths).toEqual([]);
+  });
+  it("accepts parallel writers with disjoint paths", () => {
+    expect(() => parseDag({ tasks: [w("a", ["src/a/**"]), w("b", ["src/b/**"])] })).not.toThrow();
+    expect(() => parseDag({ tasks: [w("a", ["src/a/*"]), w("b", ["src/b/*"])] })).not.toThrow();
+    expect(() => parseDag({ tasks: [w("a", ["*.md"]), w("b", ["docs/*.md"])] })).not.toThrow();
+  });
+  it("rejects parallel writers with overlapping paths, naming both tasks and patterns", () => {
+    expect(() => parseDag({ tasks: [w("a", ["src/**"]), w("b", ["src/x.ts"])] })).toThrow(/a.*b.*src\/\*\*.*src\/x\.ts/s);
+  });
+  it("rejects parallel writers when one has no paths", () => {
+    expect(() => parseDag({ tasks: [w("a", ["src/a/**"]), w("b")] })).toThrow(/b declares no paths/);
+    expect(() => parseDag({ tasks: [w("a"), w("b")] })).toThrow(/paths/);
+  });
+  it("accepts serialised writers without paths, also transitively", () => {
+    expect(() => parseDag({ tasks: [w("a"), w("b", undefined, { dependsOn: ["a"] })] })).not.toThrow();
+    expect(() => parseDag({ tasks: [w("a"), w("b", undefined, { dependsOn: ["a"] }), w("c", undefined, { dependsOn: ["b"] })] })).not.toThrow();
+  });
+  it("accepts overlapping paths when the writers are ordered", () => {
+    expect(() => parseDag({ tasks: [w("a", ["src/**"]), w("b", ["src/**"], { dependsOn: ["a"] })] })).not.toThrow();
+  });
+  it("exempts non-writers", () => {
+    expect(() => parseDag({ tasks: [w("a"), t("r", { role: "reviewer" }), t("s", { role: "researcher", paths: ["src/**"] })] })).not.toThrow();
+  });
+  it("rejects bad path forms naming the task", () => {
+    for (const bad of ["/abs/x", "../x", "a/../b", "", "a\\b", ".mar/x", ".git/config", ".git", "C:/x"])
+      expect(() => parseDag({ tasks: [w("a", [bad])] }), bad).toThrow(/task a.*path/s);
+  });
+});
