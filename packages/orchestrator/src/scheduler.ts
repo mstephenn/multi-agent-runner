@@ -9,7 +9,7 @@ import { redact } from "./redact.js";
 export interface RunDeps {
   store: Store; runId: string; dag: Dag; repo: string;
   adapters: Record<Runtime, Adapter>;
-  worktrees: { create(taskId: string): Promise<string>; commit(taskId: string, message: string): Promise<void>; remove(taskId: string): Promise<void> };
+  worktrees: { create(taskId: string, dependsOn?: string[]): Promise<string>; commit(taskId: string, message: string): Promise<void>; remove(taskId: string): Promise<void> };
   modelFor(runtime: Runtime, tier: Tier): string | null;
   toolsFor(role: Role): string[];
   concurrency: number; defaultBudgetTokens?: number; unsafe?: boolean;
@@ -54,7 +54,7 @@ export async function runDag(d: RunDeps): Promise<Record<string, Outcome>> {
     if (missing.length) throw new TaskFailure(`missing:${missing[0]}`, false);
     const prompt = buildPrompt(task, slices) + extra;
     emit(task, "prompt_sent", { prompt: redact(prompt), keys: slices.map((s) => s.key), tokens: estimateTokens(prompt) });
-    const cwd = await d.worktrees.create(task.id);
+    const cwd = await d.worktrees.create(task.id, task.dependsOn);
     const ac = new AbortController();
     const onAbort = () => ac.abort();
     d.signal?.addEventListener("abort", onAbort);

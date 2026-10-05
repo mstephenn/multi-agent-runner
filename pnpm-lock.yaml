@@ -24,6 +24,24 @@ importers:
         specifier: workspace:*
         version: link:../core
 
+  packages/cli:
+    dependencies:
+      '@mar/adapters':
+        specifier: workspace:*
+        version: link:../adapters
+      '@mar/core':
+        specifier: workspace:*
+        version: link:../core
+      '@mar/orchestrator':
+        specifier: workspace:*
+        version: link:../orchestrator
+      '@mar/server':
+        specifier: workspace:*
+        version: link:../server
+      zod:
+        specifier: ^3.23.0
+        version: 3.25.76
+
   packages/core:
     dependencies:
       zod:

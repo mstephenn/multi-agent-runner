@@ -1,0 +1,14 @@
+{
+  "name": "@mar/cli",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "src/config.ts",
+  "dependencies": {
+    "@mar/core": "workspace:*",
+    "@mar/orchestrator": "workspace:*",
+    "@mar/adapters": "workspace:*",
+    "@mar/server": "workspace:*",
+    "zod": "^3.23.0"
+  }
+}

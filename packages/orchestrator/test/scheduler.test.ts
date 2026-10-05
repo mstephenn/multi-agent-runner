@@ -82,6 +82,13 @@ describe("runDag", () => {
     expect(f.calls[0].signal.aborted).toBe(true);
     expect(store.taskStatuses("r")[0].detail).toBe("failed:budget");
   });
+  it("passes the task's dependsOn list to worktrees.create", async () => {
+    const calls: Array<[string, string[] | undefined]> = [];
+    const wt = { create: async (id: string, deps?: string[]) => { calls.push([id, deps]); return `/wt/${id}`; }, commit: async () => {}, remove: async () => {} };
+    expect(await runDag(harness([T("a"), T("b", { dependsOn: ["a"] })], () => ok(), { worktrees: wt }).deps)).toEqual({ a: "done", b: "done" });
+    expect(calls.find(([id]) => id === "b")![1]).toEqual(["a"]);
+    expect(calls.find(([id]) => id === "a")![1]).toEqual([]);
+  });
   it("commits the worktree before removing it, and a commit failure fails the task", async () => {
     const order: string[] = [];
     const wt = { create: async (id: string) => `/wt/${id}`, commit: async (id: string) => { order.push(`commit:${id}`); }, remove: async (id: string) => { order.push(`remove:${id}`); } };
