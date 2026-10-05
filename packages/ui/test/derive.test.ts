@@ -20,7 +20,7 @@ describe("derive", () => {
     expect(f).toEqual([{ from: "a", to: "b", key: "a/summary", version: 2, tokens: 40 }]);
   });
   it("derives the context a task actually received", () => {
-    const c = deriveContext([e("b", "prompt_sent", { prompt: "P", keys: ["a/summary"], tokens: 9 }), e("b", "blackboard_read", { key: "a/summary", version: 1, tokens: 7, author: "a" })], "b");
+    const c = deriveContext([e("b", "blackboard_read", { key: "a/summary", version: 1, tokens: 7, author: "a" }), e("b", "prompt_sent", { prompt: "P", keys: ["a/summary"], tokens: 9 })], "b");
     expect(c.prompt).toBe("P"); expect(c.slices).toEqual([{ key: "a/summary", version: 1, tokens: 7 }]);
   });
   it("returns an empty context for a task that has not started", () => {
@@ -28,7 +28,7 @@ describe("derive", () => {
   });
   it("derives timeline lanes with open end for running tasks", () => {
     const l = deriveLanes([e("a", "task_started", {}, 100), e("a", "task_finished", {}, 200), e("b", "task_started", {}, 150)]);
-    expect(l).toEqual([{ id: "a", start: 100, end: 200 }, { id: "b", start: 150, end: null }]);
+    expect(l).toEqual([{ id: "a", start: 100, end: 200, attempt: 1 }, { id: "b", start: 150, end: null, attempt: 1 }]);
   });
 });
 
@@ -100,7 +100,7 @@ describe("deriveContext edge cases", () => {
 describe("deriveLanes edge cases", () => {
   it("handles finish before start and failed tasks, ignoring tasks never started", () => {
     const l = deriveLanes([e("a", "task_finished", {}, 200), e("a", "task_started", {}, 100), e("b", "task_failed", {}, 50), e("c", "task_started", {}, 10), e("c", "task_failed", {}, 20)]);
-    expect(l).toEqual([{ id: "a", start: 100, end: 200 }, { id: "c", start: 10, end: 20 }]);
+    expect(l).toEqual([{ id: "a", start: 100, end: 200, attempt: 1 }, { id: "c", start: 10, end: 20, attempt: 1 }]);
   });
 });
 
@@ -122,11 +122,70 @@ describe("deriveActivity", () => {
     expect(x.text.length).toBe(500);
     expect(x.text.endsWith("…")).toBe(true);
   });
+  it("never splits a surrogate pair when clipping", () => {
+    for (const pad of ["", "a"]) {
+      const [x] = deriveActivity([e("a", "assistant_text", { text: pad + "😀".repeat(400) })], "a");
+      expect(x.text.length).toBeLessThanOrEqual(500);
+      expect(x.text).not.toMatch(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/);
+    }
+  });
+  it("marks only true cycles and serializes Map/Set", () => {
+    const shared = { v: 1 };
+    const a = deriveActivity([
+      e("a", "tool_call", { name: "t", input: { x: shared, y: shared } }),
+      e("a", "tool_call", { name: "t", input: { m: new Map([["k", 1]]), s: new Set([1, 2]) } }),
+    ], "a");
+    expect(a[0].text).not.toContain("[Circular]");
+    expect(a[0].text).toContain('"x":{"v":1},"y":{"v":1}');
+    expect(a[1].text).toContain('"Map":[["k",1]]');
+    expect(a[1].text).toContain('"Set":[1,2]');
+  });
   it("stringifies circular objects safely and tolerates odd payloads", () => {
     const o: any = { n: 1 }; o.self = o;
     const a = deriveActivity([e("a", "tool_call", { name: "t", input: o }), e("a", "tool_result", {}), e("a", "assistant_text", { text: 5 })], "a");
     expect(a).toHaveLength(3);
     expect(a[0].text).toContain("[Circular]");
+  });
+});
+
+describe("retry / resume", () => {
+  it("a task_started after task_failed starts a new running attempt", () => {
+    const a = deriveAgents([e("a", "task_started", {}, 100), e("a", "task_failed", {}, 200), e("a", "task_started", { role: "r2" }, 300)], []);
+    expect(a[0]).toMatchObject({ status: "running", startedAt: 300, role: "r2" });
+    expect(a[0].endedAt).toBeUndefined();
+  });
+  it("a task_started after task_finished also restarts, and a later finish closes it", () => {
+    const a = deriveAgents([e("a", "task_started", {}, 100), e("a", "task_finished", {}, 200), e("a", "task_started", {}, 300), e("a", "task_finished", {}, 400)], []);
+    expect(a[0]).toMatchObject({ status: "done", startedAt: 300, endedAt: 400 });
+  });
+  it("two task_started without a terminal event do not restart", () => {
+    const a = deriveAgents([e("a", "task_started", {}, 100), e("a", "task_started", {}, 150)], []);
+    expect(a[0]).toMatchObject({ status: "running", startedAt: 100 });
+  });
+  it("lanes get one segment per attempt, the latest open-ended", () => {
+    const l = deriveLanes([e("a", "task_started", {}, 100), e("a", "task_failed", {}, 200), e("a", "task_started", {}, 300), e("b", "task_started", {}, 120)]);
+    expect(l).toEqual([
+      { id: "a", start: 100, end: 200, attempt: 1 }, { id: "a", start: 300, end: null, attempt: 2 }, { id: "b", start: 120, end: null, attempt: 1 },
+    ]);
+  });
+  it("context slices reset per prompt_sent and do not accumulate across attempts", () => {
+    const evs = [
+      e("b", "task_started", {}, 1), e("b", "blackboard_read", { key: "k1", version: 1, tokens: 5, author: "a" }), e("b", "prompt_sent", { prompt: "p1", keys: ["k1"] }), e("b", "task_failed", {}, 2),
+      e("b", "task_started", {}, 3), e("b", "blackboard_read", { key: "k2", version: 2, tokens: 6, author: "a" }), e("b", "prompt_sent", { prompt: "p2", keys: ["k2"] }),
+    ];
+    const c = deriveContext(evs, "b", ["k1", "k2"]);
+    expect(c.prompt).toBe("p2");
+    expect(c.slices).toEqual([{ key: "k2", version: 2, tokens: 6 }]);
+    expect(c.notGiven).toEqual(["k1"]);
+    expect(deriveContext(evs.slice(0, 4), "b").slices).toEqual([{ key: "k1", version: 1, tokens: 5 }]);
+  });
+  it("reads before any prompt are shown as pending slices", () => {
+    expect(deriveContext([e("b", "blackboard_read", { key: "k", version: 1, author: "a" })], "b").slices).toHaveLength(1);
+  });
+  it("clamps negative usage and read tokens to 0", () => {
+    const a = deriveAgents([e("a", "usage", { input: -5, output: 3, costUsd: -1 })], []);
+    expect(a[0]).toMatchObject({ tokens: 3, costUsd: 0 });
+    expect(deriveFlow([e("b", "blackboard_read", { key: "k", version: 1, tokens: -9, author: "a" })])[0]!.tokens).toBe(0);
   });
 });
 

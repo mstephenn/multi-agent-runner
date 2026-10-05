@@ -5,7 +5,8 @@
   "scripts": {
     "test": "vitest run",
     "mar": "node packages/cli/bin/mar.mjs",
-    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p packages/ui/tsconfig.json",
+    "typecheck:ui": "tsc --noEmit -p packages/ui/tsconfig.json",
     "test:e2e": "pnpm --filter @mar/ui build && pnpm --filter @mar/ui exec playwright test",
     "test:live": "MAR_LIVE=1 vitest run packages/cli/test/live.test.ts"
   },

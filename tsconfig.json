@@ -7,10 +7,10 @@
     "noEmit": true,
     "skipLibCheck": true,
     "types": ["node"],
-    "jsx": "react-jsx",
-    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "lib": ["ES2022"],
     "baseUrl": ".",
     "paths": { "@mar/*": ["packages/*/src/index.ts"] }
   },
-  "include": ["packages/*/src", "packages/*/test"]
+  "include": ["packages/*/src", "packages/*/test"],
+  "exclude": ["packages/ui", "**/node_modules", "**/dist"]
 }
