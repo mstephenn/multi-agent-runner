@@ -22,14 +22,16 @@ export function publishResult(store: Store, runId: string, taskId: string, r: Ta
     store.appendEvent({ run_id: runId, task_id: taskId, agent_id: taskId, type: "blackboard_write", payload: { key: e.key, version: e.version, kind } });
     out.push(e);
   };
+  // Every key is ALWAYS written (explicit "(none)" for empty lists) so a dependent's `needs` never misses a key
+  // that the planner and parseDag allow it to ask for.
+  const NONE = "(none)";
   put("summary", "summary", r.summary);
-  if (r.decisions.length) put("decisions", "decision", fitList(r.decisions.map((d) => `- ${redact(d)}`)));
-  if (r.openQuestions.length) put("open_questions", "open_question", fitList(r.openQuestions.map((q) => `- ${redact(q)}`)));
-  if (r.filesChanged.length) {
-    const list = r.filesChanged.join("\n");
-    if (list.length <= MAX_BB_BODY_CHARS) put("files", "file_change", list, r.filesChanged);
-    else put("files", "artifact_ref", `${r.filesChanged.length} files changed; see refs`, r.filesChanged.slice(0, 20));
-  }
+  put("decisions", "decision", r.decisions.length ? fitList(r.decisions.map((d) => `- ${redact(d)}`)) : NONE);
+  put("open_questions", "open_question", r.openQuestions.length ? fitList(r.openQuestions.map((q) => `- ${redact(q)}`)) : NONE);
+  const list = r.filesChanged.join("\n");
+  if (!r.filesChanged.length) put("files", "file_change", NONE);
+  else if (list.length <= MAX_BB_BODY_CHARS) put("files", "file_change", list, r.filesChanged);
+  else put("files", "artifact_ref", `${r.filesChanged.length} files changed; see refs`, r.filesChanged.slice(0, 20));
   return out;
 }
 

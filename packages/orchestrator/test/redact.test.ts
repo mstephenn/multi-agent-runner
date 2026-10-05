@@ -66,3 +66,41 @@ describe("redact hardening", () => {
     for (const x of ["tokenizer: bpe", "secretary=bob", "a.b.c://x", "key=value", "private=1", "my-key: 5"]) expect(r(x)).toBe(x);
   });
 });
+
+describe("redact gaps (M1)", () => {
+  const r = redact;
+  it("redacts *_PASS names", () => {
+    expect(r("DB_PASS=hunter2")).toBe("DB_PASS=[REDACTED]");
+    expect(r("pass: hunter2")).toBe("pass: [REDACTED]");
+  });
+  it("redacts bare KEY-suffix names but keeps benign ones", () => {
+    expect(r("STRIPE_KEY=abc123")).toBe("STRIPE_KEY=[REDACTED]");
+    expect(r("stripeKey=abc123")).toBe("stripeKey=[REDACTED]");
+    for (const x of ["max_tokens=100", "tokenizer=bpe", "name=bob", "key=value", "my-key: 5", "primary_key=id", "sort_key=a", "bypass=1"]) expect(r(x)).toBe(x);
+  });
+  it("redacts credentials=", () => {
+    expect(r("credentials=abc:def")).toBe("credentials=[REDACTED]");
+    expect(r("AWS_CREDENTIALS=zzz")).toBe("AWS_CREDENTIALS=[REDACTED]");
+  });
+  it("redacts sk_live_ / sk_test_ keys", () => {
+    expect(r("k sk_live_abcdefghijkl1234 z")).toBe("k [REDACTED] z");
+    expect(r("k sk_test_abcdefghijkl1234 z")).toBe("k [REDACTED] z");
+  });
+  it("redacts JWTs", () => {
+    const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    expect(r(`t ${jwt} z`)).toBe("t [REDACTED] z");
+  });
+  it("redacts Authorization: Basic", () => {
+    const out = r("Authorization: Basic dXNlcjpwYXNzd29yZA==");
+    expect(out).not.toContain("dXNlcjpw");
+    expect(out).toContain("Authorization");
+  });
+  it("stays linear on adversarial input for the new patterns (<200ms)", () => {
+    for (const unit of ["eyJabcde.", "sk_live_", "Basic ", "A_KEY", "pass="]) {
+      const big = unit.repeat(20_000);
+      const t = performance.now();
+      redact(big);
+      expect(performance.now() - t).toBeLessThan(200);
+    }
+  });
+});

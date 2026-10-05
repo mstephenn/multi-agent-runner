@@ -6,11 +6,19 @@ const setup = () => { const s = new Store(":memory:"); s.createRun("r", "g", "/x
 const task = (needs: string[]) => ({ id: "b", role: "reviewer", runtime: "claude", tier: "mid", goal: "g", dependsOn: ["a"], needs }) as any;
 
 describe("blackboard", () => {
-  it("publishes summary and skips empty lists", () => {
+  // updated: used to assert empty lists were skipped; every key is now always written (explicit "(none)") so `needs` never misses.
+  it("always publishes all four keys, with an explicit (none) body for empty lists", () => {
     const s = setup();
     const e = publishResult(s, "r", "a", { summary: "did it", filesChanged: ["x.ts"], decisions: [], openQuestions: [] });
-    expect(e.map((x) => x.key).sort()).toEqual(["a/files", "a/summary"]);
-    expect(s.listEvents("r").filter((x) => x.type === "blackboard_write")).toHaveLength(2);
+    expect(e.map((x) => x.key).sort()).toEqual(["a/decisions", "a/files", "a/open_questions", "a/summary"]);
+    expect(s.latestBb("r", "a/decisions")).toMatchObject({ body: "(none)", kind: "decision" });
+    expect(s.latestBb("r", "a/open_questions")).toMatchObject({ body: "(none)", kind: "open_question" });
+    expect(s.listEvents("r").filter((x) => x.type === "blackboard_write")).toHaveLength(4);
+  });
+  it("writes (none) for an empty files list too", () => {
+    const s = setup();
+    publishResult(s, "r", "a", { summary: "s", filesChanged: [], decisions: [], openQuestions: [] });
+    expect(s.latestBb("r", "a/files")).toMatchObject({ body: "(none)", kind: "file_change", refs: [] });
   });
   it("truncates over-long summaries to the cap", () => {
     const s = setup();

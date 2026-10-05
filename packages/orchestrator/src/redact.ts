@@ -9,6 +9,9 @@ const TOKEN_PATTERNS: [RegExp, string][] = [
   [/\bxox[abprs]-[A-Za-z0-9-]{10,}/g, "[REDACTED]"],
   [/\bAIza[0-9A-Za-z_-]{20,}/g, "[REDACTED]"],
   [/\bAKIA[0-9A-Z]{16}\b/g, "[REDACTED]"],
+  [/\b[sr]k_(?:live|test)_[A-Za-z0-9]{8,}/g, "[REDACTED]"],
+  [/\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*/g, "[REDACTED]"],
+  [/\b(Authorization\s*[:=]\s*)Basic\s+[A-Za-z0-9+/=._~-]+/gi, "$1Basic [REDACTED]"],
   [/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [REDACTED]"],
 ];
 
@@ -17,10 +20,14 @@ const TOKEN_PATTERNS: [RegExp, string][] = [
 const NAME_SEP = /(["']?)([A-Za-z][A-Za-z0-9_-]{0,63})\1(\s*[=:]\s*)/g;
 const VALUE = /"(?:[^"\\]|\\.)*"|'[^']*'|[^\s,;&}"']+/y;
 
-const SECRET_SUFFIX = /(secret|token|password|passwd|apikey|privatekey)$/;
+const SECRET_SUFFIX = /(secret|token|password|passwd|apikey|privatekey|credentials?)$/;
+// `KEY` alone is secret only for env-style names (STRIPE_KEY, stripeKey): bare `key` and hyphenated names
+// like `my-key` stay benign, as do well-known non-secret keys (primary_key, sort_key, ...).
+const BENIGN_KEY_PREFIX = new Set(["primary", "foreign", "sort", "cache", "partition"]);
 function isSecretName(name: string): boolean {
   const seg = name.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase().split(/[_-]/);
-  return seg.some((w, i) => SECRET_SUFFIX.test(w) || w === "pwd" || (w === "api" && seg[i + 1] === "key") || (w === "private" && seg[i + 1] === "key"));
+  const bareKey = !name.includes("-") && seg.length >= 2 && seg[seg.length - 1] === "key" && !BENIGN_KEY_PREFIX.has(seg[seg.length - 2]);
+  return bareKey || seg.some((w, i) => SECRET_SUFFIX.test(w) || w === "pwd" || w === "pass" || (w === "api" && seg[i + 1] === "key") || (w === "private" && seg[i + 1] === "key"));
 }
 
 function redactAssignments(s: string): string {

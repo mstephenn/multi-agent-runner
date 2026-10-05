@@ -16,16 +16,24 @@ export interface RunDeps {
   maxAttempts?: number;                     // attempts per worker task; default 1 (no retry)
   repairResult?: (raw: string) => Promise<string>;
   signal?: AbortSignal;
+  // Per-attempt wall-clock limit; undefined = no timeout (the CLI supplies the default). A timeout fails the task
+  // with `failed:timeout` (not retried).
+  taskTimeoutMs?: number;
+  // Forwarded to the adapter as `maxBudgetUsd`. Claude only reports usage at the end of a run, so the token budget
+  // (`budgetTokens`) is enforced post-hoc; this USD cap is the only real mid-run guard.
+  maxBudgetUsdPerTask?: number;
 }
 type Outcome = "done" | "failed" | "blocked";
 class TaskFailure extends Error { constructor(m: string, public retryable = true) { super(m); } }
 
+const TIMEOUT = Symbol("timeout");
 const stripFence = (s: string) => s.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
 async function parseResult(raw: string, repair?: (r: string) => Promise<string>): Promise<TaskResult> {
   const attempt = (s: string) => TaskResultSchema.parse(JSON.parse(stripFence(s)));
   try { return attempt(raw); } catch {
-    if (!repair) throw new TaskFailure("bad-result");
-    try { return attempt(await repair(raw)); } catch { throw new TaskFailure("bad-result"); }
+    // Not retryable: a retry would just reproduce the same unparseable output.
+    if (!repair) throw new TaskFailure("bad-result", false);
+    try { return attempt(await repair(raw)); } catch { throw new TaskFailure("bad-result", false); }
   }
 }
 
@@ -77,25 +85,49 @@ export async function runDag(d: RunDeps): Promise<Record<string, Outcome>> {
     const onAbort = () => ac.abort();
     d.signal?.addEventListener("abort", onAbort);
     if (d.signal?.aborted) ac.abort();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let committed = false;
     try {
+      const consume = async (): Promise<string | undefined> => {
+        let raw: string | undefined;
+        for await (const ev of d.adapters[task.runtime].run({
+          taskId: task.id, prompt, cwd, model: d.modelFor(task.runtime, task.tier),
+          allowedTools: d.toolsFor(task.role), signal: ac.signal, unsafe: d.unsafe,
+          maxBudgetUsd: d.maxBudgetUsdPerTask,
+        })) {
+          if (ev.type === "usage") { budget.add(ev); emit(task, "usage", { ...ev }); }
+          else if (ev.type === "assistant_text") emit(task, "assistant_text", { text: redact(ev.text) });
+          else if (ev.type === "tool_call") emit(task, "tool_call", { name: redact(ev.name), input: boundedToolInput(ev.input) });
+          else if (ev.type === "tool_result") emit(task, "tool_result", { name: redact(ev.name), output: redact(ev.output).slice(0, 2000), isError: ev.isError ?? false });
+          else raw = ev.text;
+          // Budget is a hard cap: even if the final `result` event arrives after the cap was crossed, the task fails.
+          if (budget.exceeded) { ac.abort(); throw new TaskFailure("failed:budget", false); }
+        }
+        return raw;
+      };
+      const work = consume();
       let raw: string | undefined;
-      for await (const ev of d.adapters[task.runtime].run({
-        taskId: task.id, prompt, cwd, model: d.modelFor(task.runtime, task.tier),
-        allowedTools: d.toolsFor(task.role), signal: ac.signal, unsafe: d.unsafe,
-      })) {
-        if (ev.type === "usage") { budget.add(ev); emit(task, "usage", { ...ev }); }
-        else if (ev.type === "assistant_text") emit(task, "assistant_text", { text: redact(ev.text) });
-        else if (ev.type === "tool_call") emit(task, "tool_call", { name: redact(ev.name), input: boundedToolInput(ev.input) });
-        else if (ev.type === "tool_result") emit(task, "tool_result", { name: redact(ev.name), output: redact(ev.output).slice(0, 2000), isError: ev.isError ?? false });
-        else raw = ev.text;
-        // Budget is a hard cap: even if the final `result` event arrives after the cap was crossed, the task fails.
-        if (budget.exceeded) { ac.abort(); throw new TaskFailure("failed:budget", false); }
+      if (d.taskTimeoutMs === undefined) raw = await work;
+      else {
+        // Race against the timer so an adapter that ignores the abort signal (or never yields) cannot hang the run.
+        const timeout = new Promise<typeof TIMEOUT>((res) => { timer = setTimeout(() => { ac.abort(); res(TIMEOUT); }, d.taskTimeoutMs); });
+        work.catch(() => {}); // a late rejection after the timeout won must not be unhandled
+        const first = await Promise.race([work, timeout]);
+        if (first === TIMEOUT) throw new TaskFailure("failed:timeout", false);
+        raw = first;
       }
       if (raw === undefined) throw new TaskFailure("no-result", !d.signal?.aborted);
       const res = await parseResult(raw, d.repairResult);
       await d.worktrees.commit(task.id, `mar(${task.id}): ${task.goal.split("\n")[0].slice(0, 60)}`);
+      committed = true;
       return res;
+    } catch (e) {
+      // Keep partial work on the per-task branch: the worktree is removed below. Best effort: a failing commit
+      // (e.g. nothing to add, git error) must not mask the original failure.
+      if (!committed) await d.worktrees.commit(task.id, `mar(${task.id}): wip (failed attempt)`).catch(() => {});
+      throw e;
     } finally {
+      if (timer !== undefined) clearTimeout(timer);
       d.signal?.removeEventListener("abort", onAbort);
       // A failed worktree cleanup must not mask the task outcome (explicitly tolerated).
       await d.worktrees.remove(task.id).catch(() => {});

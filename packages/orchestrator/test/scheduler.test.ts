@@ -232,13 +232,14 @@ describe("runDag", () => {
     expect(store.taskStatuses("r").find((s) => s.task_id === "a")?.detail).toContain("no worktree");
     expect(removed).toEqual(["c"]);
   });
-  it("calls remove after a budget kill", async () => {
+  // updated: used to require "must not commit" on a budget kill; partial work is now saved (wip commit) before remove.
+  it("saves a wip commit, then removes, after a budget kill", async () => {
     const big = [{ type: "usage", input: 500, output: 500, cached: null, costUsd: null }, { type: "assistant_text", text: "more" }];
-    const removed: string[] = [];
-    const wt = { create: async (id: string) => `/wt/${id}`, commit: async () => { throw new Error("must not commit"); }, remove: async (id: string) => { removed.push(id); } };
+    const order: string[] = [];
+    const wt = { create: async (id: string) => `/wt/${id}`, commit: async (id: string, m: string) => { order.push(`commit:${id}:${m}`); }, remove: async (id: string) => { order.push(`remove:${id}`); } };
     const { deps } = harness([T("a", { budgetTokens: 100 })], () => big as any, { worktrees: wt });
     expect(await runDag(deps)).toEqual({ a: "failed" });
-    expect(removed).toEqual(["a"]);
+    expect(order).toEqual(["commit:a:mar(a): wip (failed attempt)", "remove:a"]);
   });
   it("a result arriving after the budget cap still fails the task (hard cap)", async () => {
     const evs = [{ type: "usage", input: 500, output: 500, cached: null, costUsd: null }, ...ok()];
@@ -275,5 +276,117 @@ describe("runDag", () => {
     const boom = () => { throw new Error("db closed"); };
     for (const m of ["setTaskStatus", "appendEvent", "taskStatuses", "latestBb", "writeBb"] as const) vi.spyOn(store, m).mockImplementation(boom as never);
     expect(await runDag(deps)).toEqual({ a: "failed", b: "blocked" });
+  });
+
+  describe("optional blackboard keys (I2)", () => {
+    it("a dependent needing up/decisions runs when upstream returned decisions: []", async () => {
+      const { f, deps } = harness([T("up"), T("dn", { dependsOn: ["up"], needs: ["up/decisions", "up/open_questions", "up/files"] })], () => ok("U"));
+      expect(await runDag(deps)).toEqual({ up: "done", dn: "done" });
+      expect(f.calls.find((c) => c.taskId === "dn")!.prompt).toContain("(none)");
+    });
+  });
+
+  describe("save work on failure (I3)", () => {
+    const rec = (over: Partial<{ commit: (id: string, m: string) => Promise<void> }> = {}) => {
+      const order: string[] = [];
+      const wt = { create: async (id: string) => `/wt/${id}`, commit: async (id: string, m: string) => { order.push(`commit:${m}`); await over.commit?.(id, m); }, remove: async () => { order.push("remove"); } };
+      return { order, wt };
+    };
+    const bad = () => [{ type: "result", text: "not json" }] as any;
+    it("bad result: wip commit then remove", async () => {
+      const { order, wt } = rec();
+      expect(await runDag(harness([T("a")], bad, { worktrees: wt }).deps)).toEqual({ a: "failed" });
+      expect(order).toEqual(["commit:mar(a): wip (failed attempt)", "remove"]);
+    });
+    it("adapter throw: wip commit then remove", async () => {
+      const { order, wt } = rec();
+      expect(await runDag(harness([T("a")], () => new Error("boom"), { worktrees: wt }).deps)).toEqual({ a: "failed" });
+      expect(order).toEqual(["commit:mar(a): wip (failed attempt)", "remove"]);
+    });
+    it("a failing wip commit does not mask the original error", async () => {
+      const { order, wt } = rec({ commit: async () => { throw new Error("git exploded"); } });
+      const { store, deps } = harness([T("a")], bad, { worktrees: wt });
+      expect(await runDag(deps)).toEqual({ a: "failed" });
+      expect(store.taskStatuses("r")[0].detail).toBe("bad-result");
+      expect(order).toEqual(["commit:mar(a): wip (failed attempt)", "remove"]);
+    });
+    it("success path commits once with the goal message and no wip commit", async () => {
+      const { order, wt } = rec();
+      await runDag(harness([T("a")], () => ok(), { worktrees: wt }).deps);
+      expect(order).toEqual(["commit:mar(a): do a", "remove"]);
+    });
+  });
+
+  describe("bad-result is not retried (M2)", () => {
+    it("calls the adapter once with maxAttempts 2", async () => {
+      const { f, deps } = harness([T("a")], () => [{ type: "result", text: "not json" }] as any, { maxAttempts: 2 });
+      expect(await runDag(deps)).toEqual({ a: "failed" });
+      expect(f.calls).toHaveLength(1);
+    });
+  });
+
+  describe("per-task timeout and budget (I4)", () => {
+    const never = (_i: any) => new Promise<never>(() => {});
+    const hang = (over: object = {}) => {
+      const removed: string[] = [], committed: string[] = [];
+      const wt = { create: async (id: string) => `/wt/${id}`, commit: async (id: string) => { committed.push(id); }, remove: async (id: string) => { removed.push(id); } };
+      const h = harness([T("a"), T("b")], (i: any) => (i.taskId === "a" ? [] : ok()), { worktrees: wt, ...over });
+      // task "a" hangs forever and ignores the abort signal
+      const good = h.deps.adapters.claude;
+      h.deps.adapters = { claude: { runtime: "claude", async *run(i: any) { if (i.taskId === "a") { await never(i); } yield* good.run(i); } }, codex: good } as any;
+      return { ...h, removed, committed };
+    };
+    it("fails a hung task with failed:timeout, cleans up, and lets others finish", async () => {
+      vi.useFakeTimers();
+      try {
+        const { store, deps, removed, committed } = hang({ taskTimeoutMs: 1000 });
+        const p = runDag(deps);
+        await vi.advanceTimersByTimeAsync(1000);
+        expect(await p).toEqual({ a: "failed", b: "done" });
+        expect(store.taskStatuses("r").find((s) => s.task_id === "a")?.detail).toBe("failed:timeout");
+        expect(removed.sort()).toEqual(["a", "b"]);
+        expect(committed).toContain("a");
+        expect(vi.getTimerCount()).toBe(0);
+      } finally { vi.useRealTimers(); }
+    });
+    it("does not retry a timeout and aborts the attempt's signal", async () => {
+      vi.useFakeTimers();
+      try {
+        const seen: AbortSignal[] = [];
+        const { store, deps } = harness([T("a")], () => ok(), { taskTimeoutMs: 500, maxAttempts: 3 });
+        deps.adapters = { claude: { runtime: "claude", async *run(i: any) { seen.push(i.signal); await never(i); yield* []; } }, codex: deps.adapters.codex } as any;
+        const p = runDag(deps);
+        await vi.advanceTimersByTimeAsync(500);
+        expect(await p).toEqual({ a: "failed" });
+        expect(seen).toHaveLength(1);
+        expect(seen[0].aborted).toBe(true);
+        expect(store.taskStatuses("r")[0].detail).toBe("failed:timeout");
+      } finally { vi.useRealTimers(); }
+    });
+    it("no timeout configured: no timer is armed", async () => {
+      vi.useFakeTimers();
+      try {
+        const { deps } = harness([T("a")], () => ok());
+        const p = runDag(deps);
+        expect(await p).toEqual({ a: "done" });
+        expect(vi.getTimerCount()).toBe(0);
+      } finally { vi.useRealTimers(); }
+    });
+    it("clears the timer after a normal finish", async () => {
+      vi.useFakeTimers();
+      try {
+        const { deps } = harness([T("a")], () => ok(), { taskTimeoutMs: 60_000 });
+        expect(await runDag(deps)).toEqual({ a: "done" });
+        expect(vi.getTimerCount()).toBe(0);
+      } finally { vi.useRealTimers(); }
+    });
+    it("passes maxBudgetUsdPerTask to the adapter as maxBudgetUsd", async () => {
+      const { f, deps } = harness([T("a")], () => ok(), { maxBudgetUsdPerTask: 2.5 });
+      await runDag(deps);
+      expect(f.calls[0].maxBudgetUsd).toBe(2.5);
+      const none = harness([T("a")], () => ok());
+      await runDag(none.deps);
+      expect(none.f.calls[0].maxBudgetUsd).toBeUndefined();
+    });
   });
 });

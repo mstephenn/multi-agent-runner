@@ -18,7 +18,7 @@ describe("planGoal", () => {
   });
   it("accepts fenced JSON", async () => {
     const { p } = run(() => res("```json\n" + JSON.stringify(valid) + "\n```"));
-    await expect(p).resolves.toBeTruthy();
+    expect((await p).tasks.map((t) => t.id)).toEqual(["impl", "rev"]);
   });
   it("extracts the first JSON object when wrapped in prose (braces in strings ok)", async () => {
     const v = { tasks: [{ ...valid.tasks[0], goal: "use } and { in code" }] };
@@ -66,9 +66,10 @@ describe("planGoal", () => {
     expect(f.calls).toHaveLength(2);
     expect(f.calls[1].prompt).toMatch(/at most 8/);
     const ok8 = { tasks: many.tasks.slice(0, 8) };
-    await expect(run(() => res(ok8)).p).resolves.toBeTruthy();
+    expect((await run(() => res(ok8)).p).tasks).toHaveLength(8);
     const rec = run((_i: any, n: number) => res(n === 1 ? many : ok8));
-    await expect(rec.p).resolves.toBeTruthy();
+    expect((await rec.p).tasks).toHaveLength(8);
+    expect(rec.f.calls).toHaveLength(2);
   });
   it("feeds back only a capped error, never the raw model output", async () => {
     const garbage = "SECRET-" + "Z".repeat(2000);
@@ -113,7 +114,9 @@ describe("planGoal", () => {
   });
   it("allows codex reviewers (no extra policy)", async () => {
     const v = { tasks: [{ ...valid.tasks[0], role: "reviewer" }] };
-    await expect(run(() => res(v)).p).resolves.toBeTruthy();
+    const dag = await run(() => res(v)).p;
+    expect(dag.tasks).toHaveLength(1);
+    expect(dag.tasks[0]).toMatchObject({ id: "impl", role: "reviewer", runtime: "codex" });
   });
 });
 
