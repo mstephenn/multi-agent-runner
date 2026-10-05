@@ -1,10 +1,11 @@
 import type { BbEntry, Dag, StoredEvent } from "@mar/core";
 
 export type TaskRow = { task_id: string; status: string; detail: string | null };
-export type Snapshot = { events: StoredEvent[]; blackboard: BbEntry[]; tasks: TaskRow[]; plan: Dag | null; truncated?: boolean };
+export type Snapshot = { events: StoredEvent[]; blackboard: BbEntry[]; tasks: TaskRow[]; plan: Dag | null; reports: ReportRow[]; truncated?: boolean };
+export type ReportRow = { task_id: string; body: string };
 export type Conn = "loading" | "live" | "reconnecting";
 export type ClientState = { snap: Snapshot; conn: Conn; error: string | null; notFound: boolean };
-export const EMPTY: Snapshot = { events: [], blackboard: [], tasks: [], plan: null };
+export const EMPTY: Snapshot = { events: [], blackboard: [], tasks: [], plan: null, reports: [] };
 export const INITIAL: ClientState = { snap: EMPTY, conn: "loading", error: null, notFound: false };
 
 export const DEBOUNCE_MS = 250;
@@ -65,7 +66,7 @@ export function createRunClient(runId: string, deps: Deps, onState: (s: ClientSt
   let ws: SocketLike | undefined, retryTimer: ReturnType<typeof setTimeout> | undefined, reloadTimer: ReturnType<typeof setTimeout> | undefined;
   const log = new EventLog();
   const state: ClientState = { snap: EMPTY, conn: "loading", error: null, notFound: false };
-  let rest = { blackboard: EMPTY.blackboard, tasks: EMPTY.tasks, plan: EMPTY.plan as Dag | null, truncated: false };
+  let rest = { blackboard: EMPTY.blackboard, tasks: EMPTY.tasks, plan: EMPTY.plan as Dag | null, reports: [] as ReportRow[], truncated: false };
   let limit: number | null = null; // null = server default window; set to the max once a load comes back truncated
 
   const flush = () => {
@@ -85,7 +86,7 @@ export function createRunClient(runId: string, deps: Deps, onState: (s: ClientSt
       const s = (await res.json()) as Snapshot;
       if (!alive || mine !== seq) return "stale";
       log.addAll(s.events);
-      rest = { blackboard: s.blackboard, tasks: s.tasks, plan: s.plan ?? null, truncated: s.truncated === true };
+      rest = { blackboard: s.blackboard, tasks: s.tasks, plan: s.plan ?? null, reports: s.reports ?? [], truncated: s.truncated === true };
       state.error = null;
       schedule();
       if (rest.truncated && limit === null) { limit = MAX_EVENT_LIMIT; return load(); } // ask for the widest window, once

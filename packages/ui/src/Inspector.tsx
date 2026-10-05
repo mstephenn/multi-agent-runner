@@ -2,15 +2,16 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react"
 import type { BbEntry, Dag, StoredEvent } from "@mar/core";
 import { deriveActivity, deriveContext, type AgentView } from "./derive.js";
 import { budgetUsage, fmtCost, fmtTokens } from "./fmt.js";
+import type { ReportRow } from "./runClient.js";
 import { drawerIn, rowsIn } from "./motion.js";
 
 const TABS = ["Context", "Activity", "Output", "Usage"] as const;
 type Tab = (typeof TABS)[number];
 const MAX_ACTIVITY = 500;
 
-type Props = { agent: AgentView; events: StoredEvent[]; blackboard: BbEntry[]; plan: Dag | null; onClose: () => void };
+type Props = { agent: AgentView; events: StoredEvent[]; blackboard: BbEntry[]; plan: Dag | null; reports?: ReportRow[]; onClose: () => void };
 
-export function Inspector({ agent, events, blackboard, plan, onClose }: Props) {
+export function Inspector({ agent, events, blackboard, plan, reports = [], onClose }: Props) {
   const [tab, setTab] = useState<Tab>("Context");
   const spec = plan?.tasks.find((t) => t.id === agent.id);
   const onKey = (e: KeyboardEvent) => {
@@ -37,7 +38,7 @@ export function Inspector({ agent, events, blackboard, plan, onClose }: Props) {
       <div role="tabpanel" id={`panel-${tab}`} aria-labelledby={`tab-${tab}`} className="panel">
         {tab === "Context" && <ContextTab id={agent.id} events={events} blackboard={blackboard} />}
         {tab === "Activity" && <ActivityTab id={agent.id} events={events} />}
-        {tab === "Output" && <OutputTab id={agent.id} blackboard={blackboard} />}
+        {tab === "Output" && <OutputTab id={agent.id} blackboard={blackboard} reports={reports} />}
         {tab === "Usage" && <UsageTab agent={agent} budget={spec?.budgetTokens} />}
       </div>
     </aside>
@@ -90,10 +91,12 @@ function ActivityTab({ id, events }: { id: string; events: StoredEvent[] }) {
   );
 }
 
-function OutputTab({ id, blackboard }: { id: string; blackboard: BbEntry[] }) {
+function OutputTab({ id, blackboard, reports }: { id: string; blackboard: BbEntry[]; reports: ReportRow[] }) {
   const mine = useMemo(() => blackboard.filter((b) => b.author_task === id), [blackboard, id]);
-  if (mine.length === 0) return <p className="muted">No entries written.</p>;
-  return <>{mine.map((b) => <section key={b.id} className="entry"><h3><span className="mono">{b.key}</span> <span className="muted">v{b.version} · {b.kind}</span></h3><pre>{b.body}</pre></section>)}</>;
+  const report = reports.find((r) => r.task_id === id);
+  if (mine.length === 0 && !report) return <p className="muted">No entries written.</p>;
+  // The report is untrusted model output: rendered strictly as text, never as HTML or markdown.
+  return <>{report && <section className="entry"><h3>Report</h3><pre className="report" data-testid="report">{report.body}</pre></section>}{mine.map((b) => <section key={b.id} className="entry"><h3><span className="mono">{b.key}</span> <span className="muted">v{b.version} · {b.kind}</span></h3><pre>{b.body}</pre></section>)}</>;
 }
 
 function UsageTab({ agent, budget }: { agent: AgentView; budget: number | undefined }) {

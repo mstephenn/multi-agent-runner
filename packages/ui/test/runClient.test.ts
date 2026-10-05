@@ -32,6 +32,20 @@ const last = () => states.at(-1)!;
 beforeEach(() => { vi.useFakeTimers(); FakeSocket.all = []; calls.length = 0; states = []; fetchImpl = async () => ok(snapshot([ev(1), ev(2)])); });
 afterEach(() => { vi.useRealTimers(); });
 
+describe("reports in the snapshot", () => {
+  it("defaults to [] when the server omits reports, and passes them through otherwise", async () => {
+    const c = createRunClient("r", deps(), (s) => states.push(s));
+    await settle(300);
+    expect(last().snap.reports).toEqual([]);
+    c();
+    fetchImpl = async () => ok(snapshot([ev(1)], { reports: [{ task_id: "a", body: "R" }] }));
+    const c2 = createRunClient("r", deps(), (s) => states.push(s));
+    await settle(300);
+    expect(last().snap.reports).toEqual([{ task_id: "a", body: "R" }]);
+    c2();
+  });
+});
+
 describe("EventLog", () => {
   it("dedupes by id, tracks lastId and sorts only when out of order", () => {
     const l = new EventLog();

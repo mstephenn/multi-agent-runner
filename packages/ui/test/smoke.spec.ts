@@ -24,6 +24,7 @@ test.beforeAll(async () => {
     if (e.type === "blackboard_write") for (const b of fixture.blackboard) store.writeBb({ ...b, run_id: id });
     store.appendEvent({ run_id: id, task_id: e.task_id, agent_id: e.task_id, type: e.type, payload: e.payload });
   }
+  for (const r of fixture.reports) store.saveReport(id, r.task_id, r.body);
   srv = await startServer(store, { port: 0, staticDir: dist });
   base = `http://127.0.0.1:${srv.port}`;
 });
@@ -214,4 +215,27 @@ test("reduced motion: no animation styles are ever applied", async ({ browser })
   expect(await page.getByTestId("node-impl").evaluate((el) => (el as HTMLElement).getAttribute("style") ?? "")).not.toMatch(/scale|translate|opacity/);
   await expect(page.getByTestId("total-tokens")).toHaveText("1,200");
   await ctx.close();
+});
+
+test("Output tab shows the full report un-truncated, above the blackboard entries", async ({ page }) => {
+  await page.getByTestId("node-impl").click();
+  await page.getByRole("tab", { name: "Output" }).click();
+  const report = page.getByTestId("report");
+  const text = (await report.textContent()) ?? "";
+  expect(text.length).toBeGreaterThan(1200);
+  expect(text).toBe(fixture.reports[0].body);
+  expect(text).toContain("END-OF-REPORT-MARKER");
+  await expect(page.getByRole("heading", { name: "Report" })).toBeVisible();
+  await expect(page.locator(".panel .entry").first()).toContainText("Report"); // report comes first
+  await expect(page.locator(".panel")).toContainText("impl/summary");
+});
+
+test("an HTML-looking report renders as literal text", async ({ page }) => {
+  await page.getByTestId("node-rev").click();
+  await page.getByRole("tab", { name: "Output" }).click();
+  const report = page.getByTestId("report");
+  await expect(report).toHaveText(fixture.reports[1].body);
+  await expect(page.locator(".panel img")).toHaveCount(0);
+  await expect(page.locator(".panel b")).toHaveCount(0);
+  expect(await page.evaluate(() => (window as unknown as { __pwned?: number }).__pwned)).toBeUndefined();
 });

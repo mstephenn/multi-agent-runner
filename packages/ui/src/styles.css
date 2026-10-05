@@ -93,6 +93,7 @@ th { font-size: 11px; color: var(--muted); font-weight: 600; }
 .activity { list-style: none; margin: 0; padding: 0; max-height: 100%; overflow: auto; }
 .activity li { display: grid; grid-template-columns: 52px 1fr; gap: 8px; padding: 3px 0; border-bottom: 1px dashed var(--line); }
 .act-kind { font: 10px var(--mono); text-transform: uppercase; color: var(--muted); padding-top: 2px; }
+.report { white-space: pre-wrap; max-height: none; }
 .act-text { font: 12px var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 .activity .err .act-kind, .activity .err .act-text { color: var(--err); }
 .usage { display: grid; grid-template-columns: 90px 1fr; gap: 6px 8px; margin: 0; }

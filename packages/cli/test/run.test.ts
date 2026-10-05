@@ -5,7 +5,7 @@ import { loadConfig } from "../src/config.js";
 import { executeRun, makeRepair, parseCli, runMain, UsageError, MAX_REPAIR_INPUT, type MainDeps } from "../src/main.js";
 import { startServer } from "../../server/src/server.js";
 import { fakeAdapter, ok } from "../../orchestrator/test/fakeAdapter.js";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs"; import { tmpdir } from "node:os"; import { join } from "node:path";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"; import { tmpdir } from "node:os"; import { join } from "node:path";
 
 const roots: string[] = [];
 afterEach(() => { while (roots.length) rmSync(roots.pop()!, { recursive: true, force: true }); });
@@ -226,6 +226,24 @@ describe("runMain", () => {
     expect(out).toContain("No branches were created: all tasks were read-only.");
     expect(out).not.toContain("git merge");
     expect(out).not.toMatch(/mar\/r[a-z0-9]+\/q/);
+  });
+  it("prints the final task's full report before the status table and saves it under .mar/reports", async () => {
+    const c = capture();
+    const report = "# Findings\n" + "detail line\n".repeat(500);
+    const plan = { tasks: [{ id: "q", role: "researcher", runtime: "claude", tier: "low", goal: "Q" }] };
+    const f = fakeAdapter((i: any) => (i.taskId === "planner" ? [{ type: "result", text: JSON.stringify(plan) }]
+      : [{ type: "result", text: JSON.stringify({ summary: "abstract", report, filesChanged: [], decisions: [], openQuestions: [] }) }]));
+    const h = harness({ adapters: () => ({ claude: f.adapter, codex: f.adapter }), worktrees: { ...wt, shared: { acquire: async () => "/wt/.shared", release: async () => {} } } });
+    const repo = gitRepo();
+    expect(await runMain(["run", "explain", "--repo", repo, "--port", String(await free())], h.deps)).toBe(0);
+    const out = c.out.join("\n");
+    expect(out).toContain("== Answer: q ==\n" + report);
+    expect(out).not.toContain("(summary only)");
+    expect(out.indexOf("== Answer: q ==")).toBeLessThan(out.indexOf("Run r"));
+    const m = out.match(/Saved: (.+\.mar\/reports\/(r[a-z0-9]+)\/q\.md)/);
+    expect(m).not.toBeNull();
+    expect(out.indexOf("Saved:")).toBeGreaterThan(out.indexOf("No branches were created"));
+    expect(readFileSync(m![1]!, "utf8")).toBe(report);
   });
   it("prints the real bound port when --port is not the bound one (fake server)", async () => {
     const c = capture();

@@ -81,7 +81,7 @@ export function App() {
       {cutoff !== null && <div className="banner info" role="status">Replaying: views show state as of the scrubber position.</div>}
       <main className="main">
         <GraphView agents={agents} plan={snap.plan} flow={flow} selected={selected} onSelect={setSelected} />
-        {agent && <Inspector key={agent.id} agent={agent} events={events} blackboard={blackboard} plan={snap.plan} onClose={() => setSelected(null)} />}
+        {agent && <Inspector key={agent.id} agent={agent} events={events} blackboard={blackboard} plan={snap.plan} reports={snap.reports} onClose={() => setSelected(null)} />}
       </main>
       <div className="bb-toggle">
         <button type="button" aria-expanded={showBb} onClick={() => setShowBb((v) => !v)}>Blackboard ({blackboard.length})</button>

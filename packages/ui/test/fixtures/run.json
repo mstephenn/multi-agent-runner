@@ -1,22 +1,144 @@
 {
-  "run": { "id": "r1", "goal": "Add a /health endpoint and review it", "repo": "/tmp/repo" },
+  "run": {
+    "id": "r1",
+    "goal": "Add a /health endpoint and review it",
+    "repo": "/tmp/repo"
+  },
   "plan": {
     "tasks": [
-      { "id": "impl", "role": "implementer", "runtime": "codex", "tier": "mid", "goal": "Implement the endpoint", "dependsOn": [], "needs": [], "budgetTokens": 20000 },
-      { "id": "rev", "role": "reviewer", "runtime": "claude", "tier": "high", "goal": "Review the change", "dependsOn": ["impl"], "needs": ["impl/summary"] }
+      {
+        "id": "impl",
+        "role": "implementer",
+        "runtime": "codex",
+        "tier": "mid",
+        "goal": "Implement the endpoint",
+        "dependsOn": [],
+        "needs": [],
+        "budgetTokens": 20000
+      },
+      {
+        "id": "rev",
+        "role": "reviewer",
+        "runtime": "claude",
+        "tier": "high",
+        "goal": "Review the change",
+        "dependsOn": [
+          "impl"
+        ],
+        "needs": [
+          "impl/summary"
+        ]
+      }
     ]
   },
-  "tasks": [{ "task_id": "impl", "status": "done", "detail": null }, { "task_id": "rev", "status": "running", "detail": null }],
-  "blackboard": [{ "key": "impl/summary", "author_task": "impl", "kind": "summary", "body": "Added GET /health returning ok.", "refs": [] }],
+  "tasks": [
+    {
+      "task_id": "impl",
+      "status": "done",
+      "detail": null
+    },
+    {
+      "task_id": "rev",
+      "status": "running",
+      "detail": null
+    }
+  ],
+  "blackboard": [
+    {
+      "key": "impl/summary",
+      "author_task": "impl",
+      "kind": "summary",
+      "body": "Added GET /health returning ok.",
+      "refs": []
+    }
+  ],
   "events": [
-    { "task_id": "impl", "type": "task_started", "payload": { "role": "implementer", "runtime": "codex", "tier": "mid" } },
-    { "task_id": "impl", "type": "prompt_sent", "payload": { "prompt": "Implement the endpoint", "keys": [], "tokens": 12 } },
-    { "task_id": "impl", "type": "usage", "payload": { "input": 900, "output": 300, "costUsd": 0.0123 } },
-    { "task_id": "impl", "type": "blackboard_write", "payload": { "key": "impl/summary", "version": 1 } },
-    { "task_id": "impl", "type": "task_finished", "payload": {} },
-    { "task_id": "rev", "type": "task_started", "payload": { "role": "reviewer", "runtime": "claude", "tier": "high" } },
-    { "task_id": "rev", "type": "blackboard_read", "payload": { "key": "impl/summary", "version": 1, "tokens": 42, "author": "impl" } },
-    { "task_id": "rev", "type": "prompt_sent", "payload": { "prompt": "Review the change. Context: Added GET /health returning ok.", "keys": ["impl/summary"], "tokens": 60 } },
-    { "task_id": "rev", "type": "assistant_text", "payload": { "text": "<img src=x onerror=\"window.__pwned=1\">" } }
+    {
+      "task_id": "impl",
+      "type": "task_started",
+      "payload": {
+        "role": "implementer",
+        "runtime": "codex",
+        "tier": "mid"
+      }
+    },
+    {
+      "task_id": "impl",
+      "type": "prompt_sent",
+      "payload": {
+        "prompt": "Implement the endpoint",
+        "keys": [],
+        "tokens": 12
+      }
+    },
+    {
+      "task_id": "impl",
+      "type": "usage",
+      "payload": {
+        "input": 900,
+        "output": 300,
+        "costUsd": 0.0123
+      }
+    },
+    {
+      "task_id": "impl",
+      "type": "blackboard_write",
+      "payload": {
+        "key": "impl/summary",
+        "version": 1
+      }
+    },
+    {
+      "task_id": "impl",
+      "type": "task_finished",
+      "payload": {}
+    },
+    {
+      "task_id": "rev",
+      "type": "task_started",
+      "payload": {
+        "role": "reviewer",
+        "runtime": "claude",
+        "tier": "high"
+      }
+    },
+    {
+      "task_id": "rev",
+      "type": "blackboard_read",
+      "payload": {
+        "key": "impl/summary",
+        "version": 1,
+        "tokens": 42,
+        "author": "impl"
+      }
+    },
+    {
+      "task_id": "rev",
+      "type": "prompt_sent",
+      "payload": {
+        "prompt": "Review the change. Context: Added GET /health returning ok.",
+        "keys": [
+          "impl/summary"
+        ],
+        "tokens": 60
+      }
+    },
+    {
+      "task_id": "rev",
+      "type": "assistant_text",
+      "payload": {
+        "text": "<img src=x onerror=\"window.__pwned=1\">"
+      }
+    }
+  ],
+  "reports": [
+    {
+      "task_id": "impl",
+      "body": "# Health endpoint report\n- Finding 1: handler registered in src/routes/health.ts:1 returns ok\n- Finding 2: handler registered in src/routes/health.ts:2 returns ok\n- Finding 3: handler registered in src/routes/health.ts:3 returns ok\n- Finding 4: handler registered in src/routes/health.ts:4 returns ok\n- Finding 5: handler registered in src/routes/health.ts:5 returns ok\n- Finding 6: handler registered in src/routes/health.ts:6 returns ok\n- Finding 7: handler registered in src/routes/health.ts:7 returns ok\n- Finding 8: handler registered in src/routes/health.ts:8 returns ok\n- Finding 9: handler registered in src/routes/health.ts:9 returns ok\n- Finding 10: handler registered in src/routes/health.ts:10 returns ok\n- Finding 11: handler registered in src/routes/health.ts:11 returns ok\n- Finding 12: handler registered in src/routes/health.ts:12 returns ok\n- Finding 13: handler registered in src/routes/health.ts:13 returns ok\n- Finding 14: handler registered in src/routes/health.ts:14 returns ok\n- Finding 15: handler registered in src/routes/health.ts:15 returns ok\n- Finding 16: handler registered in src/routes/health.ts:16 returns ok\n- Finding 17: handler registered in src/routes/health.ts:17 returns ok\n- Finding 18: handler registered in src/routes/health.ts:18 returns ok\n- Finding 19: handler registered in src/routes/health.ts:19 returns ok\n- Finding 20: handler registered in src/routes/health.ts:20 returns ok\n- Finding 21: handler registered in src/routes/health.ts:21 returns ok\n- Finding 22: handler registered in src/routes/health.ts:22 returns ok\n- Finding 23: handler registered in src/routes/health.ts:23 returns ok\n- Finding 24: handler registered in src/routes/health.ts:24 returns ok\n- Finding 25: handler registered in src/routes/health.ts:25 returns ok\n- Finding 26: handler registered in src/routes/health.ts:26 returns ok\n- Finding 27: handler registered in src/routes/health.ts:27 returns ok\n- Finding 28: handler registered in src/routes/health.ts:28 returns ok\n- Finding 29: handler registered in src/routes/health.ts:29 returns ok\n- Finding 30: handler registered in src/routes/health.ts:30 returns ok\n- Finding 31: handler registered in src/routes/health.ts:31 returns ok\n- Finding 32: handler registered in src/routes/health.ts:32 returns ok\n- Finding 33: handler registered in src/routes/health.ts:33 returns ok\n- Finding 34: handler registered in src/routes/health.ts:34 returns ok\n- Finding 35: handler registered in src/routes/health.ts:35 returns ok\n- Finding 36: handler registered in src/routes/health.ts:36 returns ok\n- Finding 37: handler registered in src/routes/health.ts:37 returns ok\n- Finding 38: handler registered in src/routes/health.ts:38 returns ok\n- Finding 39: handler registered in src/routes/health.ts:39 returns ok\n- Finding 40: handler registered in src/routes/health.ts:40 returns ok\nEND-OF-REPORT-MARKER"
+    },
+    {
+      "task_id": "rev",
+      "body": "<img src=x onerror=\"window.__pwned=1\"> <b>not bold</b>"
+    }
   ]
 }
