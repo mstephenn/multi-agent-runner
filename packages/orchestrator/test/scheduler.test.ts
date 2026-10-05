@@ -390,3 +390,84 @@ describe("runDag", () => {
     });
   });
 });
+
+describe("runDag shared read-only worktree", () => {
+  const R = (id: string, extra: object = {}) => T(id, { role: "researcher", ...extra });
+  function fakeWt(over: { acquire?: () => Promise<string> } = {}) {
+    const calls: string[] = [];
+    const worktrees = {
+      create: async (id: string) => { calls.push(`create:${id}`); return `/wt/${id}`; },
+      remove: async (id: string) => { calls.push(`remove:${id}`); },
+      commit: async (id: string) => { calls.push(`commit:${id}`); },
+      shared: {
+        acquire: over.acquire ?? (async () => { calls.push("acquire"); return "/wt/.shared"; }),
+        release: async () => { calls.push("release"); },
+      },
+    };
+    return { calls, worktrees };
+  }
+  const roTools = (role: string) => (role === "implementer" ? ["Read", "Edit", "Write", "Bash"] : ["Read"]);
+
+  it("researcher-only DAG: no create/commit/remove, one acquire, one release, cwd is shared", async () => {
+    const w = fakeWt();
+    const { f, deps } = harness([R("a"), R("b", { dependsOn: ["a"] }), R("c")], () => ok(), { worktrees: w.worktrees, toolsFor: roTools });
+    expect(await runDag(deps)).toEqual({ a: "done", b: "done", c: "done" });
+    expect(w.calls.filter((c) => c === "acquire")).toHaveLength(1);
+    expect(w.calls.filter((c) => c === "release")).toHaveLength(1);
+    expect(w.calls.some((c) => /^(create|commit|remove):/.test(c))).toBe(false);
+    expect(f.calls.every((c) => c.cwd === "/wt/.shared")).toBe(true);
+  });
+  it("mixed DAG: writer chain gets own worktrees, independent researcher shares; payload says which", async () => {
+    const w = fakeWt();
+    const { store, deps } = harness([T("i"), T("r", { role: "reviewer", dependsOn: ["i"] }), R("s")], () => ok(), { worktrees: w.worktrees, toolsFor: roTools });
+    expect(await runDag(deps)).toEqual({ i: "done", r: "done", s: "done" });
+    expect(w.calls).toEqual(expect.arrayContaining(["create:i", "create:r", "commit:i", "commit:r", "remove:i", "remove:r", "acquire"]));
+    expect(w.calls.some((c) => c.endsWith(":s"))).toBe(false);
+    expect(w.calls.filter((c) => c === "release")).toHaveLength(1);
+    const wtOf = Object.fromEntries(store.listEvents("r").filter((e) => e.type === "task_started").map((e) => [e.task_id, e.payload.worktree]));
+    expect(wtOf).toEqual({ i: "own", r: "own", s: "shared" });
+  });
+  it("release is called once even when a task fails", async () => {
+    const w = fakeWt();
+    const { deps } = harness([R("a"), R("b")], (i: any) => (i.taskId === "a" ? new Error("x") : ok()), { worktrees: w.worktrees, toolsFor: roTools });
+    expect(await runDag(deps)).toEqual({ a: "failed", b: "done" });
+    expect(w.calls.filter((c) => c === "release")).toHaveLength(1);
+  });
+  it("release is called once when the run is aborted", async () => {
+    const w = fakeWt(); const ac = new AbortController();
+    const { deps } = harness([R("a"), R("b", { dependsOn: ["a"] })], (i: any) => { ac.abort(); return ok(); }, { worktrees: w.worktrees, toolsFor: roTools, signal: ac.signal });
+    await runDag(deps);
+    expect(w.calls.filter((c) => c === "release")).toHaveLength(1);
+  });
+  it("a release failure does not fail the run", async () => {
+    const w = fakeWt(); w.worktrees.shared.release = async () => { throw new Error("busy"); };
+    const { deps } = harness([R("a")], () => ok(), { worktrees: w.worktrees, toolsFor: roTools });
+    expect(await runDag(deps)).toEqual({ a: "done" });
+  });
+  it("an acquire failure fails the task without hanging, and releases", async () => {
+    const calls: string[] = [];
+    const w = fakeWt({ acquire: async () => { calls.push("acquire"); throw new Error("no git"); } });
+    w.worktrees.shared.release = async () => { calls.push("release"); };
+    const { store, f, deps } = harness([R("a"), R("b", { dependsOn: ["a"] })], () => ok(), { worktrees: w.worktrees, toolsFor: roTools });
+    expect(await runDag(deps)).toEqual({ a: "failed", b: "blocked" });
+    expect(f.calls).toHaveLength(0);
+    expect(store.taskStatuses("r").find((s) => s.task_id === "a")?.detail).toContain("no git");
+    expect(calls.filter((c) => c === "release")).toHaveLength(1);
+  });
+  it("a role with write tools gets its own worktree even if read-only by role", async () => {
+    const w = fakeWt();
+    const { deps } = harness([R("a")], () => ok(), { worktrees: w.worktrees, toolsFor: () => ["Read", "Bash"] });
+    await runDag(deps);
+    expect(w.calls).toEqual(expect.arrayContaining(["create:a", "commit:a", "remove:a"]));
+    expect(w.calls).not.toContain("acquire");
+    expect(w.calls).not.toContain("release");
+  });
+  it("without `shared` the legacy per-task behaviour applies", async () => {
+    const w = fakeWt(); delete (w.worktrees as { shared?: unknown }).shared;
+    const { store, deps } = harness([R("a")], () => ok(), { worktrees: w.worktrees, toolsFor: roTools });
+    expect(await runDag(deps)).toEqual({ a: "done" });
+    expect(w.calls).toEqual(["create:a", "commit:a", "remove:a"]);
+    expect(store.listEvents("r").find((e) => e.type === "task_started")?.payload.worktree).toBe("own");
+  });
+});
+

@@ -215,6 +215,18 @@ describe("runMain", () => {
     expect(c.out.join("\n")).toMatch(/UI: http:\/\/127\.0\.0\.1:\d+\/\?run=r/);
     expect(h.closed).toEqual({ server: 1, db: 1 });
   });
+  it("read-only run prints no branches and no git merge hints", async () => {
+    const c = capture();
+    const roPlan = { tasks: [{ id: "q", role: "researcher", runtime: "claude", tier: "low", goal: "Q" }] };
+    const f = fakeAdapter((i: any) => (i.taskId === "planner" ? [{ type: "result", text: JSON.stringify(roPlan) }] : ok()));
+    const h = harness({ adapters: () => ({ claude: f.adapter, codex: f.adapter }), worktrees: { ...wt, shared: { acquire: async () => "/wt/.shared", release: async () => {} } } });
+    const code = await runMain(["run", "explain", "--repo", gitRepo(), "--port", String(await free())], h.deps);
+    const out = c.out.join("\n");
+    expect(code).toBe(0);
+    expect(out).toContain("No branches were created: all tasks were read-only.");
+    expect(out).not.toContain("git merge");
+    expect(out).not.toMatch(/mar\/r[a-z0-9]+\/q/);
+  });
   it("prints the real bound port when --port is not the bound one (fake server)", async () => {
     const c = capture();
     const h = harness({ startServer: async () => ({ port: 5555, close: async () => {} } as Awaited<ReturnType<typeof startServer>>) });

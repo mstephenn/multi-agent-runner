@@ -36,6 +36,8 @@ export interface Worktrees {
   commit(taskId: string, message: string): Promise<void>;
   remove(taskId: string): Promise<void>;
   branchFor(taskId: string): string;
+  // One detached (branchless) worktree at HEAD shared by all read-only tasks of the run.
+  shared: { acquire(): Promise<string>; release(): Promise<void> };
 }
 
 // Keep untracked `.mar/` from making the tree "dirty" without touching the tracked .gitignore.
@@ -99,12 +101,42 @@ export function createWorktrees(repoPath: string, runId: string): Worktrees {
     return dir;
   }
 
+  // Dot-prefixed: can never match a task id (SAFE has no "."), so it cannot collide with a task worktree.
+  const sharedDir = join(root, ".mar", "worktrees", runId, ".shared");
+  async function createShared(): Promise<string> {
+    await ensureExcluded();
+    await ok(["worktree", "prune"], root);
+    await discard(sharedDir); // stale leftover from a crashed run
+    try { await git(["worktree", "add", "--detach", "--", sharedDir, "HEAD"], root); }
+    catch (e) { await discard(sharedDir); throw e; }
+    return sharedDir;
+  }
+  let sharedP: Promise<string> | undefined;
+
   // Serialised per createWorktrees() instance: concurrent `git worktree add`/prune/exclude edits in one repo race
   // each other. The lock does NOT span instances or processes: use one instance per repo and do not run two
   // runs against the same repo at once.
   let queue: Promise<unknown> = Promise.resolve();
   return {
     branchFor,
+    shared: {
+      acquire() {
+        if (!sharedP) {
+          const p = queue.then(createShared);
+          queue = p.catch(() => {});
+          sharedP = p;
+          p.catch(() => { if (sharedP === p) sharedP = undefined; }); // a failed create may be retried
+        }
+        return sharedP;
+      },
+      async release() {
+        const pending = sharedP;
+        sharedP = undefined;
+        await pending?.catch(() => {});
+        await ok(["worktree", "remove", "--force", "--", sharedDir], root);
+        await rm(sharedDir, { recursive: true, force: true });
+      },
+    },
     create(taskId: string, dependsOn: string[] = []) {
       const p = queue.then(() => createOne(taskId, dependsOn));
       queue = p.catch(() => {});

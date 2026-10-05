@@ -223,4 +223,43 @@ describe("worktrees", () => {
     const ex = readFileSync(join(r, ".git", "info", "exclude"), "utf8");
     expect(ex.split("\n").filter((l) => l === ".mar/")).toHaveLength(1);
   });
+
+  describe("shared detached worktree", () => {
+    const git = (cwd: string, ...a: string[]) => execFileSync("git", a, { cwd }).toString().trim();
+    it("concurrent acquire returns one detached worktree at HEAD with no branch", async () => {
+      const w = createWorktrees(repo, "run1");
+      const [a, b] = await Promise.all([w.shared.acquire(), w.shared.acquire()]);
+      expect(a).toBe(b);
+      expect(a).toBe(join(repo, ".mar", "worktrees", "run1", ".shared"));
+      expect(existsSync(join(a, "a.txt"))).toBe(true);
+      expect(git(a, "rev-parse", "--abbrev-ref", "HEAD")).toBe("HEAD");
+      expect(git(repo, "branch", "--list", "mar/*")).toBe("");
+      expect(git(repo, "worktree", "list", "--porcelain").split("\n").filter((l) => l.startsWith("worktree "))).toHaveLength(2);
+      expect(git(repo, "status", "--porcelain")).toBe("");
+    });
+    it("release removes the dir, is idempotent, and leaves the main repo clean", async () => {
+      const w = createWorktrees(repo, "run1");
+      const a = await w.shared.acquire();
+      await w.shared.release();
+      expect(existsSync(a)).toBe(false);
+      await w.shared.release();
+      expect(git(repo, "worktree", "list", "--porcelain").split("\n").filter((l) => l.startsWith("worktree "))).toHaveLength(1);
+      expect(git(repo, "status", "--porcelain")).toBe("");
+    });
+    it("recreates over a stale leftover directory", async () => {
+      const w1 = createWorktrees(repo, "run1");
+      const a = await w1.shared.acquire();
+      const w2 = createWorktrees(repo, "run1"); // e.g. resume after a crash: no release happened
+      expect(await w2.shared.acquire()).toBe(a);
+      expect(existsSync(join(a, "a.txt"))).toBe(true);
+      await w2.shared.release();
+    });
+    it("works with a relative repo path and coexists with task worktrees", async () => {
+      const w = createWorktrees(relative(process.cwd(), repo), "run1");
+      const s = await w.shared.acquire(), t = await w.create("a");
+      expect(s).not.toBe(t);
+      expect(git(repo, "branch", "--list", "mar/*")).toContain("mar/run1/a");
+      await w.shared.release(); await w.remove("a");
+    });
+  });
 });

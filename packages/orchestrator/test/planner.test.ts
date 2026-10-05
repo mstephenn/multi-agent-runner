@@ -185,4 +185,12 @@ describe("repoMap errors and prompt wording", () => {
     await expect(planGoal({ goal: "g", repoMap: "a.ts", adapter: f.adapter, model: null, cwd: "/r" }))
       .rejects.toSatisfy((e: unknown) => e instanceof Error && e.message.length <= 400);
   });
+  it("tells the planner to use the fewest tasks (ideally one researcher) for exploration goals", async () => {
+    const f = fakeAdapter(() => [{ type: "result", text: JSON.stringify(valid) }]);
+    await planGoal({ goal: "how does auth work?", repoMap: "a.ts", adapter: f.adapter, model: null, cwd: "/r" });
+    const p = f.calls[0]!.prompt;
+    expect(p).toContain("FEWEST tasks");
+    expect(p).toContain('ONE "researcher" task');
+    expect(p).toContain('separate "synthesize" task');
+  });
 });

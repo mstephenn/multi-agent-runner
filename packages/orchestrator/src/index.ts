@@ -5,3 +5,4 @@ export * from "./budget.js";
 export * from "./scheduler.js";
 export * from "./worktree.js";
 export * from "./planner.js";
+export * from "./readonly.js";

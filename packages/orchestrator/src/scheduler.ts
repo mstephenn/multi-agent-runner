@@ -5,11 +5,14 @@ import { BudgetTracker } from "./budget.js";
 import { buildPrompt } from "./prompt.js";
 import { injectSlices, publishResult } from "./blackboard.js";
 import { redact } from "./redact.js";
+import { usesSharedWorktree } from "./readonly.js";
 
 export interface RunDeps {
   store: Store; runId: string; dag: Dag; repo: string;
   adapters: Record<Runtime, Adapter>;
-  worktrees: { create(taskId: string, dependsOn?: string[]): Promise<string>; commit(taskId: string, message: string): Promise<void>; remove(taskId: string): Promise<void> };
+  worktrees: { create(taskId: string, dependsOn?: string[]): Promise<string>; commit(taskId: string, message: string): Promise<void>; remove(taskId: string): Promise<void>;
+    // Optional: one detached worktree for read-only tasks (no branch, no commits). Absent = a worktree per task.
+    shared?: { acquire(): Promise<string>; release(): Promise<void> } };
   modelFor(runtime: Runtime, tier: Tier): string | null;
   toolsFor(role: Role): string[];
   concurrency: number; defaultBudgetTokens?: number; unsafe?: boolean;
@@ -66,6 +69,15 @@ function boundedToolInput(input: unknown): unknown {
 const bestEffort = (f: () => void) => { try { f(); } catch { /* store unavailable */ } };
 
 export async function runDag(d: RunDeps): Promise<Record<string, Outcome>> {
+  try { return await runDagInner(d); }
+  finally {
+    // Once, on every exit path. A failed cleanup must not mask the run outcome (same tolerance as per-task remove).
+    if (sharedUsedOf.get(d)) await d.worktrees.shared!.release().catch(() => {});
+  }
+}
+const sharedUsedOf = new WeakMap<RunDeps, boolean>();
+
+async function runDagInner(d: RunDeps): Promise<Record<string, Outcome>> {
   const { store, runId } = d;
   const outcome = new Map<string, Outcome>();
   // Resume: only tasks already `done` are seeded; failed/running/blocked ones run again.
@@ -75,12 +87,23 @@ export async function runDag(d: RunDeps): Promise<Record<string, Outcome>> {
   const emit = (task: TaskSpec, type: any, payload: Record<string, unknown> = {}) =>
     store.appendEvent({ run_id: runId, task_id: task.id, agent_id: task.id, type, payload });
 
+  // Read-only tasks (see usesSharedWorktree: no writer role, no writer ancestor, no Edit/Write/Bash tools) run
+  // concurrently in ONE directory, which is safe only because they cannot write. Without `shared`: legacy per-task.
+  const useShared = (task: TaskSpec) => d.worktrees.shared !== undefined && usesSharedWorktree(task, byId, d.toolsFor);
+  let sharedP: Promise<string> | undefined;
+  const acquireShared = () => {
+    sharedUsedOf.set(d, true);
+    sharedP ??= d.worktrees.shared!.acquire().catch((e) => { sharedP = undefined; throw e; }); // a failed acquire may be retried
+    return sharedP;
+  };
+
   async function attemptOnce(task: TaskSpec, extra: string, budget: BudgetTracker): Promise<TaskResult> {
     const { slices, missing } = injectSlices(store, runId, task);
     if (missing.length) throw new TaskFailure(`missing:${missing[0]}`, false);
     const prompt = buildPrompt(task, slices) + extra;
     emit(task, "prompt_sent", { prompt: redact(prompt), keys: slices.map((s) => s.key), tokens: estimateTokens(prompt) });
-    const cwd = await d.worktrees.create(task.id, task.dependsOn);
+    const shared = useShared(task);
+    const cwd = shared ? await acquireShared() : await d.worktrees.create(task.id, task.dependsOn);
     const ac = new AbortController();
     const onAbort = () => ac.abort();
     d.signal?.addEventListener("abort", onAbort);
@@ -118,26 +141,26 @@ export async function runDag(d: RunDeps): Promise<Record<string, Outcome>> {
       }
       if (raw === undefined) throw new TaskFailure("no-result", !d.signal?.aborted);
       const res = await parseResult(raw, d.repairResult);
-      await d.worktrees.commit(task.id, `mar(${task.id}): ${task.goal.split("\n")[0].slice(0, 60)}`);
+      if (!shared) await d.worktrees.commit(task.id, `mar(${task.id}): ${task.goal.split("\n")[0].slice(0, 60)}`);
       committed = true;
       return res;
     } catch (e) {
       // Keep partial work on the per-task branch: the worktree is removed below. Best effort: a failing commit
       // (e.g. nothing to add, git error) must not mask the original failure.
-      if (!committed) await d.worktrees.commit(task.id, `mar(${task.id}): wip (failed attempt)`).catch(() => {});
+      if (!committed && !shared) await d.worktrees.commit(task.id, `mar(${task.id}): wip (failed attempt)`).catch(() => {});
       throw e;
     } finally {
       if (timer !== undefined) clearTimeout(timer);
       d.signal?.removeEventListener("abort", onAbort);
       // A failed worktree cleanup must not mask the task outcome (explicitly tolerated).
-      await d.worktrees.remove(task.id).catch(() => {});
+      if (!shared) await d.worktrees.remove(task.id).catch(() => {});
     }
   }
 
   // `budget` is created once per task and shared by all of its attempts (retries do not get a fresh allowance).
   async function runTaskInner(task: TaskSpec) {
     store.setTaskStatus(runId, task.id, "running");
-    emit(task, "task_started", { runtime: task.runtime, tier: task.tier, role: task.role, unsafe: d.unsafe === true });
+    emit(task, "task_started", { runtime: task.runtime, tier: task.tier, role: task.role, worktree: useShared(task) ? "shared" : "own", unsafe: d.unsafe === true });
     const budget = new BudgetTracker(task.budgetTokens ?? d.defaultBudgetTokens);
     let extra = "";
     const max = d.maxAttempts ?? 1;

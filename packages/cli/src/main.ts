@@ -5,7 +5,7 @@ import { parseArgs } from "node:util";
 import type { Dag, Role, Runtime, Tier } from "@mar/core";
 import { claudeAdapter, codexAdapter, type Adapter } from "@mar/adapters";
 import { Store, startServer } from "@mar/server";
-import { createWorktrees, ensureMarExcluded, planGoal, redact, repoMap, runDag as realRunDag, type Worktrees } from "@mar/orchestrator";
+import { createWorktrees, ensureMarExcluded, planGoal, redact, repoMap, runDag as realRunDag, usesSharedWorktree, type Worktrees } from "@mar/orchestrator";
 import { loadConfig, type MarConfig } from "./config.js";
 import { nodeRunner, preflight } from "./preflight.js";
 
@@ -102,7 +102,7 @@ export const newRunId = () => "r" + Date.now().toString(36);
 export interface ExecuteOpts {
   goal: string; repo: string; store: Store; adapters: Record<Runtime, Adapter>; config: MarConfig;
   runId?: string; unsafe?: boolean; signal?: AbortSignal;
-  worktrees?: Pick<Worktrees, "create" | "commit" | "remove">; repoMapFn?: (repo: string) => string;
+  worktrees?: Pick<Worktrees, "create" | "commit" | "remove"> & Partial<Pick<Worktrees, "shared">>; repoMapFn?: (repo: string) => string;
   runDagFn?: typeof realRunDag;
 }
 
@@ -261,19 +261,26 @@ export async function runMain(argv: string[], deps: MainDeps = {}): Promise<numb
     const status = new Map(rows.map((s) => [s.task_id, s.status]));
     const detail = new Map(rows.map((s) => [s.task_id, s.detail]));
     console.log(`\nRun ${runId}${ac.signal.aborted ? " (stopped)" : ""}:`);
+    // Read-only tasks ran in the shared detached worktree and have no branch (injected fakes without `shared` get one each).
+    const sharedOn = deps.worktrees ? deps.worktrees.shared !== undefined : true;
+    const byId = new Map((dag?.tasks ?? []).map((t) => [t.id, t]));
     const doneBranches: string[] = [];
+    let anyBranch = false;
     for (const t of dag?.tasks ?? []) {
       const st = results[t.id] ?? status.get(t.id) ?? "not-run";
-      const branch = `mar/${runId}/${t.id}`;
+      const noBranch = sharedOn && usesSharedWorktree(t, byId, toolsFor);
+      const branch = noBranch ? "(shared read-only worktree, no branch)" : `mar/${runId}/${t.id}`;
+      if (!noBranch) anyBranch = true;
       // The stored detail is already redacted and capped by the scheduler (e.g. "failed:budget", "failed:timeout").
       const why = st === "failed" && detail.get(t.id) ? `  (${detail.get(t.id)})` : "";
       console.log(`  ${t.id}  ${st}${why}  ${branch}`);
-      if (st === "done") doneBranches.push(branch);
+      if (st === "done" && !noBranch) doneBranches.push(branch);
     }
     if (doneBranches.length) {
       console.log("\nNothing was merged. To integrate, do it on a feature branch (not main), e.g.:");
       for (const b of doneBranches) console.log(`  git merge ${b}`);
     }
+    if (!anyBranch && (dag?.tasks.length ?? 0) > 0) console.log("\nNo branches were created: all tasks were read-only.");
     const allDone = !!dag && dag.tasks.length > 0 && dag.tasks.every((t) => (results[t.id] ?? status.get(t.id)) === "done");
     return allDone && !ac.signal.aborted ? 0 : 1;
   } catch (e) {
