@@ -99,7 +99,7 @@ pnpm test:live                 # opt-in, see below
 
 `pnpm test:e2e` builds the UI and runs `packages/ui/test/smoke.spec.ts`. It needs a browser first: `pnpm --filter @mar/ui exec playwright install chromium`.
 
-`pnpm test:live` runs `MAR_LIVE=1 vitest run packages/cli/test/live.test.ts`. It uses real `claude` and `codex` and spends real tokens (`defaultBudgetTokens: 30000` per task, `concurrency: 2`, `maxAttempts: 1`, never `--unsafe`), in a throwaway temp git repo that is deleted afterwards. Without `MAR_LIVE=1` it is reported as skipped. It fails with a clear message if either CLI is missing.
+`pnpm test:live` runs `MAR_LIVE=1 vitest run packages/cli/test/live.test.ts`. It uses real `claude` and `codex` and spends real tokens (`defaultBudgetTokens: 80000` per task, `concurrency: 2`, `maxAttempts: 1`, never `--unsafe`), in a throwaway temp git repo that is deleted afterwards. Without `MAR_LIVE=1` it is reported as skipped. It fails with a clear message if either CLI is missing.
 
 ## Known limitations
 

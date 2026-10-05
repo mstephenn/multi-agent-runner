@@ -257,13 +257,17 @@ export async function runMain(argv: string[], deps: MainDeps = {}): Promise<numb
     });
 
     const dag = store.loadPlan(runId);
-    const status = new Map(store.taskStatuses(runId).map((s) => [s.task_id, s.status]));
+    const rows = store.taskStatuses(runId);
+    const status = new Map(rows.map((s) => [s.task_id, s.status]));
+    const detail = new Map(rows.map((s) => [s.task_id, s.detail]));
     console.log(`\nRun ${runId}${ac.signal.aborted ? " (stopped)" : ""}:`);
     const doneBranches: string[] = [];
     for (const t of dag?.tasks ?? []) {
       const st = results[t.id] ?? status.get(t.id) ?? "not-run";
       const branch = `mar/${runId}/${t.id}`;
-      console.log(`  ${t.id}  ${st}  ${branch}`);
+      // The stored detail is already redacted and capped by the scheduler (e.g. "failed:budget", "failed:timeout").
+      const why = st === "failed" && detail.get(t.id) ? `  (${detail.get(t.id)})` : "";
+      console.log(`  ${t.id}  ${st}${why}  ${branch}`);
       if (st === "done") doneBranches.push(branch);
     }
     if (doneBranches.length) {

@@ -17,7 +17,9 @@ describe("normalizeCodexLine", () => {
   });
   it("emits usage with cached tokens when reported", () => {
     const u = lines.flatMap(normalizeCodexLine).find((e) => e.type === "usage") as any;
-    expect(u).toEqual({ type: "usage", input: 16536, output: 9, cached: 11136, costUsd: null });
+    // Codex's input_tokens INCLUDES cached tokens (16536 total, 11136 cached); the adapter reports UNCACHED input so it
+    // matches Claude's semantics (input_tokens excludes cache reads) and budgets/totals don't over-count cached reads.
+    expect(u).toEqual({ type: "usage", input: 5400, output: 9, cached: 11136, costUsd: null });
   });
   it("does not treat the fixture's non-fatal config-warning error items as failures", () => {
     expect(lines.map(codexFailure).filter(Boolean)).toEqual([]);
@@ -182,5 +184,16 @@ describe("codexAdapter", () => {
     void waitFor(() => existsSync(started)).then(() => ac.abort());
     const evs = await collect(it);
     expect(evs).toEqual([]);
+  });
+});
+
+describe("codex usage semantics", () => {
+  const usage = (u: object) => normalizeCodexLine(JSON.stringify({ type: "turn.completed", usage: u }))[0];
+  it("subtracts cached tokens from input and never goes negative", () => {
+    expect(usage({ input_tokens: 66775, cached_input_tokens: 44800, output_tokens: 366 })).toEqual({ type: "usage", input: 21975, output: 366, cached: 44800, costUsd: null });
+    expect(usage({ input_tokens: 10, cached_input_tokens: 50, output_tokens: 1 })).toMatchObject({ input: 0, cached: 50 });
+  });
+  it("keeps input as reported when cached is absent", () => {
+    expect(usage({ input_tokens: 100, output_tokens: 5 })).toMatchObject({ input: 100, cached: null });
   });
 });

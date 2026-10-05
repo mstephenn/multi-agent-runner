@@ -24,7 +24,9 @@ export function normalizeCodexLine(line: string): AgentEvent[] {
   }
   if (j.type === "turn.completed") {
     const u = j.usage && typeof j.usage === "object" ? j.usage : {};
-    return [{ type: "usage", input: num(u.input_tokens), output: num(u.output_tokens), cached: num(u.cached_input_tokens), costUsd: null }];
+    const input = num(u.input_tokens), cached = num(u.cached_input_tokens);
+    // Codex's input_tokens includes cached tokens, Claude's excludes them: report UNCACHED input for both so budgets and totals agree.
+    return [{ type: "usage", input: input !== null && cached !== null ? Math.max(0, input - cached) : input, output: num(u.output_tokens), cached, costUsd: null }];
   }
   return [];
 }

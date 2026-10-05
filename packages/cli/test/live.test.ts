@@ -33,7 +33,7 @@ describe.skipIf(!process.env.MAR_LIVE)("live smoke", () => {
     g("add", "."); g("commit", "-qm", "init");
     const headBefore = g("rev-parse", "HEAD").trim();
 
-    const config = { ...loadConfig(repo), defaultBudgetTokens: 30000, concurrency: 2, maxAttempts: 1 };
+    const config = { ...loadConfig(repo), defaultBudgetTokens: 80000, concurrency: 2, maxAttempts: 1 };
     const { runId, results } = await executeRun({
       goal: "Add a one-line greeting function in hello.js, then review it.", repo, store: new Store(":memory:"),
       adapters: { claude: claudeAdapter(), codex: codexAdapter() }, config, unsafe: false,
