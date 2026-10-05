@@ -118,3 +118,4 @@ th { font-size: 11px; color: var(--muted); font-weight: 600; }
   .stats { gap: 12px; }
   .lanes li { grid-template-columns: 80px 1fr 60px; }
 }
+.over-budget { color: var(--err); font-weight: 700; }

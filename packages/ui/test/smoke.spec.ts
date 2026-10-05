@@ -7,6 +7,8 @@ import { Store } from "../../server/src/store.js";
 const fixture = JSON.parse(readFileSync(fileURLToPath(new URL("./fixtures/run.json", import.meta.url)), "utf8"));
 const dist = fileURLToPath(new URL("../dist", import.meta.url));
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+// Wait until the clock has moved on, instead of a fixed sleep.
+const nextMs = async () => { const t = Date.now(); while (Date.now() === t) await sleep(1); };
 
 let srv: Awaited<ReturnType<typeof startServer>>;
 let base = "";
@@ -18,7 +20,7 @@ test.beforeAll(async () => {
   store.savePlan(id, fixture.plan);
   for (const t of fixture.tasks) store.setTaskStatus(id, t.task_id, t.status, t.detail ?? undefined);
   for (const e of fixture.events) {
-    await sleep(5); // the store stamps ts itself; keep them strictly ordered for the replay test
+    await nextMs(); // the store stamps ts itself; keep them strictly ordered for the replay test
     if (e.type === "blackboard_write") for (const b of fixture.blackboard) store.writeBb({ ...b, run_id: id });
     store.appendEvent({ run_id: id, task_id: e.task_id, agent_id: e.task_id, type: e.type, payload: e.payload });
   }
@@ -150,4 +152,20 @@ test("a restrictive CSP is in place and the app still works under it", async ({ 
   await page.reload();
   await expect(page.getByTestId("node-impl")).toBeVisible();
   expect(violations).toEqual([]);
+});
+
+test("a truncated snapshot shows the banner and marks header totals as partial", async ({ page }) => {
+  const real = await (await page.request.get(`${base}/api/runs/r1`)).json();
+  await page.route("**/api/runs/r1?*", (r) => r.fulfill({ json: { ...real, truncated: true } }));
+  await page.route("**/api/runs/r1", (r) => r.fulfill({ json: { ...real, truncated: true } }));
+  await page.goto(`${base}/?run=r1`);
+  const banner = page.getByTestId("truncated-banner");
+  await expect(banner).toHaveAttribute("role", "status");
+  await expect(banner).toContainText(`Showing the latest ${real.events.length} events of a longer run`);
+  await expect(page.getByTestId("total-tokens")).toHaveText("≥ 1,200");
+  await expect(page.getByText("Tokens (partial)")).toBeVisible();
+});
+
+test("the page sends no referrer", async ({ page }) => {
+  await expect(page.locator('meta[name="referrer"]')).toHaveAttribute("content", "no-referrer");
 });

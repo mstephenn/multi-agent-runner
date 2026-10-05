@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { deriveAgents, deriveFlow, deriveContext, deriveLanes, deriveActivity, totals } from "../src/derive.js";
+import { deriveAgents, deriveFlow, deriveContext, deriveLanes, deriveActivity, totals, isRunActive } from "../src/derive.js";
+import { budgetUsage } from "../src/fmt.js";
 
 let id = 0;
 const e = (task: string | null, type: string, payload: object = {}, ts = 1000 + id) => ({ id: ++id, run_id: "r", task_id: task, agent_id: task, ts, type, payload }) as any;
@@ -55,8 +56,8 @@ describe("deriveAgents edge cases", () => {
     const a = deriveAgents([e("a", "task_finished", {}, 200), e("a", "task_started", { role: "r" }, 100)], []);
     expect(a[0]).toMatchObject({ status: "done", startedAt: 100, endedAt: 200, role: "r" });
   });
-  it("keeps first-seen order, exposes unsafe, and does not throw on odd payloads", () => {
-    const a = deriveAgents([e("z", "task_started", { unsafe: true, role: 5 }), e("y", "task_started", { unsafe: "yes" }), e("x", "usage", null as any)], [{ task_id: "w", status: "pending", detail: "d" }]);
+  it("keeps first-seen order, exposes unsafe (Claude only; runtime was missing in the old fixture), and does not throw on odd payloads", () => {
+    const a = deriveAgents([e("z", "task_started", { unsafe: true, role: 5, runtime: "claude" }), e("y", "task_started", { unsafe: "yes" }), e("x", "usage", null as any)], [{ task_id: "w", status: "pending", detail: "d" }]);
     expect(a.map((x) => x.id)).toEqual(["w", "z", "y", "x"]);
     expect(a[1]).toMatchObject({ unsafe: true });
     expect(a[1].role).toBeUndefined();
@@ -208,5 +209,40 @@ describe("performance", () => {
     const t0 = performance.now();
     totals(deriveAgents(evs, [])); deriveFlow(evs); deriveLanes(evs); deriveContext(evs, "t1"); deriveActivity(evs, "t1");
     expect(performance.now() - t0).toBeLessThan(1000);
+  });
+});
+
+describe("final-review fixes", () => {
+  it("M4: a newer task_started after a terminal event beats a stale stored failed row", () => {
+    const a = deriveAgents([e("a", "task_started", {}, 100), e("a", "task_failed", {}, 200), e("a", "task_started", {}, 300)], [{ task_id: "a", status: "failed", detail: "boom" }]);
+    expect(a[0]!.status).toBe("running");
+  });
+  it("M4: once the new attempt ends, the stored terminal status applies again", () => {
+    const a = deriveAgents([e("a", "task_started", {}, 100), e("a", "task_failed", {}, 200), e("a", "task_started", {}, 300), e("a", "task_finished", {}, 400)], [{ task_id: "a", status: "done", detail: null }]);
+    expect(a[0]!.status).toBe("done");
+  });
+  it("M4: a lone started event does not override a stored terminal row", () => {
+    const a = deriveAgents([e("a", "task_started", {}, 100)], [{ task_id: "a", status: "done", detail: null }]);
+    expect(a[0]!.status).toBe("done");
+  });
+  it("M6: unsafe is only surfaced for Claude tasks", () => {
+    const a = deriveAgents([e("c", "task_started", { runtime: "claude", unsafe: true }), e("x", "task_started", { runtime: "codex", unsafe: true })], []);
+    expect(a.find((v) => v.id === "c")!.unsafe).toBe(true);
+    expect(a.find((v) => v.id === "x")!.unsafe).toBe(false);
+  });
+  it("isRunActive: stops for terminal store status, errors and notFound; stays on for a running lane", () => {
+    const lanes = [{ id: "a", start: 1, end: null, attempt: 1 }];
+    const ag = (status: "running" | "failed") => [{ id: "a", status, tokens: null, costUsd: null, unsafe: false }];
+    const ok = { error: null, notFound: false };
+    expect(isRunActive(lanes, ag("running"), ok)).toBe(true);
+    expect(isRunActive(lanes, ag("failed"), ok)).toBe(false);
+    expect(isRunActive(lanes, ag("running"), { error: "x", notFound: false })).toBe(false);
+    expect(isRunActive(lanes, ag("running"), { error: null, notFound: true })).toBe(false);
+  });
+  it("budgetUsage flags over budget beyond 100%", () => {
+    expect(budgetUsage(50, 100)).toEqual({ pct: 50, over: false });
+    expect(budgetUsage(250, 100)).toEqual({ pct: 250, over: true });
+    expect(budgetUsage(null, 100)).toBeNull();
+    expect(budgetUsage(5, undefined)).toBeNull();
   });
 });

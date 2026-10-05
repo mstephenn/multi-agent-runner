@@ -128,6 +128,22 @@ describe("createRunClient", () => {
     expect(last().snap.tasks[0]!.detail).toBe("new");
   });
 
+  it("carries truncated through and re-requests the widest window once", async () => {
+    fetchImpl = async (u) => ok(snapshot([ev(1), ev(2)], { truncated: !u.includes("limit=") || u.includes("limit=50000") }));
+    createRunClient("r1", deps(), (s) => states.push(s));
+    await settle(20);
+    expect(calls).toEqual(["/api/runs/r1", "/api/runs/r1?limit=50000"]); // once, not a loop
+    expect(last().snap.truncated).toBe(true); // still truncated at the max: banner stays
+    expect(FakeSocket.all).toHaveLength(1);
+  });
+
+  it("does not re-request when the default window is complete", async () => {
+    createRunClient("r1", deps(), (s) => states.push(s));
+    await settle(20);
+    expect(calls).toEqual(["/api/runs/r1"]);
+    expect(last().snap.truncated).toBe(false);
+  });
+
   it("treats a 404 as terminal: not found, no retry loop, no socket", async () => {
     fetchImpl = async () => ({ ok: false, status: 404, json: async () => ({}) });
     createRunClient("nope", deps(), (s) => states.push(s));

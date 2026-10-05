@@ -1,13 +1,15 @@
 import type { BbEntry, Dag, StoredEvent } from "@mar/core";
 
 export type TaskRow = { task_id: string; status: string; detail: string | null };
-export type Snapshot = { events: StoredEvent[]; blackboard: BbEntry[]; tasks: TaskRow[]; plan: Dag | null };
+export type Snapshot = { events: StoredEvent[]; blackboard: BbEntry[]; tasks: TaskRow[]; plan: Dag | null; truncated?: boolean };
 export type Conn = "loading" | "live" | "reconnecting";
 export type ClientState = { snap: Snapshot; conn: Conn; error: string | null; notFound: boolean };
 export const EMPTY: Snapshot = { events: [], blackboard: [], tasks: [], plan: null };
 export const INITIAL: ClientState = { snap: EMPTY, conn: "loading", error: null, notFound: false };
 
 export const DEBOUNCE_MS = 250;
+// The server caps `?limit=` at this; used once when the default window comes back truncated.
+export const MAX_EVENT_LIMIT = 50000;
 export const backoff = (n: number) => Math.min(500 * 2 ** n, 5000);
 export const REFRESH_ON = new Set(["task_finished", "task_failed", "blackboard_write"]);
 
@@ -63,7 +65,8 @@ export function createRunClient(runId: string, deps: Deps, onState: (s: ClientSt
   let ws: SocketLike | undefined, retryTimer: ReturnType<typeof setTimeout> | undefined, reloadTimer: ReturnType<typeof setTimeout> | undefined;
   const log = new EventLog();
   const state: ClientState = { snap: EMPTY, conn: "loading", error: null, notFound: false };
-  let rest = { blackboard: EMPTY.blackboard, tasks: EMPTY.tasks, plan: EMPTY.plan as Dag | null };
+  let rest = { blackboard: EMPTY.blackboard, tasks: EMPTY.tasks, plan: EMPTY.plan as Dag | null, truncated: false };
+  let limit: number | null = null; // null = server default window; set to the max once a load comes back truncated
 
   const flush = () => {
     frame = undefined;
@@ -75,16 +78,17 @@ export function createRunClient(runId: string, deps: Deps, onState: (s: ClientSt
   const load = async (): Promise<LoadResult> => {
     const mine = ++seq; // a slower, older response must never overwrite a newer one
     try {
-      const res = await deps.fetch(`/api/runs/${encodeURIComponent(runId)}`);
+      const res = await deps.fetch(`/api/runs/${encodeURIComponent(runId)}${limit === null ? "" : `?limit=${limit}`}`);
       if (!alive || mine !== seq) return "stale";
       if (res.status === 404) { state.notFound = true; state.error = "Run not found"; schedule(); return "notfound"; }
       if (!res.ok) throw new Error(`Server returned ${res.status}`);
       const s = (await res.json()) as Snapshot;
       if (!alive || mine !== seq) return "stale";
       log.addAll(s.events);
-      rest = { blackboard: s.blackboard, tasks: s.tasks, plan: s.plan ?? null };
+      rest = { blackboard: s.blackboard, tasks: s.tasks, plan: s.plan ?? null, truncated: s.truncated === true };
       state.error = null;
       schedule();
+      if (rest.truncated && limit === null) { limit = MAX_EVENT_LIMIT; return load(); } // ask for the widest window, once
       return "ok";
     } catch (e) {
       if (!alive || mine !== seq) return "stale";

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { BbEntry } from "@mar/core";
-import { deriveAgents, deriveFlow, deriveLanes, type AgentView } from "./derive.js";
+import { deriveAgents, deriveFlow, deriveLanes, isRunActive, type AgentView } from "./derive.js";
 import { useRun } from "./useRun.js";
 import { Header, type RunInfo } from "./Header.js";
 import { GraphView } from "./GraphView.js";
@@ -39,6 +39,7 @@ export function App() {
   }, []);
 
   const { snap, conn, error, notFound } = useRun(runId);
+  const truncated = snap.truncated === true;
   const chooseRun = useCallback((id: string) => {
     setRunId(id); setSelected(null); setCutoff(null);
     history.replaceState(null, "", `?run=${encodeURIComponent(id)}`);
@@ -59,9 +60,9 @@ export function App() {
   const flow = useMemo(() => deriveFlow(events), [events]);
   const lanes = useMemo(() => deriveLanes(events), [events]);
 
-  const running = lanes.some((l) => l.end === null);
+  const running = isRunActive(lanes, agents, { error, notFound });
   const clock = useNow(running && cutoff === null);
-  const now = cutoff ?? clock;
+  const now = cutoff ?? (running ? clock : snap.events.at(-1)?.ts ?? clock); // a finished/stopped run freezes at its last event
   const minTs = snap.events[0]?.ts ?? 0, maxTs = snap.events.at(-1)?.ts ?? 0;
   const run = runs?.find((r) => r.id === runId);
   const startTs = snap.events[0]?.ts ?? run?.created ?? now;
@@ -74,8 +75,9 @@ export function App() {
   if (notFound) return <div className="state" role="alert">Run <code>{runId}</code> was not found. It may have been created in a different repository or deleted.</div>;
   return (
     <div className="app">
-      <Header runs={runs} run={run} runId={runId} onRun={chooseRun} agents={agents} elapsedMs={endTs - startTs} conn={conn} />
+      <Header runs={runs} run={run} runId={runId} onRun={chooseRun} agents={agents} elapsedMs={endTs - startTs} conn={conn} partial={truncated} />
       {error && <div className="banner" role="alert">{error}. {conn === "reconnecting" ? "Retrying…" : ""}</div>}
+      {truncated && <div className="banner info" role="status" data-testid="truncated-banner">Showing the latest {snap.events.length.toLocaleString("en-US")} events of a longer run — token totals and early context may be incomplete.</div>}
       {cutoff !== null && <div className="banner info" role="status">Replaying: views show state as of the scrubber position.</div>}
       <main className="main">
         <GraphView agents={agents} plan={snap.plan} flow={flow} selected={selected} onSelect={setSelected} />

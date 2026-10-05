@@ -64,6 +64,8 @@ export function deriveAgents(events: StoredEvent[], tasks: TaskRow[]): AgentView
     if (STATUSES.includes(t.status)) fromStore.set(t.task_id, t.status as AgentStatus);
     if (t.detail) v.detail = t.detail;
   }
+  const flaggedUnsafe = new Set<string>();
+  const reopened = new Set<string>(); // a start was seen AFTER a terminal event: the events show a newer attempt than any stored terminal row
   const lastEnd = new Map<string, number | undefined>(); // tasks whose latest event-order state is terminal
   for (const ev of events) {
     if (!ev.task_id) continue;
@@ -74,20 +76,22 @@ export function deriveAgents(events: StoredEvent[], tasks: TaskRow[]): AgentView
       // A start after a terminal event (retry/resume) opens a NEW attempt. (A start whose ts is older than the
       // terminal event is treated as out-of-order delivery and handled below instead.)
       lastEnd.delete(ev.task_id);
+      reopened.add(ev.task_id);
       derived.set(ev.task_id, "running");
       v.endedAt = undefined;
       v.startedAt = ts;
       v.role = str(p.role) ?? v.role; v.runtime = str(p.runtime) ?? v.runtime; v.tier = str(p.tier) ?? v.tier;
-      if (p.unsafe === true) v.unsafe = true;
+      if (p.unsafe === true) flaggedUnsafe.add(ev.task_id);
     } else if (ev.type === "task_started") {
       v.role = str(p.role) ?? v.role; v.runtime = str(p.runtime) ?? v.runtime; v.tier = str(p.tier) ?? v.tier;
-      if (p.unsafe === true) v.unsafe = true;
+      if (p.unsafe === true) flaggedUnsafe.add(ev.task_id);
       if (ts !== undefined && (v.startedAt === undefined || ts < v.startedAt)) v.startedAt = ts;
       // a terminal state seen earlier (out-of-order) must not be downgraded to running
       if (!derived.has(ev.task_id)) derived.set(ev.task_id, "running");
     } else if (isEnd(ev.type)) {
       if (ts !== undefined && (v.endedAt === undefined || ts > v.endedAt)) v.endedAt = ts;
       lastEnd.set(ev.task_id, v.endedAt);
+      reopened.delete(ev.task_id);
       derived.set(ev.task_id, ev.type === "task_finished" ? "done" : "failed");
     } else if (ev.type === "usage") {
       // Each `usage` event is treated as INCREMENTAL and summed. Claude emits a single final usage per run; Codex's
@@ -98,7 +102,11 @@ export function deriveAgents(events: StoredEvent[], tasks: TaskRow[]): AgentView
       if (cost !== undefined) v.costUsd = (v.costUsd ?? 0) + cost;
     }
   }
-  for (const v of m.values()) v.status = fromStore.get(v.id) ?? derived.get(v.id) ?? "pending";
+  for (const v of m.values()) {
+    v.status = reopened.has(v.id) ? "running" : fromStore.get(v.id) ?? derived.get(v.id) ?? "pending";
+    // `unsafe` is only mapped for Claude; Codex tasks must never show the indicator.
+    v.unsafe = flaggedUnsafe.has(v.id) && v.runtime === "claude";
+  }
   return [...m.values()];
 }
 
@@ -205,4 +213,13 @@ export function totals(agents: AgentView[]): { tokens: number; costUsd: number |
     if (a.costUsd !== null) costUsd = (costUsd ?? 0) + a.costUsd;
   }
   return { tokens, costUsd };
+}
+
+const TERMINAL: readonly AgentStatus[] = ["done", "failed", "blocked"];
+// Whether a clock should keep ticking: some lane is open AND its task is not already terminal per the (store-preferred)
+// status, and the connection is healthy. A stopped/aborted run can leave a lane without an end event.
+export function isRunActive(lanes: Lane[], agents: AgentView[], conn: { error: string | null; notFound: boolean }): boolean {
+  if (conn.notFound || conn.error !== null) return false;
+  const status = new Map(agents.map((a) => [a.id, a.status]));
+  return lanes.some((l) => l.end === null && !TERMINAL.includes(status.get(l.id) ?? "running"));
 }

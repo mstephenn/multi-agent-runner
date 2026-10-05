@@ -7,3 +7,9 @@ export function fmtDuration(ms: number): string {
   return h ? `${h}h ${m}m` : m ? `${m}m ${sec}s` : `${sec}s`;
 }
 export const STATUS_ICON: Record<string, string> = { pending: "○", running: "◐", done: "✓", failed: "✕", blocked: "⊘" };
+// Budget usage: the bar is capped at 100 but the percentage and `over` flag are not.
+export function budgetUsage(tokens: number | null, budget: number | undefined): { pct: number; over: boolean } | null {
+  if (tokens === null || !budget) return null;
+  const pct = Math.round((tokens / budget) * 100);
+  return { pct, over: pct > 100 };
+}

@@ -31,10 +31,11 @@ function StopButton({ runId }: { runId: string }) {
   );
 }
 
-type Props = { runs: RunInfo[]; run: RunInfo | undefined; runId: string; onRun: (id: string) => void; agents: AgentView[]; elapsedMs: number; conn: Conn };
+type Props = { runs: RunInfo[]; run: RunInfo | undefined; runId: string; onRun: (id: string) => void; agents: AgentView[]; elapsedMs: number; conn: Conn; partial?: boolean };
 
-export function Header({ runs, run, runId, onRun, agents, elapsedMs, conn }: Props) {
+export function Header({ runs, run, runId, onRun, agents, elapsedMs, conn, partial = false }: Props) {
   const t = totals(agents);
+  const lead = partial ? "≥ " : "";
   const anyTokens = agents.some((a) => a.tokens !== null);
   return (
     <header className="top">
@@ -45,11 +46,11 @@ export function Header({ runs, run, runId, onRun, agents, elapsedMs, conn }: Pro
           {!run && <option value={runId}>{runId}</option>}
         </select>
         <h1 title={run?.goal}>{run?.goal ?? "Run"}</h1>
-        {agents.some((a) => a.unsafe) && <span className="badge unsafe" role="status">unsafe mode</span>}
+        {agents.some((a) => a.unsafe) && <span className="badge unsafe" role="status" title="Codex tasks do not map unsafe mode">unsafe mode (Claude workers)</span>}
       </div>
       <dl className="stats">
-        <div><dt>Tokens</dt><dd className="mono" data-testid="total-tokens">{anyTokens ? fmtTokens(t.tokens) : "n/a"}</dd></div>
-        <div><dt>Spend</dt><dd className="mono" data-testid="total-cost">{fmtCost(t.costUsd)}</dd></div>
+        <div><dt>Tokens{partial ? " (partial)" : ""}</dt><dd className="mono" data-testid="total-tokens">{anyTokens ? `${lead}${fmtTokens(t.tokens)}` : "n/a"}</dd></div>
+        <div><dt>Spend{partial ? " (partial)" : ""}</dt><dd className="mono" data-testid="total-cost">{t.costUsd === null ? fmtCost(t.costUsd) : `${lead}${fmtCost(t.costUsd)}`}</dd></div>
         <div><dt>Elapsed</dt><dd className="mono">{fmtDuration(elapsedMs)}</dd></div>
       </dl>
       <div className="actions">

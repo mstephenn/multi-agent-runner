@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import type { BbEntry, Dag, StoredEvent } from "@mar/core";
 import { deriveActivity, deriveContext, type AgentView } from "./derive.js";
-import { fmtCost, fmtTokens } from "./fmt.js";
+import { budgetUsage, fmtCost, fmtTokens } from "./fmt.js";
 
 const TABS = ["Context", "Activity", "Output", "Usage"] as const;
 type Tab = (typeof TABS)[number];
@@ -87,13 +87,13 @@ function OutputTab({ id, blackboard }: { id: string; blackboard: BbEntry[] }) {
 }
 
 function UsageTab({ agent, budget }: { agent: AgentView; budget: number | undefined }) {
-  const pct = agent.tokens !== null && budget ? Math.min(100, Math.round((agent.tokens / budget) * 100)) : null;
+  const u = budgetUsage(agent.tokens, budget);
   return (
     <dl className="usage">
       <dt>Tokens</dt><dd>{fmtTokens(agent.tokens)}</dd>
-      <dt>Budget</dt><dd>{fmtTokens(budget)}</dd>
+      <dt>Budget</dt><dd>{budget ? fmtTokens(budget) : "no per-task budget set (default applies)"}</dd>
       <dt>Cost</dt><dd>{fmtCost(agent.costUsd)}</dd>
-      {pct !== null && <><dt>Used</dt><dd><div className="bar" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct} aria-label="Budget used"><div style={{ width: `${pct}%` }} /></div> {pct}%</dd></>}
+      {u && <><dt>Used</dt><dd className={u.over ? "over-budget" : undefined}><div className="bar" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.min(100, u.pct)} aria-label="Budget used"><div style={{ width: `${Math.min(100, u.pct)}%` }} /></div> {u.over ? `over budget (${u.pct}%)` : `${u.pct}%`}</dd></>}
     </dl>
   );
 }
