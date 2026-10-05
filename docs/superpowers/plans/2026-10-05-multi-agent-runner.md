@@ -611,16 +611,17 @@ export class AdapterError extends Error {}
 export interface RunDeps {
   store: Store; runId: string; dag: Dag; repo: string;
   adapters: Record<Runtime, Adapter>;
-  worktrees: { create(taskId: string): Promise<string>; remove(taskId: string): Promise<void> };
+  worktrees: { create(taskId: string): Promise<string>; commit(taskId: string, message: string): Promise<void>; remove(taskId: string): Promise<void> };
   modelFor(runtime: Runtime, tier: Tier): string | null;
   toolsFor(role: Role): string[];
   concurrency: number; defaultBudgetTokens?: number; unsafe?: boolean;
+  maxAttempts?: number;                     // attempts per worker task; default 1 (no retry)
   repairResult?: (raw: string) => Promise<string>;   // cheap JSON-repair call; optional
   signal?: AbortSignal;
 }
 export async function runDag(d: RunDeps): Promise<Record<string, "done"|"failed"|"blocked">>
 ```
-Behavior: ready = all `dependsOn` done; run up to `concurrency` at once. Per task: status `running`; emit `task_started`; compute slices (a `missing` key fails the task with detail `missing:<key>`); emit `prompt_sent` `{prompt: redact(prompt), keys, tokens}`; consume adapter events → `assistant_text|tool_call|tool_result|usage` events (text/output redacted); on budget exceeded abort the task's AbortController and fail with detail `failed:budget` (no retry); on `result` parse JSON with `TaskResultSchema` (strip ```json fences); if invalid and `repairResult` provided, one repair attempt; else fail `bad-result`. Success → `publishResult`, `task_finished`, status `done`. Any other failure → one retry with `\n\nPrevious attempt failed: <short error>` appended (error ≤ 300 chars); second failure → `task_failed`, status `failed`. Dependents of failed/blocked tasks → status `blocked`, never started; independent branches continue. Worktree removed in `finally`. Already-`done` tasks in the store (resume) are skipped and treated as done.
+Behavior: ready = all `dependsOn` done; run up to `concurrency` at once. Per task: status `running`; emit `task_started`; compute slices (a `missing` key fails the task with detail `missing:<key>`); emit `prompt_sent` `{prompt: redact(prompt), keys, tokens}`; consume adapter events → `assistant_text|tool_call|tool_result|usage` events (text/output redacted); on budget exceeded abort the task's AbortController and fail with detail `failed:budget` (no retry); on `result` parse JSON with `TaskResultSchema` (strip ```json fences); if invalid and `repairResult` provided, one repair attempt; else fail `bad-result`. Success → `publishResult`, `task_finished`, status `done`. Each worker task gets `maxAttempts` attempts (default **1: a task runs once, no retry**; opt-in via config). With `maxAttempts` > 1 a retry appends `\n\nPrevious attempt failed: <short error>` (error ≤ 300 chars). Final failure → `task_failed`, status `failed`. Dependents of failed/blocked tasks → status `blocked`, never started; independent branches continue. Worktree removed in `finally`. Already-`done` tasks in the store (resume) are skipped and treated as done.
 
 - [ ] **Step 1: Write fake adapter + failing tests**
 
@@ -681,7 +682,7 @@ function harness(tasks: any[], script: any, over: object = {}) {
   const deps = {
     store, runId: "r", dag: parseDag({ tasks }), repo: "/repo",
     adapters: { claude: f.adapter, codex: f.adapter },
-    worktrees: { create: async (id: string) => `/wt/${id}`, remove: async () => {} },
+    worktrees: { create: async (id: string) => `/wt/${id}`, remove: async () => {}, commit: async () => {} },
     modelFor: () => null, toolsFor: () => ["Read"], concurrency: 2, ...over,
   };
   return { store, f, deps };
@@ -705,12 +706,17 @@ describe("runDag", () => {
     await runDag(deps);
     expect(peak).toBeLessThanOrEqual(2);
   });
-  it("retries once with the error summary then succeeds", async () => {
-    const { f, deps } = harness([T("a")], (_i: any, n: number) => (n === 1 ? new Error("boom") : ok()));
+  it("runs a task once by default (no retry)", async () => {
+    const { f, deps } = harness([T("a")], () => new Error("boom"));
+    expect(await runDag(deps)).toEqual({ a: "failed" });
+    expect(f.calls).toHaveLength(1);
+  });
+  it("retries with the error summary when maxAttempts is 2", async () => {
+    const { f, deps } = harness([T("a")], (_i: any, n: number) => (n === 1 ? new Error("boom") : ok()), { maxAttempts: 2 });
     expect(await runDag(deps)).toEqual({ a: "done" });
     expect(f.calls[1].prompt).toContain("Previous attempt failed: boom");
   });
-  it("fails after second failure and blocks dependents but runs independents", async () => {
+  it("fails on the single attempt, blocks dependents, runs independents", async () => {
     const { store, deps } = harness([T("a"), T("b", { dependsOn: ["a"] }), T("c")], (i: any) => (i.taskId === "a" ? new Error("nope") : ok()));
     expect(await runDag(deps)).toEqual({ a: "failed", b: "blocked", c: "done" });
     expect(store.taskStatuses("r").find((s) => s.task_id === "b")?.status).toBe("blocked");
@@ -721,6 +727,14 @@ describe("runDag", () => {
     expect(await runDag(deps)).toEqual({ a: "failed" });
     expect(f.calls).toHaveLength(1);
     expect(store.taskStatuses("r")[0].detail).toBe("failed:budget");
+  });
+  it("commits the worktree before removing it, and a commit failure fails the task", async () => {
+    const order: string[] = [];
+    const wt = { create: async (id: string) => `/wt/${id}`, commit: async (id: string) => { order.push(`commit:${id}`); }, remove: async (id: string) => { order.push(`remove:${id}`); } };
+    expect(await runDag(harness([T("a")], () => ok(), { worktrees: wt }).deps)).toEqual({ a: "done" });
+    expect(order).toEqual(["commit:a", "remove:a"]);
+    const bad = { ...wt, commit: async () => { throw new Error("commit failed"); } };
+    expect(await runDag(harness([T("a")], () => ok(), { worktrees: bad }).deps)).toEqual({ a: "failed" });
   });
   it("works when the adapter reports no usage at all", async () => {
     const { deps } = harness([T("a", { budgetTokens: 5 })], () => [{ type: "result", text: JSON.stringify({ summary: "s" }) }] as any);
@@ -781,10 +795,11 @@ import { redact } from "./redact.js";
 export interface RunDeps {
   store: Store; runId: string; dag: Dag; repo: string;
   adapters: Record<Runtime, Adapter>;
-  worktrees: { create(taskId: string): Promise<string>; remove(taskId: string): Promise<void> };
+  worktrees: { create(taskId: string): Promise<string>; commit(taskId: string, message: string): Promise<void>; remove(taskId: string): Promise<void> };
   modelFor(runtime: Runtime, tier: Tier): string | null;
   toolsFor(role: Role): string[];
   concurrency: number; defaultBudgetTokens?: number; unsafe?: boolean;
+  maxAttempts?: number;                     // attempts per worker task; default 1 (no retry)
   repairResult?: (raw: string) => Promise<string>;
   signal?: AbortSignal;
 }
@@ -831,7 +846,9 @@ export async function runDag(d: RunDeps): Promise<Record<string, Outcome>> {
         if (budget.exceeded) { ac.abort(); throw new TaskFailure("failed:budget", false); }
       }
       if (raw === undefined) throw new TaskFailure("no-result");
-      return await parseResult(raw, d.repairResult);
+      const res = await parseResult(raw, d.repairResult);
+      await d.worktrees.commit(task.id, `mar(${task.id}): ${task.goal.split("\n")[0].slice(0, 60)}`);
+      return res;
     } finally {
       await d.worktrees.remove(task.id).catch(() => {});
     }
@@ -842,7 +859,8 @@ export async function runDag(d: RunDeps): Promise<Record<string, Outcome>> {
     emit(task, "task_started", { runtime: task.runtime, tier: task.tier, role: task.role });
     const budget = new BudgetTracker(task.budgetTokens ?? d.defaultBudgetTokens);
     let extra = "";
-    for (let n = 1; n <= 2; n++) {
+    const max = d.maxAttempts ?? 1;
+    for (let n = 1; n <= max; n++) {
       try {
         const res = await attemptOnce(task, extra, budget);
         publishResult(store, runId, task.id, res);
@@ -853,7 +871,7 @@ export async function runDag(d: RunDeps): Promise<Record<string, Outcome>> {
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         const retryable = !(e instanceof TaskFailure) || e.retryable;
-        if (n === 2 || !retryable) {
+        if (n >= max || !retryable) {
           emit(task, "task_failed", { reason: msg.slice(0, 300) });
           store.setTaskStatus(runId, task.id, "failed", msg.slice(0, 300));
           outcome.set(task.id, "failed");
@@ -1168,8 +1186,8 @@ Export from index.
 
 **Interfaces:**
 - Produces:
-  - `createWorktrees(repo: string, runId: string, baseDir?: string): { create(taskId): Promise<string>; remove(taskId): Promise<void>; branchFor(taskId): string }` — branch `mar/<runId>/<taskId>`; dir `<repo>/.mar/worktrees/<runId>/<taskId>` (`.mar/` is gitignored); `remove` removes the **directory** only and keeps the branch (results stay on per-task branches). Never copies `.env*`. Throws if `runId`/`taskId` fail `/^[A-Za-z0-9_-]+$/`.
-  - `loadConfig(repo: string): MarConfig` — optional `<repo>/.mar.json`; defaults: `{ concurrency: 3, defaultBudgetTokens: 200000, plannerModel: "claude-sonnet-5-5", tiers: { claude: { low: "claude-haiku-4-5-20251001", mid: "claude-sonnet-5-5", high: "claude-sonnet-5-5" }, codex: { low: null, mid: null, high: null } } }`; validated with zod; unknown keys rejected.
+  - `createWorktrees(repo: string, runId: string): { create(taskId): Promise<string>; commit(taskId, message): Promise<void>; remove(taskId): Promise<void>; branchFor(taskId): string }` — branch `mar/<runId>/<taskId>`; dir `<repo>/.mar/worktrees/<runId>/<taskId>` (`.mar/` is gitignored); `remove` removes the **directory** only and keeps the branch (results stay on per-task branches). Never copies `.env*`. Throws if `runId`/`taskId` fail `/^[A-Za-z0-9_-]+$/`.
+  - `loadConfig(repo: string): MarConfig` — optional `<repo>/.mar.json`; defaults: `{ concurrency: 3, maxAttempts: 1, defaultBudgetTokens: 200000, plannerModel: "claude-sonnet-5-5", tiers: { claude: { low: "claude-haiku-4-5-20251001", mid: "claude-sonnet-5-5", high: "claude-sonnet-5-5" }, codex: { low: null, mid: null, high: null } } }`; validated with zod; unknown keys rejected.
   - `preflight(repo: string, run: (cmd, args) => Promise<{code:number; out:string}>): Promise<string[]>` — returns a list of problems (empty = OK): repo not a git work tree; working tree dirty (`git status --porcelain` non-empty); `claude --version` / `codex --version` fail. (Auth is verified lazily by the first call; documented.)
 
 - [ ] **Step 1: Failing tests**
@@ -1208,6 +1226,16 @@ describe("worktrees", () => {
     await w.remove("a");
     expect(existsSync(a)).toBe(false);
     expect(execFileSync("git", ["branch", "--list", "mar/run1/a"], { cwd: repo }).toString()).toContain("mar/run1/a");
+  });
+  it("commit saves worktree changes to the task branch so remove does not lose them; clean tree is a no-op", async () => {
+    const w = createWorktrees(repo, "run1");
+    const a = await w.create("a");
+    await w.commit("a", "noop");
+    expect(execFileSync("git", ["rev-list", "--count", "mar/run1/a"], { cwd: repo }).toString().trim()).toBe("1");
+    writeFileSync(join(a, "only-a.txt"), "x");
+    await w.commit("a", "mar(a): add file");
+    await w.remove("a");
+    expect(execFileSync("git", ["show", "mar/run1/a:only-a.txt"], { cwd: repo }).toString()).toBe("x");
   });
   it("rejects unsafe ids", async () => {
     const w = createWorktrees(repo, "run1");
@@ -1297,6 +1325,14 @@ export function createWorktrees(repo: string, runId: string) {
       await run("git", ["worktree", "add", "-b", branchFor(taskId), dir, "HEAD"], { cwd: repo });
       return dir;
     },
+    async commit(taskId: string, message: string) {
+      check(taskId);
+      const cwd = dirFor(taskId);
+      await run("git", ["add", "-A"], { cwd });
+      const { stdout } = await run("git", ["status", "--porcelain"], { cwd });
+      if (!stdout.trim()) return;
+      await run("git", ["-c", "user.name=mar", "-c", "user.email=mar@localhost", "commit", "-m", message], { cwd });
+    },
     async remove(taskId: string) {
       check(taskId);
       await run("git", ["worktree", "remove", "--force", dirFor(taskId)], { cwd: repo }).catch(() => {});
@@ -1314,6 +1350,7 @@ import { z } from "zod";
 const tiers = z.object({ low: z.string().nullable(), mid: z.string().nullable(), high: z.string().nullable() }).strict();
 const Schema = z.object({
   concurrency: z.number().int().positive().default(3),
+  maxAttempts: z.number().int().min(1).max(3).default(1),
   defaultBudgetTokens: z.number().int().positive().default(200000),
   plannerModel: z.string().default("claude-sonnet-5-5"),
   tiers: z.object({ claude: tiers, codex: tiers }).strict().default({
@@ -1613,14 +1650,14 @@ describe("executeRun", () => {
   it("plans, persists the plan and runs all tasks", async () => {
     const store = new Store(":memory:"); const f = fakeAdapter(script);
     const repo = mkdtempSync(join(tmpdir(), "mar-r-"));
-    const { runId, results } = await executeRun({ goal: "g", repo, store, adapters: { claude: f.adapter, codex: f.adapter }, config: loadConfig(repo), worktrees: { create: async (id) => `/wt/${id}`, remove: async () => {} }, repoMapFn: () => "a.ts" });
+    const { runId, results } = await executeRun({ goal: "g", repo, store, adapters: { claude: f.adapter, codex: f.adapter }, config: loadConfig(repo), worktrees: { create: async (id) => `/wt/${id}`, remove: async () => {}, commit: async () => {} }, repoMapFn: () => "a.ts" });
     expect(results).toEqual({ a: "done", b: "done" });
     expect(store.loadPlan(runId)?.tasks).toHaveLength(2);
   });
   it("resume re-runs only non-done tasks", async () => {
     const store = new Store(":memory:"); const f = fakeAdapter(script);
     const repo = mkdtempSync(join(tmpdir(), "mar-r-"));
-    const base = { goal: "g", repo, store, adapters: { claude: f.adapter, codex: f.adapter }, config: loadConfig(repo), worktrees: { create: async (id: string) => `/wt/${id}`, remove: async () => {} }, repoMapFn: () => "a.ts" };
+    const base = { goal: "g", repo, store, adapters: { claude: f.adapter, codex: f.adapter }, config: loadConfig(repo), worktrees: { create: async (id: string) => `/wt/${id}`, remove: async () => {}, commit: async () => {} }, repoMapFn: () => "a.ts" };
     const { runId } = await executeRun(base);
     store.setTaskStatus(runId, "b", "failed");
     f.calls.length = 0;
@@ -1631,7 +1668,7 @@ describe("executeRun", () => {
     const store = new Store(":memory:"); const f = fakeAdapter(script);
     const repo = mkdtempSync(join(tmpdir(), "mar-r-"));
     const ac = new AbortController();
-    const p = executeRun({ goal: "g", repo, store, adapters: { claude: f.adapter, codex: f.adapter }, config: loadConfig(repo), worktrees: { create: async (id) => `/wt/${id}`, remove: async () => {} }, repoMapFn: () => "a.ts", signal: ac.signal });
+    const p = executeRun({ goal: "g", repo, store, adapters: { claude: f.adapter, codex: f.adapter }, config: loadConfig(repo), worktrees: { create: async (id) => `/wt/${id}`, remove: async () => {}, commit: async () => {} }, repoMapFn: () => "a.ts", signal: ac.signal });
     ac.abort();
     await expect(p).resolves.toBeTruthy();
   });
@@ -1865,6 +1902,6 @@ describe.skipIf(!process.env.MAR_LIVE)("live smoke", () => {
 
 - [ ] `TaskSpec.paths: string[]` (default `[]`); `parseDag` rejects two tasks with no dependency path between them whose `paths` globs overlap (test: overlapping parallel tasks rejected; overlapping but dependent tasks accepted; empty `paths` never conflicts).
 - [ ] `MarConfig.verify: string[]` (default `[]`); `runVerify(cwd, commands, signal): Promise<{ok: boolean; tail: string}>` runs each command via argv split (no shell), stops at first failure, returns last 1500 chars of output (test with real `node -e` commands: pass, fail, tail truncation, abort).
-- [ ] Scheduler: after a worker's result is parsed and before publishing, run the verify gate in its worktree; on failure retry the task once with `Verify failed:\n<tail>` appended, emit `verify_started`/`verify_passed`/`verify_failed` events (add to `EventTypes`); a second failure fails the task (`failed:verify`). Implementer/tester tasks only (reviewers/researchers skip). Tests with the fake adapter and a fake verifier.
+- [ ] Scheduler: after a worker's result is parsed and before publishing, run the verify gate in its worktree; on failure, only if `maxAttempts` > 1, retry the task with `Verify failed:\n<tail>` appended (default: fail immediately), emit `verify_started`/`verify_passed`/`verify_failed` events (add to `EventTypes`); the final failure fails the task (`failed:verify`). Implementer/tester tasks only (reviewers/researchers skip). Tests with the fake adapter and a fake verifier.
 - [ ] `integrate(repo, runId, order: string[]): Promise<{branch: string; conflicts: string[]}>` merges task branches in topological order into `mar/<runId>/integration` using a temporary worktree; on conflict, aborts that merge and reports the files; then runs the verify gate on the result. Tests in a throwaway repo: clean merge, conflicting merge reported, never touches `main`/`master`/`beta`.
 - [ ] Planner prompt asks for `paths` and prefers parallelizing only disjoint work; UI shows gate status on nodes and the integration result in the run header (extend `derive.ts` + tests).
