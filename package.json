@@ -1,0 +1,11 @@
+{
+  "name": "multi-agent-runner",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test:live": "MAR_LIVE=1 vitest run packages/cli/test/live.test.ts"
+  },
+  "devDependencies": { "typescript": "^5.6.0", "vitest": "^2.1.0", "@types/node": "^22.0.0" }
+}
