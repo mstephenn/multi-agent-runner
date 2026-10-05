@@ -34,7 +34,7 @@ pnpm mar --help
 | `--unsafe` | Disable Claude permission prompts (dangerous; see below) |
 | `-h`, `--help` | Show usage |
 
-`mar` prints `UI: http://127.0.0.1:<port>/?run=<runId>` and, at the end, each task's status and branch. `resume` re-runs only tasks that are not `done`, using the stored plan. Run state lives in `<repo>/.mar/mar.db`; `.mar/` is added to `.git/info/exclude`. Exit code is 0 only if every task finished `done`.
+`mar` prints `UI: http://127.0.0.1:<port>/?run=<runId>` and, at the end, each task's status and branch (read-only tasks have none). `resume` re-runs only tasks that are not `done`, using the stored plan. Run state lives in `<repo>/.mar/mar.db`; `.mar/` is added to `.git/info/exclude`. Exit code is 0 only if every task finished `done`.
 
 ## `.mar.json`
 
@@ -68,8 +68,8 @@ Optional, in the repo root. Unknown keys are rejected. Defaults:
 
 ## Safety model
 
-- Each task runs in its own git worktree at `.mar/worktrees/<runId>/<taskId>`, on its own branch `mar/<runId>/<taskId>`. Your checked-out branch is not modified.
-- `mar` never merges, and never pushes. When tasks finish it prints `git merge <branch>` suggestions; integrating is up to you, on a feature branch rather than `main`/`master`/`beta`.
+- Tasks that can write (implementer/tester, and anything that depends on them) run in their own git worktree at `.mar/worktrees/<runId>/<taskId>`, on their own branch `mar/<runId>/<taskId>`. Read-only tasks (researcher/reviewer roles with no writer upstream and no Edit/Write/Bash tools) share ONE detached worktree at `.mar/worktrees/<runId>/.shared` and create no branches, so a pure exploration goal makes one worktree and zero branches. Your checked-out branch is not modified.
+- `mar` never merges, and never pushes. When tasks finish it prints `git merge <branch>` suggestions for branches that exist (or says no branches were created); integrating is up to you, on a feature branch rather than `main`/`master`/`beta`.
 - Tool access depends on role: implementer and tester tasks get `Read, Glob, Grep, Edit, Write, Bash`; other roles get `Read, Glob, Grep`. Claude runs with `--permission-mode acceptEdits`. Codex runs with `--sandbox workspace-write` (tasks that may edit) or `read-only`.
 - `--unsafe` is off by default. It only affects Claude (`--dangerously-skip-permissions`); it is deliberately not mapped to Codex. `mar` prints a warning when it is on.
 - Tasks run once by default (`maxAttempts: 1`).
