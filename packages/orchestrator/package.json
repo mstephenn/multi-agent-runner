@@ -4,5 +4,5 @@
   "private": true,
   "type": "module",
   "main": "src/index.ts",
-  "dependencies": { "@mar/core": "workspace:*" }
+  "dependencies": { "@mar/core": "workspace:*", "@mar/adapters": "workspace:*" }
 }
