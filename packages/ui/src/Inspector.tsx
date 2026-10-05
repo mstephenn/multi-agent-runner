@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
 import type { BbEntry, Dag, StoredEvent } from "@mar/core";
 import { deriveContext, type AgentView } from "./derive.js";
 import { budgetUsage, fmtCost, fmtTokens } from "./fmt.js";
@@ -9,9 +9,12 @@ import { ActivityFeed } from "./ActivityFeed.js";
 const TABS = ["Context", "Activity", "Output", "Usage"] as const;
 type Tab = (typeof TABS)[number];
 
-type Props = { agent: AgentView; events: StoredEvent[]; blackboard: BbEntry[]; plan: Dag | null; reports?: ReportRow[]; onClose: () => void };
+type Props = { agent: AgentView; events: StoredEvent[]; blackboard: BbEntry[]; plan: Dag | null; reports?: ReportRow[]; width: number | null; onWidthChange: (width: number) => void; onClose: () => void };
 
-export function Inspector({ agent, events, blackboard, plan, reports = [], onClose }: Props) {
+const MIN_WIDTH = 280;
+const MIN_GRAPH_WIDTH = 240;
+
+export function Inspector({ agent, events, blackboard, plan, reports = [], width, onWidthChange, onClose }: Props) {
   const [tab, setTab] = useState<Tab>("Context");
   const spec = plan?.tasks.find((t) => t.id === agent.id);
   const onKey = (e: KeyboardEvent) => {
@@ -22,9 +25,41 @@ export function Inspector({ agent, events, blackboard, plan, reports = [], onClo
     document.getElementById(`tab-${TABS[next]}`)?.focus();
   };
   const aside = useRef<HTMLElement>(null);
+  const drag = useRef<{ x: number; width: number } | null>(null);
+  const limits = () => {
+    const available = aside.current?.parentElement?.clientWidth ?? window.innerWidth;
+    const mobile = window.matchMedia("(max-width: 900px)").matches;
+    const max = Math.max(MIN_WIDTH, available - (mobile ? 0 : MIN_GRAPH_WIDTH));
+    return { min: Math.min(MIN_WIDTH, max), max };
+  };
+  const setClampedWidth = (next: number) => {
+    const { min, max } = limits();
+    onWidthChange(Math.round(Math.max(min, Math.min(max, next))));
+  };
+  const onResizeStart = (e: PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    drag.current = { x: e.clientX, width: aside.current?.getBoundingClientRect().width ?? MIN_WIDTH };
+    e.currentTarget.setPointerCapture(e.pointerId);
+    e.preventDefault();
+  };
+  const onResizeMove = (e: PointerEvent<HTMLDivElement>) => {
+    if (drag.current) setClampedWidth(drag.current.width + drag.current.x - e.clientX);
+  };
+  const onResizeEnd = (e: PointerEvent<HTMLDivElement>) => {
+    drag.current = null;
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
+  };
+  const onResizeKey = (e: KeyboardEvent<HTMLDivElement>) => {
+    const current = aside.current?.getBoundingClientRect().width ?? MIN_WIDTH;
+    const { min, max } = limits();
+    const next = e.key === "ArrowLeft" ? current + 24 : e.key === "ArrowRight" ? current - 24 : e.key === "Home" ? min : e.key === "End" ? max : null;
+    if (next === null) return;
+    e.preventDefault(); setClampedWidth(next);
+  };
   useEffect(() => drawerIn(aside.current), []);
   return (
-    <aside ref={aside} className="inspector" aria-label={`Inspector for ${agent.id}`}>
+    <aside ref={aside} className="inspector" style={width === null ? undefined : { width }} aria-label={`Inspector for ${agent.id}`}>
+      <div className="inspector-resize" role="separator" aria-label="Resize inspector" aria-orientation="vertical" aria-valuemin={MIN_WIDTH} aria-valuenow={width ?? undefined} tabIndex={0} onPointerDown={onResizeStart} onPointerMove={onResizeMove} onPointerUp={onResizeEnd} onPointerCancel={onResizeEnd} onKeyDown={onResizeKey} />
       <header className="insp-head">
         <div><h2 className="mono">{agent.id}</h2><span className="status-text" data-status={agent.status}>{agent.status}{agent.detail ? `: ${agent.detail}` : ""}</span></div>
         <button type="button" onClick={onClose} aria-label="Close inspector">Close</button>

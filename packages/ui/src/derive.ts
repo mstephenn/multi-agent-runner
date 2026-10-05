@@ -88,6 +88,10 @@ export function deriveAgents(events: StoredEvent[], tasks: TaskRow[]): AgentView
       if (ts !== undefined && (v.startedAt === undefined || ts < v.startedAt)) v.startedAt = ts;
       // a terminal state seen earlier (out-of-order) must not be downgraded to running
       if (!derived.has(ev.task_id)) derived.set(ev.task_id, "running");
+    } else if (ev.type === "prompt_sent") {
+      if (p.runtime === "claude" || p.runtime === "codex") v.runtime = p.runtime;
+    } else if (ev.type === "runtime_fallback") {
+      if (p.to === "claude" || p.to === "codex") v.runtime = p.to;
     } else if (isEnd(ev.type)) {
       if (ts !== undefined && (v.endedAt === undefined || ts > v.endedAt)) v.endedAt = ts;
       lastEnd.set(ev.task_id, v.endedAt);
@@ -154,8 +158,10 @@ export function deriveContext(events: StoredEvent[], taskId: string, allKeys?: s
   return { prompt, slices, notGiven };
 }
 
-export function deriveLanes(events: StoredEvent[]): Lane[] {
-  type Seg = { start: number | undefined; end: number | undefined };
+// Lane segments plus how each attempt ended (null while open). deriveLanes is the plain view of this.
+export type Segment = Lane & { outcome: "done" | "failed" | null };
+export function deriveSegments(events: StoredEvent[]): Segment[] {
+  type Seg = { start: number | undefined; end: number | undefined; outcome: "done" | "failed" | null };
   const segs = new Map<string, Seg[]>();
   const order: string[] = [];
   for (const e of events) {
@@ -169,23 +175,27 @@ export function deriveLanes(events: StoredEvent[]): Lane[] {
     let cur = list[list.length - 1];
     if (isStart) {
       // A start at/after the current segment's end (by event order) is a new attempt; an older ts is out-of-order delivery.
-      if (!cur || (cur.end !== undefined && cur.start !== undefined && ts >= cur.end)) { cur = { start: undefined, end: undefined }; list.push(cur); }
+      if (!cur || (cur.end !== undefined && cur.start !== undefined && ts >= cur.end)) { cur = { start: undefined, end: undefined, outcome: null }; list.push(cur); }
       if (cur.start === undefined) { if (!order.includes(e.task_id)) order.push(e.task_id); }
       if (cur.start === undefined || ts < cur.start) cur.start = ts;
     } else {
-      if (!cur) { cur = { start: undefined, end: undefined }; list.push(cur); }
-      if (cur.end === undefined || ts > cur.end) cur.end = ts;
+      if (!cur) { cur = { start: undefined, end: undefined, outcome: null }; list.push(cur); }
+      if (cur.end === undefined || ts > cur.end) { cur.end = ts; cur.outcome = e.type === "task_finished" ? "done" : "failed"; }
     }
   }
-  const out: Lane[] = [];
+  const out: Segment[] = [];
   for (const id of order) {
     let attempt = 0;
     for (const s of segs.get(id)!) {
       if (s.start === undefined) continue;
-      out.push({ id, start: s.start, end: s.end === undefined ? null : Math.max(s.end, s.start), attempt: ++attempt });
+      out.push({ id, start: s.start, end: s.end === undefined ? null : Math.max(s.end, s.start), attempt: ++attempt, outcome: s.end === undefined ? null : s.outcome });
     }
   }
   return out;
+}
+
+export function deriveLanes(events: StoredEvent[]): Lane[] {
+  return deriveSegments(events).map(({ id, start, end, attempt }) => ({ id, start, end, attempt }));
 }
 
 export function deriveActivity(events: StoredEvent[], taskId: string): ActivityItem[] {

@@ -89,6 +89,8 @@ Reports are stored (redacted, up to 100,000 characters) in their own SQLite tabl
 
 The inspector's Activity tab shows one row per step: each tool call is paired with its result (a call with no result yet shows as running), with repo-relative paths, a short result summary and a relative time. Filter chips (All / Messages / Tools / Errors) show counts; click a row to expand its input and the full output (up to the 2,000 characters the runner stores), with a Copy button. Errors start expanded. The feed follows the latest step only while you are at the bottom; scroll up and a "Jump to latest" button appears. All content is rendered as plain text.
 
+The bottom panel has two tabs, Timeline and Blackboard (the choice is remembered). The Timeline shares one time axis (human ticks such as 30s, 1m 30s) between the replay scrubber and one lane per agent, with the full agent id, runtime badge and status, a bar per attempt, markers for start/finish/fail and blackboard writes (◆) and reads (◇), and a hover or focus tooltip with status and duration. The playhead marks the replay cutoff: drag the scrubber, click the axis or a lane, or press Play (1×, 2×, 4× or 8×; a run replays in about 20 seconds at 1×) and Live returns to the end. Click a lane label to open that agent in the inspector.
+
 ## How it saves tokens
 
 - The planner runs once per run (on the planner model, Sonnet by default). The plan is stored and reused by `resume`.

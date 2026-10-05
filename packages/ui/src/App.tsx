@@ -5,8 +5,7 @@ import { useRun } from "./useRun.js";
 import { Header, type RunInfo } from "./Header.js";
 import { GraphView } from "./GraphView.js";
 import { Inspector } from "./Inspector.js";
-import { Timeline } from "./Timeline.js";
-import { BlackboardPanel } from "./BlackboardPanel.js";
+import { BottomPanel } from "./BottomPanel.js";
 
 const initialRun = () => new URLSearchParams(location.search).get("run");
 
@@ -27,8 +26,8 @@ export function App() {
   const [runsError, setRunsError] = useState<string | null>(null);
   const [runId, setRunId] = useState<string | null>(initialRun);
   const [selected, setSelected] = useState<string | null>(null);
+  const [inspectorWidth, setInspectorWidth] = useState<number | null>(null);
   const [cutoff, setCutoff] = useState<number | null>(null);
-  const [showBb, setShowBb] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -60,10 +59,11 @@ export function App() {
   const flow = useMemo(() => deriveFlow(events), [events]);
   const lanes = useMemo(() => deriveLanes(events), [events]);
 
+  const maxTs = snap.events.at(-1)?.ts ?? 0;
   const running = isRunActive(lanes, agents, { error, notFound });
-  const clock = useNow(running && cutoff === null);
-  const now = cutoff ?? (running ? clock : snap.events.at(-1)?.ts ?? clock); // a finished/stopped run freezes at its last event
-  const minTs = snap.events[0]?.ts ?? 0, maxTs = snap.events.at(-1)?.ts ?? 0;
+  const clock = useNow(running);
+  const now = cutoff ?? (running ? clock : maxTs || clock); // a finished/stopped run freezes at its last event
+  const liveEnd = running ? Math.max(clock, maxTs) : maxTs; // right edge of the timeline while live
   const run = runs?.find((r) => r.id === runId);
   const startTs = snap.events[0]?.ts ?? run?.created ?? now;
   const endTs = running || cutoff !== null ? now : events.at(-1)?.ts ?? now;
@@ -81,13 +81,9 @@ export function App() {
       {cutoff !== null && <div className="banner info" role="status">Replaying: views show state as of the scrubber position.</div>}
       <main className="main">
         <GraphView agents={agents} plan={snap.plan} flow={flow} selected={selected} onSelect={setSelected} />
-        {agent && <Inspector key={agent.id} agent={agent} events={events} blackboard={blackboard} plan={snap.plan} reports={snap.reports} onClose={() => setSelected(null)} />}
+        {agent && <Inspector key={agent.id} agent={agent} events={events} blackboard={blackboard} plan={snap.plan} reports={snap.reports} width={inspectorWidth} onWidthChange={setInspectorWidth} onClose={() => setSelected(null)} />}
       </main>
-      <div className="bb-toggle">
-        <button type="button" aria-expanded={showBb} onClick={() => setShowBb((v) => !v)}>Blackboard ({blackboard.length})</button>
-      </div>
-      {showBb && <BlackboardPanel entries={blackboard} flow={flow} />}
-      <Timeline lanes={lanes} agents={agents} now={now} minTs={minTs} maxTs={maxTs} cutoff={cutoff} onCutoff={setCutoff} onSelect={setSelected} />
+      <BottomPanel events={events} allEvents={snap.events} agents={agents} blackboard={blackboard} flow={flow} now={now} liveEnd={liveEnd} cutoff={cutoff} onCutoff={setCutoff} onSelect={setSelected} />
     </div>
   );
 }

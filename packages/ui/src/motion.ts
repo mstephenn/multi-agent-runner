@@ -41,6 +41,13 @@ export function pulseRing(el: Element | null): Stop {
   return () => { a.cancel(); if (el instanceof HTMLElement) { el.style.removeProperty("transform"); el.style.removeProperty("opacity"); } };
 }
 
+/** Endless light sweep across a running timeline bar (the element is a clipped overlay); call stop when the lane stops running. */
+export function shimmer(el: Element | null): Stop {
+  if (!el || reducedMotion()) return noop;
+  const a = animate(el, { translateX: ["-100%", "100%"], duration: 1800, ease: "linear", loop: true });
+  return () => { a.cancel(); if (el instanceof HTMLElement) el.style.removeProperty("transform"); };
+}
+
 /** Newly appended list rows slide up and fade in. */
 export function rowsIn(rows: Element[]): Stop {
   if (rows.length === 0 || reducedMotion()) return noop;

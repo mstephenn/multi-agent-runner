@@ -10,6 +10,21 @@ describe("derive", () => {
     const a = deriveAgents([e("a", "task_started", { runtime: "codex", tier: "mid", role: "implementer" })], [{ task_id: "a", status: "running", detail: null }]);
     expect(a[0]).toMatchObject({ id: "a", runtime: "codex", status: "running", tokens: null });
   });
+  it("shows the runtime that actually ran, including a retry after fallback", () => {
+    const a = deriveAgents([
+      e("a", "task_started", { runtime: "claude", unsafe: true }),
+      e("a", "prompt_sent", { runtime: "claude" }),
+      e("a", "runtime_fallback", { from: "claude", to: "codex" }),
+    ], []);
+    expect(a[0]).toMatchObject({ runtime: "codex", unsafe: false });
+    const retry = deriveAgents([
+      e("a", "task_started", { runtime: "claude", unsafe: true }),
+      e("a", "prompt_sent", { runtime: "claude" }),
+      e("a", "runtime_fallback", { from: "claude", to: "codex" }),
+      e("a", "prompt_sent", { runtime: "claude" }),
+    ], []);
+    expect(retry[0]).toMatchObject({ runtime: "claude", unsafe: true });
+  });
   it("sums usage across events and keeps failure detail", () => {
     const a = deriveAgents([
       e("a", "task_started"), e("a", "usage", { input: 10, output: 5, costUsd: 0.01 }), e("a", "usage", { input: 1, output: null, costUsd: null }),

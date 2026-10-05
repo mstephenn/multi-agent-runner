@@ -27,7 +27,7 @@ test.beforeAll(async () => {
   for (const r of fixture.reports) store.saveReport(id, r.task_id, r.body);
   // A separate run with a long feed (60 finished Reads) for the follow-latest test.
   store.createRun("r2", "Long feed", "/tmp/repo");
-  store.savePlan("r2", { tasks: [{ id: "big", role: "implementer", runtime: "codex", tier: "mid", goal: "Read a lot", dependsOn: [], needs: [] }] });
+  store.savePlan("r2", { tasks: [{ id: "big", role: "implementer", runtime: "codex", tier: "mid", goal: "Read a lot", dependsOn: [], needs: [], paths: [] }] });
   store.setTaskStatus("r2", "big", "running");
   store.appendEvent({ run_id: "r2", task_id: "big", agent_id: "big", type: "task_started", payload: { role: "implementer", runtime: "codex", tier: "mid" } });
   for (let i = 0; i < 60; i++) {
@@ -74,7 +74,7 @@ test("selecting rev shows the injected key with its token count", async ({ page 
   await expect(row).toContainText("42");
   await expect(page.locator("pre.prompt")).toContainText("Review the change.");
   await page.getByRole("tab", { name: "Usage" }).click();
-  await expect(page.getByRole("tabpanel")).toContainText("n/a");
+  await expect(page.locator(".inspector").getByRole("tabpanel")).toContainText("n/a");
 });
 
 test("keyboard: arrow keys switch inspector tabs", async ({ page }) => {
@@ -105,7 +105,7 @@ test("replay scrubber hides later events in every view; Live restores them", asy
 });
 
 test("blackboard panel lists entries with their readers", async ({ page }) => {
-  await page.getByRole("button", { name: /Blackboard/ }).click();
+  await page.getByRole("tab", { name: /Blackboard/ }).click();
   const row = page.getByRole("region", { name: "Blackboard" }).getByRole("row", { name: /impl\/summary/ });
   await expect(row).toContainText("rev");
   await expect(row).toContainText("Added GET /health returning ok.");
@@ -134,7 +134,7 @@ test("layout: at 1280x800 the graph fills most of the viewport and the timeline 
 test("narrow width (800px): the inspector opens and the page does not scroll horizontally", async ({ page }) => {
   await page.setViewportSize({ width: 800, height: 700 });
   await page.getByTestId("node-impl").click();
-  await expect(page.getByRole("tablist")).toBeVisible();
+  await expect(page.getByRole("tablist", { name: "Inspector sections" })).toBeVisible();
   // checked immediately (while the drawer is still sliding in) and again once it has settled
   const overflow = () => page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   expect(await overflow()).toBeLessThanOrEqual(1);
@@ -363,3 +363,244 @@ test("activity: screenshot of the expanded feed", async ({ page }) => {
   await page.waitForTimeout(500);
   await page.screenshot({ path: "test-results/activity-1280.png" });
 });
+
+// ---- bottom dock: tabs, time axis, playhead, lanes, replay ----
+type Ev = { id: number; run_id: string; task_id: string; agent_id: string; ts: number; type: string; payload: Record<string, unknown> };
+
+// Serve r1 with its timestamps stretched over `spanMs` (ending a few seconds ago, so rev is still running up to "now"),
+// optionally with extra lanes: a long-named done task, a retried task and a failed one (or `many` generated lanes).
+async function mockRun(page: import("@playwright/test").Page, opts: { spanMs?: number; extra?: "rich" | number } = {}) {
+  const spanMs = opts.spanMs ?? 180_000;
+  const real = await (await page.request.get(`${base}/api/runs/r1`)).json();
+  const a: number = real.events[0].ts, b: number = real.events.at(-1).ts;
+  const t0 = Date.now() - spanMs - 3000;
+  const k = (spanMs - 8000) / Math.max(1, b - a);
+  const at = (ts: number) => Math.round(t0 + (ts - a) * k);
+  let nid = Math.max(...real.events.map((e: Ev) => e.id)) + 1;
+  const ev = (task: string, type: string, ts: number, payload: Record<string, unknown> = {}): Ev => ({ id: nid++, run_id: "r1", task_id: task, agent_id: task, ts: t0 + ts, type, payload });
+  const events: Ev[] = real.events.map((e: Ev) => ({ ...e, ts: at(e.ts) }));
+  const long = "investigate_sow_sprint_plan";
+  if (opts.extra === "rich") {
+    events.push(
+      ev(long, "task_started", 10_000, { runtime: "claude", role: "researcher", tier: "high" }),
+      ev(long, "blackboard_read", 14_000, { author: "impl", key: "impl/summary", version: 1, tokens: 5 }),
+      ev(long, "blackboard_write", 50_000, { key: `${long}/notes` }),
+      ev(long, "task_finished", 82_000),
+      ev("flaky_build", "task_started", 20_000, { runtime: "codex", role: "implementer", tier: "mid" }),
+      ev("flaky_build", "task_failed", 45_000),
+      ev("flaky_build", "task_started", 60_000, { runtime: "codex" }),
+      ev("flaky_build", "blackboard_write", 100_000, { key: "flaky_build/summary" }),
+      ev("flaky_build", "task_finished", 120_000),
+      ev("blocked_one", "task_started", 90_000, { runtime: "claude" }),
+      ev("blocked_one", "task_failed", 95_000),
+    );
+  } else if (typeof opts.extra === "number") {
+    for (let i = 0; i < opts.extra; i++) events.push(ev(`generated_agent_${i}`, "task_started", 5_000 + i * 3000, { runtime: i % 2 ? "codex" : "claude" }), ev(`generated_agent_${i}`, "task_finished", 40_000 + i * 3000));
+  }
+  const snap = { ...real, events, blackboard: real.blackboard.map((x: { ts: number }) => ({ ...x, ts: at(x.ts) })) };
+  await page.route("**/api/runs/r1?*", (r) => r.fulfill({ json: snap }));
+  await page.route("**/api/runs/r1", (r) => r.fulfill({ json: snap }));
+  await page.goto(`${base}/?run=r1`);
+  const read = events.find((e) => e.type === "blackboard_read" && e.task_id === "rev")!;
+  return { t0: Math.min(...events.filter((e) => /^task_started$/.test(e.type)).map((e) => e.ts)), readTs: read.ts, spanMs };
+}
+const tabs = (page: import("@playwright/test").Page) => page.getByRole("tablist", { name: "Bottom panel" });
+const label = (page: import("@playwright/test").Page) => page.getByTestId("playhead-label");
+
+test("dock tabs: Timeline is the default; Blackboard (N) shows entries and readers; arrow keys, Home and End switch; the choice survives a reload", async ({ page }) => {
+  const timeline = tabs(page).getByRole("tab", { name: "Timeline" }), bb = tabs(page).getByRole("tab", { name: /^Blackboard \(1\)$/ });
+  await expect(timeline).toHaveAttribute("aria-selected", "true");
+  await expect(timeline).toHaveAttribute("tabindex", "0");
+  await expect(bb).toHaveAttribute("tabindex", "-1");
+  await expect(page.locator("#dock-panel-timeline")).toHaveAttribute("role", "tabpanel");
+  await bb.click();
+  await expect(bb).toHaveAttribute("aria-selected", "true");
+  const row = page.getByRole("region", { name: "Blackboard" }).getByRole("row", { name: /impl\/summary/ });
+  await expect(row).toContainText("rev");
+  await expect(row).toContainText("Added GET /health returning ok.");
+  await page.reload();
+  await expect(tabs(page).getByRole("tab", { name: /^Blackboard/ })).toHaveAttribute("aria-selected", "true");
+  await tabs(page).getByRole("tab", { name: /^Blackboard/ }).focus();
+  await page.keyboard.press("ArrowLeft");
+  await expect(tabs(page).getByRole("tab", { name: "Timeline" })).toHaveAttribute("aria-selected", "true");
+  await expect(tabs(page).getByRole("tab", { name: "Timeline" })).toBeFocused();
+  await page.keyboard.press("End");
+  await expect(tabs(page).getByRole("tab", { name: /^Blackboard/ })).toBeFocused();
+  await page.keyboard.press("Home");
+  await expect(tabs(page).getByRole("tab", { name: "Timeline" })).toHaveAttribute("aria-selected", "true");
+  await page.keyboard.press("ArrowRight");
+  await expect(page.locator("#dock-panel-blackboard")).toBeVisible();
+  await expect(page.locator(".bb-toggle")).toHaveCount(0);
+});
+
+test("dock tabs work when localStorage is unavailable", async ({ page }) => {
+  await page.addInitScript(() => { Object.defineProperty(window, "localStorage", { get() { throw new Error("blocked"); } }); });
+  await page.reload();
+  await tabs(page).getByRole("tab", { name: /^Blackboard/ }).click();
+  await expect(page.getByRole("region", { name: "Blackboard" })).toBeVisible();
+  await expect(page.locator("body")).not.toContainText(/NaN|undefined/);
+});
+
+test("axis: labelled human ticks; lane labels show the FULL agent id, never an ellipsis", async ({ page }) => {
+  await mockRun(page, { extra: "rich" });
+  const ticks = page.getByTestId("tick");
+  await expect.poll(() => ticks.count()).toBeGreaterThanOrEqual(3);
+  expect(await ticks.count()).toBeLessThanOrEqual(9);
+  const texts = await ticks.allTextContents();
+  expect(texts[0]).toBe("0s");
+  for (const t of texts) expect(t).toMatch(/^\d+(s|m( \d\ds)?|h( \d\dm)?)$/);
+  const id = page.locator(".lane-id", { hasText: "investigate_sow_sprint_plan" });
+  await expect(id).toHaveText("investigate_sow_sprint_plan");
+  const btn = id.locator("xpath=..");
+  expect(await btn.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+  expect(await id.evaluate((el) => getComputedStyle(el.parentElement!).textOverflow)).not.toBe("ellipsis");
+  const lane = page.locator("li.lane").filter({ has: id });
+  await expect(lane.locator(".badge.rt-claude")).toHaveText("claude");
+  await expect(lane.locator(".lane-status")).toContainText("done");
+  // each retry is its own bar
+  await expect(page.locator("li.lane").filter({ hasText: "flaky_build" }).locator(".seg")).toHaveCount(2);
+  await expect(page.locator("li.lane").filter({ hasText: "flaky_build" }).locator(".mk-write")).toHaveCount(1);
+});
+
+test("scrubber, axis and lanes share one x-scale; the scrubber moves the playhead and hides later events", async ({ page }) => {
+  const { t0, readTs } = await mockRun(page);
+  const track = async (sel: string) => (await page.locator(sel).first().boundingBox())!;
+  const axis = await track(".tl-axis"), scrub = await track(".tl-scrub"), lane = await track(".lane-track");
+  expect(Math.abs(axis.x - scrub.x)).toBeLessThanOrEqual(1);
+  expect(Math.abs(axis.width - scrub.width)).toBeLessThanOrEqual(1);
+  expect(Math.abs(axis.x - lane.x)).toBeLessThanOrEqual(1);
+  expect(Math.abs(axis.width - lane.width)).toBeLessThanOrEqual(1);
+  await expect(flowEdge(page)).toHaveCount(1);
+  await expect(page.locator(".live-pill")).toBeVisible();
+  const liveX = (await page.getByTestId("playhead").boundingBox())!.x;
+  await page.getByLabel("Replay").fill(String(t0 + 90_000));
+  await expect(label(page)).toHaveText("+1m 30s");
+  const midX = (await page.getByTestId("playhead").boundingBox())!.x;
+  expect(midX).toBeLessThan(liveX - 20);
+  expect(midX).toBeGreaterThan(axis.x);
+  await expect(page.getByRole("status").filter({ hasText: "Replaying" })).toBeVisible();
+  await expect(page.locator(".live-pill")).toHaveCount(0);
+  // a later event disappears from other views, then returns on Live
+  await page.getByLabel("Replay").fill(String(readTs - 1));
+  await expect(flowEdge(page)).toHaveCount(0);
+  await page.getByRole("button", { name: "Live" }).click();
+  await expect(flowEdge(page)).toHaveCount(1);
+  await expect(page.getByRole("button", { name: "Live" })).toBeDisabled();
+  await expect(page.locator(".live-pill")).toBeVisible();
+  // keyboard: the slider steps with the arrow keys
+  await page.getByLabel("Replay").focus();
+  await page.keyboard.press("ArrowLeft");
+  await expect(page.getByRole("status").filter({ hasText: "Replaying" })).toBeVisible();
+  // clicking the axis sets the cutoff too
+  const ax = (await page.locator(".tl-axis").boundingBox())!;
+  await page.mouse.click(ax.x + ax.width * 0.25, ax.y + ax.height / 2);
+  const m = /^\+(\d+)s$|^\+(\d+)m/.exec((await label(page).textContent()) ?? "");
+  expect(m).not.toBeNull();
+  await page.mouse.click(ax.x + ax.width * 0.5, ax.y + ax.height / 2);
+  await expect(label(page)).toHaveText(/^\+1m/);
+});
+
+test("clicking a lane label opens the Inspector for that agent; Enter on a bar does too", async ({ page }) => {
+  await page.locator(".lane-label").filter({ has: page.locator(".lane-id", { hasText: /^rev$/ }) }).click();
+  await expect(page.getByRole("complementary", { name: "Inspector for rev" })).toBeVisible();
+  await page.getByRole("button", { name: "Close inspector" }).click();
+  await page.getByRole("button", { name: /^impl, done/ }).focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("complementary", { name: "Inspector for impl" })).toBeVisible();
+});
+
+test("bar tooltip shows status and duration on focus and on hover", async ({ page }) => {
+  await mockRun(page, { extra: "rich" });
+  const bar = page.getByRole("button", { name: /^investigate_sow_sprint_plan, done/ });
+  await bar.focus();
+  const tip = page.getByRole("tooltip");
+  await expect(tip).toHaveText("investigate_sow_sprint_plan · done · started +10s · ended +1m 22s · took 1m 12s · 1 write · 1 read");
+  await expect(bar).toHaveAttribute("aria-describedby", "tl-tip");
+  await page.keyboard.press("Escape");
+  await expect(tip).toHaveCount(0);
+  await page.getByRole("button", { name: /^rev, running/ }).hover();
+  await expect(page.getByRole("tooltip")).toContainText("running for");
+  await page.mouse.move(5, 5);
+  await expect(page.getByRole("tooltip")).toHaveCount(0);
+});
+
+test("replay: Play advances the cutoff, Pause holds it, Live restores; playback returns to live at the end", async ({ page }) => {
+  await mockRun(page);
+  await page.getByLabel("Speed").selectOption("8");
+  await page.getByRole("button", { name: "Play" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "Replaying" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Pause" })).toBeVisible();
+  await expect.poll(async () => (await label(page).textContent()) ?? "", { timeout: 4000 }).not.toBe("+0s");
+  await page.getByRole("button", { name: "Pause" }).click();
+  const held = await label(page).textContent();
+  await page.waitForTimeout(450);
+  expect(await label(page).textContent()).toBe(held);
+  await page.getByRole("button", { name: "Play" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "Replaying" })).toHaveCount(0, { timeout: 8000 }); // ran to the end: back to live
+  await expect(page.locator(".live-pill")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Play" })).toBeVisible();
+  await page.getByRole("button", { name: "Play" }).click();
+  await page.getByRole("button", { name: "Live" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "Replaying" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Play" })).toBeVisible();
+});
+
+test("shimmer animates running bars with motion enabled and leaves no inline styles under reduced motion", async ({ page, browser }) => {
+  await mockRun(page);
+  await expect.poll(() => page.locator(".shimmer").first().evaluate((el) => (el as HTMLElement).style.transform)).toMatch(/translate/);
+  await expect(page.locator(".seg-done .shimmer")).toHaveCount(0);
+  const ctx = await browser.newContext({ reducedMotion: "reduce" });
+  const rp = await ctx.newPage();
+  const real = await (await rp.request.get(`${base}/api/runs/r1`)).json();
+  await rp.route("**/api/runs/r1?*", (r) => r.fulfill({ json: real }));
+  await rp.route("**/api/runs/r1", (r) => r.fulfill({ json: real }));
+  await rp.goto(`${base}/?run=r1`);
+  await expect(rp.getByRole("button", { name: /^rev, running/ })).toBeVisible();
+  await rp.waitForTimeout(400);
+  for (const st of await rp.locator(".shimmer").evaluateAll((els) => els.map((e) => e.getAttribute("style") ?? ""))) expect(st).toBe("");
+  // replay still works under reduced motion
+  await rp.getByRole("button", { name: "Play" }).click();
+  await expect(rp.getByRole("status").filter({ hasText: "Replaying" })).toBeVisible();
+  await ctx.close();
+});
+
+test("800px wide: the dock is usable and the page does not scroll horizontally", async ({ page }) => {
+  await page.setViewportSize({ width: 800, height: 700 });
+  await mockRun(page, { extra: "rich" });
+  await expect(page.getByRole("button", { name: "Play" })).toBeVisible();
+  expect((await page.getByLabel("Replay").boundingBox())!.width).toBeGreaterThan(200);
+  expect(await page.getByTestId("tick").count()).toBeGreaterThanOrEqual(2);
+  await page.getByLabel("Replay").fill(String(Date.now() - 100_000));
+  expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(1);
+  expect((await page.locator(".dock").boundingBox())!.height).toBeLessThanOrEqual(700 * 0.3 + 1);
+  await page.screenshot({ path: "test-results/timeline-800.png" });
+});
+
+test("dock stays within 30% of the viewport with many lanes, scrolls inside, and keeps the axis visible", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await mockRun(page, { extra: 14 });
+  const dock = (await page.locator(".dock").boundingBox())!;
+  expect(dock.height).toBeLessThanOrEqual(800 * 0.3 + 1);
+  expect((await page.locator(".graph").boundingBox())!.height).toBeGreaterThanOrEqual(800 * 0.4);
+  const tl = page.locator(".timeline");
+  expect(await tl.evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true);
+  await tl.evaluate((el) => { el.scrollTop = el.scrollHeight; });
+  const ax = (await page.locator(".tl-axis").boundingBox())!;
+  expect(ax.y).toBeGreaterThanOrEqual(dock.y);
+  expect(ax.y + ax.height).toBeLessThanOrEqual(dock.y + dock.height + 1);
+  expect(await page.evaluate(() => document.documentElement.scrollHeight - document.documentElement.clientHeight)).toBeLessThanOrEqual(1);
+});
+
+for (const scheme of ["light", "dark"] as const) {
+  test(`screenshot: timeline with a mid-run playhead (${scheme})`, async ({ browser }) => {
+    const ctx = await browser.newContext({ colorScheme: scheme, viewport: { width: 1280, height: 800 } });
+    const page = await ctx.newPage();
+    const { t0 } = await mockRun(page, { extra: "rich" });
+    await page.getByLabel("Replay").fill(String(t0 + 75_000));
+    await expect(label(page)).toHaveText("+1m 15s");
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+    await page.mouse.move(2, 2);
+    await page.screenshot({ path: scheme === "light" ? "test-results/timeline-1280.png" : "test-results/timeline-dark.png" });
+    await ctx.close();
+  });
+}

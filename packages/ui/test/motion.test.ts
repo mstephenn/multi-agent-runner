@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { countTo, drawerIn, nodeIn, pulseRing, reducedMotion, rowsIn, statusFlash } from "../src/motion.js";
+import { countTo, drawerIn, nodeIn, pulseRing, reducedMotion, rowsIn, shimmer, statusFlash } from "../src/motion.js";
 
 // Vitest runs in Node (no window): every helper must degrade to a harmless no-op.
 describe("motion helpers without a browser", () => {
@@ -18,7 +18,7 @@ describe("motion helpers without a browser", () => {
     expect(seen).toEqual([5]);
   });
   it("element helpers accept null/empty input and return stop functions", () => {
-    for (const stop of [drawerIn(null), nodeIn(null), statusFlash(null), pulseRing(null), rowsIn([])]) {
+    for (const stop of [drawerIn(null), nodeIn(null), statusFlash(null), pulseRing(null), shimmer(null), rowsIn([])]) {
       expect(typeof stop).toBe("function");
       expect(() => stop()).not.toThrow();
     }
