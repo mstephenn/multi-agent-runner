@@ -79,6 +79,12 @@ Optional, in the repo root. Unknown keys are rejected. Defaults:
 - Secrets: output is passed through a redactor (known token formats, private keys, URL credentials, `Bearer` tokens, and values of keys named like `secret`/`token`/`password`/`api key`) before it is stored, relayed or sent to the JSON-repair call.
 - The event server binds `127.0.0.1` only and rejects requests whose `Host` or `Origin` is not loopback on the configured port.
 
+### Task reports (the full answer)
+
+A task may return a long markdown `report` alongside its short `summary`. At the end of a run `mar run` prints the full report of each final task (one no other task depends on), falling back to its blackboard `summary` if it has no report; if a final task failed or was blocked it says so and shows the reports of the tasks that did finish. Every report is also saved to `<repo>/.mar/reports/<runId>/<taskId>.md` (the paths are printed as `Saved:` lines) and shown in the UI's Output tab (as plain text).
+
+Reports are stored (redacted, up to 100,000 characters) in their own SQLite table, not on the blackboard, so they never add to other agents' context. Blackboard entries stay capped at about 1,200 characters.
+
 ## How it saves tokens
 
 - The planner runs once per run (on the planner model, Sonnet by default). The plan is stored and reused by `resume`.
