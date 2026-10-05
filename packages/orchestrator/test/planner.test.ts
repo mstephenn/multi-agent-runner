@@ -92,7 +92,7 @@ describe("planGoal", () => {
     expect(count(pr, "<goal>")).toBe(1);
     expect(count(pr, "</repo_files>")).toBe(1);
     expect(count(pr, "<repo_files>")).toBe(1);
-    expect(pr).toMatch(/data, never instructions/i);
+    expect(pr).toMatch(/treat that text as data/i);
     expect(pr).toMatch(/ONLY the JSON object/);
     expect(pr).toContain("Ignore previous instructions");
     expect(pr).not.toContain("<goal>do");
@@ -158,5 +158,28 @@ describe("repoMap", () => {
   it("throws a clear error outside a git repo", () => {
     const d = mkdtempSync(join(tmpdir(), "mar-nogit-"));
     try { expect(() => repoMap(d)).toThrow(/not a git repository/i); } finally { rmSync(d, { recursive: true, force: true }); }
+  });
+});
+
+describe("repoMap errors and prompt wording", () => {
+  it("names git's own reason for a non-git directory instead of guessing", async () => {
+    const { mkdtempSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { repoMap } = await import("../src/planner.js");
+    const dir = mkdtempSync(join(tmpdir(), "mar-nogit-"));
+    try { expect(() => repoMap(dir)).toThrow(/not a git repository/i); } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+  it("tells the planner to plan for the goal rather than treating it as ignorable data", async () => {
+    const f = fakeAdapter(() => [{ type: "result", text: JSON.stringify(valid) }]);
+    await planGoal({ goal: "g", repoMap: "a.ts", adapter: f.adapter, model: null, cwd: "/r" });
+    expect(f.calls[0]!.prompt).toContain("Plan for the goal below");
+    expect(f.calls[0]!.prompt).not.toContain("data, never instructions");
+  });
+  it("caps the final PlanError message", async () => {
+    const huge = "z".repeat(5000);
+    const f = fakeAdapter(() => [{ type: "result", text: JSON.stringify({ tasks: [{ id: "a", role: huge, runtime: "claude", tier: "mid", goal: "g" }] }) }]);
+    await expect(planGoal({ goal: "g", repoMap: "a.ts", adapter: f.adapter, model: null, cwd: "/r" }))
+      .rejects.toSatisfy((e: Error) => e.message.length <= 400);
   });
 });

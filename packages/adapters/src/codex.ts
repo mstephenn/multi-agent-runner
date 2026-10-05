@@ -43,7 +43,10 @@ export function codexFailure(line: string): string | null {
 /** CLI args; the prompt is NOT included, it is delivered on stdin (`-`). `unsafe` is deliberately not mapped. */
 export function buildCodexArgs(i: AdapterInput): string[] {
   const writes = i.allowedTools.some((t) => /^(Edit|Write)/.test(t));
-  const args = ["exec", "--json", "--skip-git-repo-check", "--sandbox", writes ? "workspace-write" : "read-only", "-C", resolve(i.cwd)];
+  // --ignore-user-config: workers must not inherit the user's MCP servers (verified: `-c mcp_servers={}` does not clear
+// them, this flag does; auth still comes from CODEX_HOME). approval_policy "never": `exec` must never wait on a prompt.
+  const args = ["exec", "--json", "--skip-git-repo-check", "--ignore-user-config", "--ignore-rules", "-c", 'approval_policy="never"',
+    "--sandbox", writes ? "workspace-write" : "read-only", "-C", resolve(i.cwd)];
   if (i.model) args.push("-m", i.model);
   args.push("-");
   return args;

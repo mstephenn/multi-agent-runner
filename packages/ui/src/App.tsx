@@ -38,7 +38,7 @@ export function App() {
     return () => { alive = false; };
   }, []);
 
-  const { snap, conn, error } = useRun(runId);
+  const { snap, conn, error, notFound } = useRun(runId);
   const chooseRun = useCallback((id: string) => {
     setRunId(id); setSelected(null); setCutoff(null);
     history.replaceState(null, "", `?run=${encodeURIComponent(id)}`);
@@ -71,6 +71,7 @@ export function App() {
   if (runsError) return <div className="state" role="alert">Cannot reach the runner server: {runsError}</div>;
   if (runs === null) return <div className="state" role="status">Loading runs…</div>;
   if (!runId) return <div className="state">No runs yet. Start one with <code>mar run</code>.</div>;
+  if (notFound) return <div className="state" role="alert">Run <code>{runId}</code> was not found. It may have been created in a different repository or deleted.</div>;
   return (
     <div className="app">
       <Header runs={runs} run={run} runId={runId} onRun={chooseRun} agents={agents} elapsedMs={endTs - startTs} conn={conn} />

@@ -66,7 +66,16 @@ const base: AdapterInput = { taskId: "t", prompt: "-p do it", cwd: "/work/dir", 
 
 describe("buildCodexArgs", () => {
   it("builds read-only args, with the prompt read from stdin (`-`)", () => {
-    expect(buildCodexArgs(base)).toEqual(["exec", "--json", "--skip-git-repo-check", "--sandbox", "read-only", "-C", "/work/dir", "-"]);
+    expect(buildCodexArgs(base)).toEqual(["exec", "--json", "--skip-git-repo-check", "--ignore-user-config", "--ignore-rules", "-c", 'approval_policy="never"', "--sandbox", "read-only", "-C", "/work/dir", "-"]);
+  });
+  it("isolates workers from the user's Codex config (MCP servers) and never blocks on approvals", () => {
+    // Verified against codex-cli 0.156.1: `-c mcp_servers={}` does NOT clear user MCP servers, `--ignore-user-config` does (auth still works).
+    for (const unsafe of [false, true]) {
+      const a = buildCodexArgs({ ...base, unsafe });
+      expect(a).toContain("--ignore-user-config");
+      expect(a[a.indexOf("-c") + 1]).toBe('approval_policy="never"');
+      expect(a.join(" ")).not.toMatch(/dangerously|bypass/i);
+    }
   });
   it("uses workspace-write only when an Edit/Write tool is allowed", () => {
     const sb = (t: string[]) => { const a = buildCodexArgs({ ...base, allowedTools: t }); return a[a.indexOf("--sandbox") + 1]; };

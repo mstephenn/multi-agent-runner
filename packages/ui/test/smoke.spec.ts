@@ -101,3 +101,53 @@ test("stop needs a confirm click and sends x-mar", async ({ page }) => {
   await expect(page.getByRole("button", { name: "Stop requested" })).toBeDisabled();
   expect(reqs).toEqual(["POST 1"]);
 });
+
+test("layout: at 1280x800 the graph fills most of the viewport and the timeline stays small", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  const graph = await page.locator(".graph").boundingBox();
+  const timeline = await page.locator(".timeline").boundingBox();
+  expect(graph!.height).toBeGreaterThanOrEqual(800 * 0.4);
+  expect(timeline!.height).toBeLessThanOrEqual(800 * 0.3);
+  expect(graph!.height).toBeGreaterThan(timeline!.height);
+  await page.screenshot({ path: "test-results/layout-1280.png" });
+});
+
+test("narrow width (800px): the inspector opens and the page does not scroll horizontally", async ({ page }) => {
+  await page.setViewportSize({ width: 800, height: 700 });
+  await page.getByTestId("node-impl").click();
+  await expect(page.getByRole("tablist")).toBeVisible();
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  expect(overflow).toBeLessThanOrEqual(1);
+  await page.screenshot({ path: "test-results/narrow-800.png" });
+});
+
+test("dark mode changes the page colours", async ({ browser }) => {
+  const colours = async (scheme: "light" | "dark") => {
+    const ctx = await browser.newContext({ colorScheme: scheme });
+    const page = await ctx.newPage();
+    await page.goto(`${base}/?run=r1`);
+    await expect(page.locator(".app")).toBeVisible();
+    const c = await page.evaluate(() => { const s = getComputedStyle(document.body); return { bg: s.backgroundColor, fg: s.color }; });
+    await ctx.close();
+    return c;
+  };
+  const light = await colours("light"), dark = await colours("dark");
+  expect(dark.bg).not.toBe(light.bg);
+  expect(dark.bg).not.toBe(dark.fg);
+});
+
+test("an unknown run shows a terminal 'not found' state, not an endless reconnect", async ({ page }) => {
+  await page.goto(`${base}/?run=does-not-exist`);
+  await expect(page.getByRole("alert")).toContainText("not found");
+  await expect(page.getByRole("button", { name: /stop/i })).toHaveCount(0);
+});
+
+test("a restrictive CSP is in place and the app still works under it", async ({ page }) => {
+  const csp = await page.locator('meta[http-equiv="Content-Security-Policy"]').getAttribute("content");
+  expect(csp).toContain("default-src 'self'");
+  const violations: string[] = [];
+  page.on("console", (m) => { if (/Content Security Policy/i.test(m.text())) violations.push(m.text()); });
+  await page.reload();
+  await expect(page.getByTestId("node-impl")).toBeVisible();
+  expect(violations).toEqual([]);
+});
