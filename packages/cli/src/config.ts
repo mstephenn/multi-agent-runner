@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
+import { linkPathProblem, parseCommand } from "@mar/orchestrator";
 
 const tierKeys = z.object({ low: z.string().nullable(), mid: z.string().nullable(), high: z.string().nullable() });
 type Tiers = z.infer<typeof tierKeys>;
@@ -18,6 +19,15 @@ const Schema = z.object({
   taskTimeoutMinutes: z.number().int().min(1).max(240).default(20),
   maxBudgetUsdPerTask: z.number().positive().optional(),
   allowOpus: z.boolean().default(false),
+  // Verify gate: commands (argv-split, no shell) every implementer/tester must pass in its worktree. [] = gate off.
+  verify: z.array(z.string().superRefine((c, ctx) => { try { parseCommand(c); } catch (e) { ctx.addIssue({ code: "custom", message: (e as Error).message }); } })).default([]),
+  verifyTimeoutMinutes: z.number().int().min(1).max(60).default(10),
+  // Repo-relative paths (single-segment * globs) symlinked from the main repo into writer worktrees, e.g. node_modules.
+  linkPaths: z.array(z.string().superRefine((p, ctx) => { const why = linkPathProblem(p); if (why) ctx.addIssue({ code: "custom", message: why }); })).default([]),
+  // What to do when a writer touches files outside its declared task paths.
+  ownership: z.enum(["warn", "enforce"]).default("warn"),
+  // Merge all done writer branches into mar/<run>/integration (never your branch) and re-verify the result.
+  integrate: z.boolean().default(true),
   // Partial overrides are allowed and merged with the defaults below.
   tiers: z.object({ claude: tierKeys.partial().strict().optional(), codex: tierKeys.partial().strict().optional() }).strict().optional(),
 }).strict().transform((c) => ({

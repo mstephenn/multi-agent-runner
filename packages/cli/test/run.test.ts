@@ -74,6 +74,35 @@ describe("executeRun", () => {
     expect(JSON.stringify(ev[0].payload)).toMatch(/planning failed/);
     expect(JSON.stringify(ev[0].payload)).not.toContain("hunter2xyz");
   });
+  it("falls back to Codex when Claude planning fails", async () => {
+    const store = new Store(":memory:");
+    const claude = fakeAdapter((i: any) => i.taskId === "planner" ? new Error("You've hit your session limit") : ok());
+    const codex = fakeAdapter((i: any) => i.taskId === "planner" ? [{ type: "result", text: JSON.stringify(plan) }] : ok(), "codex");
+    const base = mk(claude, tmp(), store);
+    const { results } = await executeRun({ ...base, adapters: { claude: claude.adapter, codex: codex.adapter } });
+    expect(results).toEqual({ a: "done", b: "done" });
+    expect(codex.calls[0]).toMatchObject({ taskId: "planner", model: null });
+  });
+  it("retries a Codex model-list timeout before giving up on planning", async () => {
+    const store = new Store(":memory:");
+    const claude = fakeAdapter(() => new Error("session limit"));
+    const codex = fakeAdapter((i, attempt) => i.taskId === "planner" && attempt === 1
+      ? new Error("codex exited 1: failed to refresh available models: request timed out")
+      : [{ type: "result", text: JSON.stringify(plan) }], "codex");
+    const base = mk(claude, tmp(), store);
+    const { runId } = await executeRun({ ...base, adapters: { claude: claude.adapter, codex: codex.adapter }, runDagFn: async () => ({}) });
+    expect(codex.calls).toHaveLength(2);
+    expect(store.loadPlan(runId)).toBeDefined();
+  });
+  it("reports both CLI failures without retrying a non-transient Codex error", async () => {
+    const store = new Store(":memory:");
+    const claude = fakeAdapter(() => new Error("session limit"));
+    const codex = fakeAdapter(() => new Error("authentication failed"), "codex");
+    const base = mk(claude, tmp(), store);
+    await expect(executeRun({ ...base, adapters: { claude: claude.adapter, codex: codex.adapter } }))
+      .rejects.toThrow(/Claude: session limit; Codex: authentication failed/);
+    expect(codex.calls).toHaveLength(1);
+  });
   it("abort mid-task: waiting adapter is cancelled, no task left running", async () => {
     const store = new Store(":memory:");
     let taskStarted = false; let res: () => void = () => {};
@@ -162,6 +191,13 @@ describe("makeRepair", () => {
     const f = fakeAdapter(() => []);
     const repair = makeRepair({ claude: f.adapter, codex: f.adapter }, loadConfig(tmp()), "/repo");
     await expect(repair("x")).rejects.toThrow();
+  });
+  it("falls back to Codex when Claude repair fails", async () => {
+    const claude = fakeAdapter(() => new Error("session limit"));
+    const codex = fakeAdapter(() => [{ type: "result", text: "{\"ok\":1}" }], "codex");
+    const repair = makeRepair({ claude: claude.adapter, codex: codex.adapter }, loadConfig(tmp()), "/repo");
+    expect(await repair("x")).toBe("{\"ok\":1}");
+    expect(codex.calls[0].model).toBeNull();
   });
 });
 
@@ -349,5 +385,159 @@ describe("runMain", () => {
     expect(h.exits).toEqual([]);
     t += 5000; h.proc!.emit("SIGINT");
     await vi.waitFor(() => expect(h.exits).toEqual([130]));
+  });
+});
+
+
+describe("executeRun: verify, ownership and integration wiring", () => {
+  const twoWriters = { tasks: [
+    { id: "a", role: "implementer", runtime: "claude", tier: "mid", goal: "A", paths: ["a/**"] },
+    { id: "b", role: "tester", runtime: "claude", tier: "mid", goal: "B", paths: ["b/**"] },
+    { id: "c", role: "reviewer", runtime: "claude", tier: "mid", goal: "C", dependsOn: ["a", "b"] },
+  ] };
+  const planScript = (p: unknown) => (i: any): any => (i.taskId === "planner" ? [{ type: "result", text: JSON.stringify(p) }] : ok());
+  const setup = (cfg: object = {}, p: unknown = twoWriters) => {
+    const repo = tmp(); writeFileSync(join(repo, ".mar.json"), JSON.stringify(cfg));
+    const store = new Store(":memory:"); const f = fakeAdapter(planScript(p));
+    return { repo, store, base: mk(f, repo, store) };
+  };
+
+  it("passes verify and ownership to runDag, omitting verify when empty", async () => {
+    let seen: any;
+    const a = setup({ verify: ["pnpm test"], verifyTimeoutMinutes: 2, ownership: "enforce" });
+    await executeRun({ ...a.base, runDagFn: async (d) => { seen = d; return {}; } });
+    expect(seen.verify).toEqual({ commands: ["pnpm test"], timeoutMs: 120_000 });
+    expect(seen.ownership).toBe("enforce");
+    const b = setup();
+    await executeRun({ ...b.base, runDagFn: async (d) => { seen = d; return {}; } });
+    expect(seen.verify).toBeUndefined();
+    expect(seen.ownership).toBe("warn");
+  });
+  it("creates real worktrees with the configured linkPaths when none are injected", async () => {
+    const a = setup({ linkPaths: ["node_modules"] });
+    const { worktrees: _omit, ...noWt } = a.base;
+    let seen: any;
+    await executeRun({ ...noWt, runDagFn: async (d) => { seen = d; return {}; } });
+    expect(typeof seen.worktrees.link).toBe("function");
+    expect(typeof seen.worktrees.head).toBe("function");
+  });
+  it("integrates when two or more writers are done: topological order, verify wired, one event, result returned", async () => {
+    const a = setup({ verify: ["pnpm test"], linkPaths: ["node_modules"] });
+    const calls: any[] = [];
+    const out = await executeRun({
+      ...a.base, runDagFn: async () => ({ a: "done", b: "done", c: "done" }), // (the real gate would run in fake /wt dirs)
+      integrateFn: async (o) => { calls.push(o); return { branch: "mar/rid/integration", merged: o.branches, verify: { ok: true, tail: "" } }; }, runId: "rid",
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ runId: "rid", branches: ["mar/rid/a", "mar/rid/b"], verify: { commands: ["pnpm test"], timeoutMs: 600_000 }, linkPaths: ["node_modules"] });
+    expect(out.integration).toEqual({ result: { branch: "mar/rid/integration", merged: ["mar/rid/a", "mar/rid/b"], verify: { ok: true, tail: "" } } });
+    const evs = a.store.listEvents("rid").filter((e) => e.type === "integration");
+    expect(evs).toHaveLength(1);
+    expect(evs[0].task_id).toBeNull();
+    expect(evs[0].payload).toMatchObject({ branch: "mar/rid/integration", merged: ["mar/rid/a", "mar/rid/b"], verify: { ok: true } });
+  });
+  it("orders branches topologically even when the plan lists dependents first", async () => {
+    const p = { tasks: [
+      { id: "z", role: "implementer", runtime: "claude", tier: "mid", goal: "Z", dependsOn: ["y"] },
+      { id: "y", role: "implementer", runtime: "claude", tier: "mid", goal: "Y" },
+    ] };
+    const a = setup({}, p);
+    let branches: string[] = [];
+    await executeRun({ ...a.base, integrateFn: async (o) => { branches = o.branches; return { branch: "i", merged: o.branches }; } });
+    expect(branches.map((b) => b.split("/").pop())).toEqual(["y", "z"]);
+  });
+  it("does not integrate with one done writer, when disabled, or when a signal already aborted", async () => {
+    const fn = vi.fn(async () => ({ branch: "i", merged: [] as string[] }));
+    const one = setup({}, { tasks: [twoWriters.tasks[0]] });
+    expect((await executeRun({ ...one.base, integrateFn: fn })).integration).toBeUndefined();
+    const off = setup({ integrate: false });
+    expect((await executeRun({ ...off.base, integrateFn: fn })).integration).toBeUndefined();
+    expect(fn).not.toHaveBeenCalled();
+  });
+  it("only merges DONE writers (failed ones are left out)", async () => {
+    const a = setup();
+    let branches: string[] = [];
+    await executeRun({
+      ...a.base, runDagFn: async () => ({ a: "done", b: "failed", c: "blocked" }),
+      integrateFn: async (o) => { branches = o.branches; return { branch: "i", merged: o.branches }; },
+    });
+    expect(branches).toEqual([]); // one done writer: no integration at all
+    const fn = vi.fn(async (o: any) => ({ branch: "i", merged: o.branches as string[] }));
+    await executeRun({ ...a.base, runId: "r2", runDagFn: async () => ({ a: "done", b: "done", c: "blocked" }), integrateFn: fn });
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
+  it("catches integration errors: result carries a redacted, capped message and an integration event", async () => {
+    const a = setup();
+    const out = await executeRun({ ...a.base, runId: "rerr", integrateFn: async () => { throw new Error("boom API_KEY=hunter2 " + "x".repeat(600)); } });
+    expect(out.results).toEqual({ a: "done", b: "done", c: "done" });
+    expect(out.integration?.result).toBeUndefined();
+    expect(out.integration?.error).not.toContain("hunter2");
+    expect(out.integration!.error!.length).toBeLessThanOrEqual(300);
+    expect(a.store.listEvents("rerr").some((e) => e.type === "integration" && String(e.payload.error).includes("boom"))).toBe(true);
+  });
+  it("skips real integration when worktrees were injected (fakes have no branches)", async () => {
+    const a = setup();
+    const out = await executeRun(a.base);
+    expect(out.integration).toBeUndefined();
+  });
+});
+
+describe("runMain: integration printout and exit code", () => {
+  beforeAll(() => { process.env.GIT_CONFIG_GLOBAL = "/dev/null"; process.env.GIT_CONFIG_NOSYSTEM = "1"; });
+  const gitRepo = () => { const d = tmp(); execFileSync("git", ["init", "-q"], { cwd: d }); return d; };
+  const free = () => new Promise<number>((res) => { const s = createServer(); s.listen(0, "127.0.0.1", () => { const p = (s.address() as { port: number }).port; s.close(() => res(p)); }); });
+  const twoWriters = { tasks: [
+    { id: "a", role: "implementer", runtime: "claude", tier: "mid", goal: "A", paths: ["a/**"] },
+    { id: "b", role: "implementer", runtime: "claude", tier: "mid", goal: "B", paths: ["b/**"] },
+  ] };
+  const f = fakeAdapter((i: any) => (i.taskId === "planner" ? [{ type: "result", text: JSON.stringify(twoWriters) }] : ok()));
+  const go = async (integrateFn: NonNullable<MainDeps["integrateFn"]>) => {
+    const out: string[] = []; const err: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((...a) => { out.push(a.join(" ")); });
+    vi.spyOn(console, "error").mockImplementation((...a) => { err.push(a.join(" ")); });
+    const proc = new EventEmitter() as MainDeps["proc"] & EventEmitter;
+    const code = await runMain(["run", "g", "--repo", gitRepo(), "--port", String(await free())], {
+      adapters: () => ({ claude: f.adapter, codex: f.adapter }), preflight: async () => [], proc, exit: () => {},
+      worktrees: wt, repoMapFn: () => "a.ts", integrateFn,
+    });
+    return { code, out: out.join("\n"), err: err.join("\n") };
+  };
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it("success: prints the integration branch, merged tasks, verify result and the merge hint; exit 0", async () => {
+    const r = await go(async (o) => ({ branch: `mar/${o.runId}/integration`, merged: o.branches, verify: { ok: true, tail: "" } }));
+    expect(r.code).toBe(0);
+    expect(r.out).toMatch(/Integration: mar\/r[a-z0-9]+\/integration \(merged a, b; verify passed\)/);
+    expect(r.out).toMatch(/To take it: git merge mar\/r[a-z0-9]+\/integration \(on a feature branch, never main\)/);
+    expect(r.out).not.toContain("Nothing was merged");
+  });
+  it("no verify configured: no verify text", async () => {
+    const r = await go(async (o) => ({ branch: `mar/${o.runId}/integration`, merged: o.branches }));
+    expect(r.out).toMatch(/Integration: mar\/r[a-z0-9]+\/integration \(merged a, b\)/);
+    expect(r.out).not.toMatch(/verify (passed|failed)/);
+  });
+  it("conflict: names the branch and files, exit 1, no take-it hint", async () => {
+    const r = await go(async (o) => ({ branch: `mar/${o.runId}/integration`, merged: [o.branches[0]!], conflict: { branch: o.branches[1]!, files: ["x.ts", "y.ts"] } }));
+    expect(r.code).toBe(1);
+    expect(r.out).toMatch(/Integration stopped at mar\/r[a-z0-9]+\/b: conflict in x\.ts, y\.ts/);
+    expect(r.out).not.toContain("To take it");
+  });
+  it("verify failure: prints the command and the redacted tail, exit 1", async () => {
+    const r = await go(async (o) => ({ branch: `mar/${o.runId}/integration`, merged: o.branches,
+      verify: { ok: false, failed: { command: "pnpm test", code: 1, timedOut: false }, tail: "1 failed API_KEY=hunter2" } }));
+    expect(r.code).toBe(1);
+    expect(r.out).toMatch(/verify failed \(pnpm test\)/);
+    expect(r.out).toContain("1 failed API_KEY=[REDACTED]");
+    expect(r.out).not.toContain("hunter2");
+    expect(r.out).not.toContain("To take it");
+  });
+  it("integration error: printed, redacted and capped, never crashes reporting; exit 1", async () => {
+    const r = await go(async () => { throw new Error("git exploded API_KEY=hunter2 " + "y".repeat(500)); });
+    expect(r.code).toBe(1);
+    const line = r.out.split("\n").find((l) => l.startsWith("Integration failed:"))!;
+    expect(line).toBeDefined();
+    expect(line).not.toContain("hunter2");
+    expect(line.length).toBeLessThanOrEqual("Integration failed: ".length + 300);
+    expect(r.out).toMatch(/a {2}done/); // the normal task table is still printed
   });
 });

@@ -65,3 +65,26 @@ describe("loadConfig", () => {
     expect(loadConfig(repo({ plannerModel: "claude-opus-4", allowOpus: true })).plannerModel).toBe("claude-opus-4");
   });
 });
+
+describe("loadConfig: verify, ownership, integration, linkPaths", () => {
+  it("has gate-off defaults", () => {
+    const c = loadConfig(repo());
+    expect(c).toMatchObject({ verify: [], verifyTimeoutMinutes: 10, linkPaths: [], ownership: "warn", integrate: true });
+  });
+  it("accepts overrides", () => {
+    const c = loadConfig(repo({ verify: ["pnpm typecheck", `node -e "process.exit(0)"`], verifyTimeoutMinutes: 3, linkPaths: ["node_modules", "packages/*/node_modules"], ownership: "enforce", integrate: false }));
+    expect(c).toMatchObject({ verify: ["pnpm typecheck", `node -e "process.exit(0)"`], verifyTimeoutMinutes: 3, ownership: "enforce", integrate: false });
+    expect(c.linkPaths).toEqual(["node_modules", "packages/*/node_modules"]);
+  });
+  it.each([[{ verifyTimeoutMinutes: 0 }], [{ verifyTimeoutMinutes: 61 }], [{ verifyTimeoutMinutes: 1.5 }], [{ ownership: "off" }], [{ integrate: "yes" }], [{ verify: "pnpm test" }], [{ verify: [1] }]])("rejects %j", (cfg) => {
+    expect(() => loadConfig(repo(cfg))).toThrow(/\.mar\.json/);
+  });
+  it("rejects verify commands that need a shell, naming the entry", () => {
+    expect(() => loadConfig(repo({ verify: ["pnpm test && pnpm lint"] }))).toThrow(/verify\.0.*shell operator/);
+    expect(() => loadConfig(repo({ verify: ["ok", "cat x | wc"] }))).toThrow(/verify\.1/);
+    expect(() => loadConfig(repo({ verify: [""] }))).toThrow(/verify\.0/);
+  });
+  it.each(["/abs", "../x", ".git", ".env", "a/.env.local", "k/server.pem", "id_rsa", "a/**/b"])("rejects unsafe linkPaths %j", (p) => {
+    expect(() => loadConfig(repo({ linkPaths: [p] }))).toThrow(/linkPaths\.0/);
+  });
+});
