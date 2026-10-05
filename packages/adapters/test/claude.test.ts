@@ -2,7 +2,8 @@ import { describe, it, expect } from "vitest";
 import { readFileSync, mkdtempSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { normalizeClaudeLine, buildClaudeArgs, claudeAdapter, claudeFailure } from "../src/claude.js";
+import { normalizeClaudeLine, createClaudeNormalizer, buildClaudeArgs, claudeAdapter, claudeFailure, CLAUDE_DENIED_TOOLS } from "../src/claude.js";
+import { workerEnv } from "../src/env.js";
 import { fakeBin, waitFor } from "./helpers.js";
 import { AdapterError, type AdapterInput, type AgentEvent } from "../src/types.js";
 
@@ -62,6 +63,7 @@ describe("buildClaudeArgs", () => {
     expect(buildClaudeArgs(base)).toEqual([
       "-p", "--output-format", "stream-json", "--verbose", "--no-session-persistence",
       "--tools", "Read,Edit", "--allowedTools", "Read,Edit",
+      "--disallowedTools", CLAUDE_DENIED_TOOLS.join(","),
       "--strict-mcp-config", "--setting-sources", "",
       "--permission-mode", "acceptEdits",
     ]);
@@ -100,6 +102,13 @@ describe("buildClaudeArgs", () => {
     const a = buildClaudeArgs({ ...base, allowedTools: ["Bash(git *)", "Bash(npm test)", "Read"] });
     expect(a[a.indexOf("--tools") + 1]).toBe("Bash,Read");
     expect(a[a.indexOf("--allowedTools") + 1]).toBe("Bash(git *),Bash(npm test),Read");
+  });
+  it("always denies push/network/destructive shell patterns, even for Bash(*) allows and unsafe", () => {
+    for (const a of [buildClaudeArgs({ ...base, allowedTools: ["Bash"] }), buildClaudeArgs({ ...base, allowedTools: [] }), buildClaudeArgs({ ...base, unsafe: true })]) {
+      const denied = a[a.indexOf("--disallowedTools") + 1]!.split(",");
+      for (const p of ["Bash(git push:*)", "Bash(git remote:*)", "Bash(git config:*)", "Bash(curl:*)", "Bash(wget:*)", "Bash(ssh:*)", "Bash(sudo:*)"]) expect(denied).toContain(p);
+      expect(denied.some((d) => d.includes("reset"))).toBe(false); // workers may reset inside their own worktree
+    }
   });
   it("isolates the worker from user MCP servers and user/project settings", () => {
     const a = buildClaudeArgs(base);
@@ -186,5 +195,50 @@ describe("claudeFailure", () => {
   it("caps and redacts the message", () => {
     const f = claudeFailure(JSON.stringify({ type: "result", is_error: true, result: "TOKEN=abc " + "x".repeat(1000) }));
     expect(Array.from(f!.message).length).toBeLessThanOrEqual(300);
+  });
+});
+
+describe("createClaudeNormalizer", () => {
+  const use = JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", id: "tu1", name: "Bash", input: { command: "ls" } }] } });
+  const res = (id: string) => JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: id, content: "ok", is_error: false }] } });
+  it("names tool_result events after the tool_use that produced them", () => {
+    const n = createClaudeNormalizer();
+    n(use);
+    expect(n(res("tu1"))).toMatchObject([{ type: "tool_result", name: "Bash" }]);
+  });
+  it("falls back to the id for unknown tool_use ids; normalizeClaudeLine stays stateless", () => {
+    expect(createClaudeNormalizer()(res("zz"))).toMatchObject([{ type: "tool_result", name: "zz" }]);
+    expect(normalizeClaudeLine(res("tu1"))).toMatchObject([{ name: "tu1" }]);
+  });
+  it("claudeAdapter reports real tool names end to end", async () => {
+    const bin = fakeBin(`console.log(${JSON.stringify(use)});console.log(${JSON.stringify(res("tu1"))});console.log(${JSON.stringify(JSON.stringify({ type: "result", subtype: "success", result: "done", usage: {} }))});`);
+    const evs: AgentEvent[] = [];
+    for await (const e of claudeAdapter(bin).run({ ...base, cwd: "." })) evs.push(e);
+    expect(evs.find((e) => e.type === "tool_result")).toMatchObject({ name: "Bash" });
+  });
+});
+
+describe("workerEnv + child environment", () => {
+  it("strips unrelated secrets and keeps what logins and the toolchain need", () => {
+    const e = workerEnv({
+      PATH: "/bin", HOME: "/h", USER: "u", LANG: "C", LC_ALL: "C", TERM: "x", TMPDIR: "/t", SHELL: "/bin/sh", XDG_CONFIG_HOME: "/c",
+      CLAUDE_CONFIG_DIR: "/cc", ANTHROPIC_API_KEY: "k", CODEX_HOME: "/cx", OPENAI_API_KEY: "o",
+      AWS_SECRET_ACCESS_KEY: "s", GITHUB_TOKEN: "g", NPM_TOKEN: "n", DATABASE_URL: "d", GH_TOKEN: "g2", AZURE_DEVOPS_EXT_PAT: "p",
+    });
+    expect(e).toMatchObject({ PATH: "/bin", HOME: "/h", USER: "u", LC_ALL: "C", XDG_CONFIG_HOME: "/c", CLAUDE_CONFIG_DIR: "/cc", ANTHROPIC_API_KEY: "k", CODEX_HOME: "/cx", OPENAI_API_KEY: "o" });
+    for (const k of ["AWS_SECRET_ACCESS_KEY", "GITHUB_TOKEN", "NPM_TOKEN", "DATABASE_URL", "GH_TOKEN", "AZURE_DEVOPS_EXT_PAT"]) expect(e).not.toHaveProperty(k);
+  });
+  it("defaults to process.env and skips undefined values", () => {
+    expect(workerEnv().PATH).toBe(process.env.PATH);
+    expect(Object.values(workerEnv({ PATH: "/bin", HOME: undefined }))).not.toContain(undefined);
+  });
+  it("claudeAdapter runs the child with the minimal env", async () => {
+    process.env.MAR_TEST_SECRET_TOKEN = "leak";
+    try {
+      const bin = fakeBin(`console.log(JSON.stringify({type:"result",subtype:"success",result:String(process.env.MAR_TEST_SECRET_TOKEN)+"|"+!!process.env.PATH,usage:{}}))`);
+      const evs: AgentEvent[] = [];
+      for await (const e of claudeAdapter(bin).run({ ...base, cwd: "." })) evs.push(e);
+      expect(evs.find((e) => e.type === "result")).toMatchObject({ text: "undefined|true" });
+    } finally { delete process.env.MAR_TEST_SECRET_TOKEN; }
   });
 });

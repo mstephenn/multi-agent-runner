@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { waitFor } from "./helpers.js";
 import { readFileSync, writeFileSync, chmodSync, mkdtempSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -67,6 +68,9 @@ const base: AdapterInput = { taskId: "t", prompt: "-p do it", cwd: "/work/dir", 
 describe("buildCodexArgs", () => {
   it("builds read-only args, with the prompt read from stdin (`-`)", () => {
     expect(buildCodexArgs(base)).toEqual(["exec", "--json", "--skip-git-repo-check", "--ignore-user-config", "--ignore-rules", "-c", 'approval_policy="never"', "--sandbox", "read-only", "-C", "/work/dir", "-"]);
+  });
+  it("passes --ignore-rules (verified in `codex exec --help`)", () => {
+    expect(buildCodexArgs(base)).toContain("--ignore-rules");
   });
   it("isolates workers from the user's Codex config (MCP servers) and never blocks on approvals", () => {
     // Verified against codex-cli 0.156.1: `-c mcp_servers={}` does NOT clear user MCP servers, `--ignore-user-config` does (auth still works).
@@ -145,6 +149,14 @@ describe("codexAdapter", () => {
     const evs = await collect(codexAdapter(bin).run({ ...base, cwd: "." }));
     expect(evs.filter((e) => e.type === "result")).toHaveLength(1);
   });
+  it("does not pass secrets from the parent env to the child", async () => {
+    process.env.MAR_TEST_SECRET_TOKEN = "leak";
+    try {
+      const bin = fakeBin(`console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:String(process.env.MAR_TEST_SECRET_TOKEN)}}))`);
+      const evs = await collect(codexAdapter(bin).run({ ...base, cwd: "." }));
+      expect(evs.find((e) => e.type === "result")).toMatchObject({ text: "undefined" });
+    } finally { delete process.env.MAR_TEST_SECRET_TOKEN; }
+  });
   it("surfaces a missing binary as AdapterError with the spawn message", async () => {
     await expect(collect(codexAdapter("/nonexistent/codex-bin").run(base))).rejects.toThrow(/ENOENT/);
   });
@@ -154,15 +166,20 @@ describe("codexAdapter", () => {
     const bin = fakeBin(`require("fs").writeFileSync(${JSON.stringify(marker)},"x")`);
     const ac = new AbortController(); ac.abort();
     const evs = await collect(codexAdapter(bin).run({ ...base, cwd: ".", signal: ac.signal }));
-    await new Promise((r) => setTimeout(r, 300));
+    // sentinel: a second, un-aborted run of a different fake must finish AFTER the aborted one; if the aborted run had
+    // spawned, its marker would exist by the time the sentinel's marker is observed.
+    const sentinel = join(dir, "sentinel");
+    await collect(codexAdapter(fakeBin(`require("fs").writeFileSync(${JSON.stringify(sentinel)},"x")`)).run({ ...base, cwd: "." })).catch(() => {});
+    await waitFor(() => existsSync(sentinel));
     expect(evs).toEqual([]);
     expect(existsSync(marker)).toBe(false);
   });
   it("kills the child and ends without error when aborted mid-run", async () => {
-    const bin = fakeBin(`${emit({ type: "turn.started" })}setInterval(()=>{},1000);`);
+    const started = join(mkdtempSync(join(tmpdir(), "mar-marker-")), "started");
+    const bin = fakeBin(`${emit({ type: "turn.started" })}require("fs").writeFileSync(${JSON.stringify(started)},"x");setInterval(()=>{},1000);`);
     const ac = new AbortController();
     const it = codexAdapter(bin).run({ ...base, cwd: ".", signal: ac.signal });
-    setTimeout(() => ac.abort(), 300);
+    void waitFor(() => existsSync(started)).then(() => ac.abort());
     const evs = await collect(it);
     expect(evs).toEqual([]);
   });

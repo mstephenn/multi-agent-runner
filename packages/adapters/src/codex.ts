@@ -2,6 +2,7 @@ import { resolve } from "node:path";
 import type { Adapter, AdapterInput, AgentEvent } from "./types.js";
 import { AdapterError } from "./types.js";
 import { spawnLines } from "./exec.js";
+import { workerEnv } from "./env.js";
 
 const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
 
@@ -59,7 +60,7 @@ export function codexAdapter(bin = "codex"): Adapter {
       let turnFailure: string | null = null;
       let lastError: string | null = null;
       let gotResult = false;
-      for await (const line of spawnLines(bin, buildCodexArgs(i), { cwd: i.cwd, signal: i.signal, stdin: i.prompt })) {
+      for await (const line of spawnLines(bin, buildCodexArgs(i), { cwd: i.cwd, signal: i.signal, stdin: i.prompt, env: workerEnv() })) {
         const f = codexFailure(line);
         if (f !== null) {
           lastError = f;

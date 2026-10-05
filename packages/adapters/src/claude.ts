@@ -2,6 +2,7 @@ import type { Adapter, AdapterInput, AgentEvent } from "./types.js";
 import { AdapterError } from "./types.js";
 import { spawnLines } from "./exec.js";
 import { sanitizeDiagnostic } from "./sanitize.js";
+import { workerEnv } from "./env.js";
 
 type Rec = Record<string, unknown>;
 const isRec = (v: unknown): v is Rec => !!v && typeof v === "object" && !Array.isArray(v);
@@ -12,19 +13,33 @@ function parse(line: string): Rec | null {
 }
 
 export function normalizeClaudeLine(line: string): AgentEvent[] {
+  return normalizeWith(line, new Map());
+}
+
+/** Stateful variant of `normalizeClaudeLine`: remembers tool_use id -> name so `tool_result.name` is the real tool name. */
+export function createClaudeNormalizer(): (line: string) => AgentEvent[] {
+  const names = new Map<string, string>();
+  return (line) => normalizeWith(line, names);
+}
+
+function normalizeWith(line: string, names: Map<string, string>): AgentEvent[] {
   const j = parse(line);
   if (!j) return [];
   const out: AgentEvent[] = [];
   if (j.type === "assistant") {
     for (const b of blocks(j.message)) {
       if (b.type === "text" && typeof b.text === "string" && b.text) out.push({ type: "assistant_text", text: b.text });
-      else if (b.type === "tool_use") out.push({ type: "tool_call", name: String(b.name), input: b.input });
+      else if (b.type === "tool_use") {
+        if (typeof b.id === "string") names.set(b.id, String(b.name));
+        out.push({ type: "tool_call", name: String(b.name), input: b.input });
+      }
     }
   } else if (j.type === "user") {
     for (const b of blocks(j.message)) {
       if (b.type === "tool_result") {
         const output = typeof b.content === "string" ? b.content : JSON.stringify(b.content ?? "");
-        out.push({ type: "tool_result", name: typeof b.tool_use_id === "string" ? b.tool_use_id : "", output, isError: !!b.is_error });
+        const id = typeof b.tool_use_id === "string" ? b.tool_use_id : "";
+        out.push({ type: "tool_result", name: names.get(id) ?? id, output, isError: !!b.is_error });
       }
     }
   } else if (j.type === "result") {
@@ -52,6 +67,20 @@ export function claudeFailure(line: string): { subtype: string; message: string 
 const toolNames = (allowed: string[]): string[] => [...new Set(allowed.map((t) => t.replace(/\(.*$/s, "").trim()).filter(Boolean))];
 
 /**
+ * Always-on deny list (defence in depth: callers' `allowedTools` may include a bare `Bash`). Deny rules take
+ * precedence over allow rules. Workers must not push, rewire remotes/config, or reach the network. `git reset`
+ * is deliberately NOT denied: workers may legitimately reset inside their own worktree.
+ * Pattern matching on shell commands is best-effort (e.g. `bash -c "curl ..."` is not caught); it is not a sandbox,
+ * see `workerEnv` for the residual risk.
+ */
+export const CLAUDE_DENIED_TOOLS: readonly string[] = [
+  "Bash(git push:*)", "Bash(git remote:*)", "Bash(git config:*)", "Bash(git branch -f:*)", "Bash(git branch -D:*)",
+  "Bash(git checkout main:*)", "Bash(git switch main:*)",
+  "Bash(curl:*)", "Bash(wget:*)", "Bash(ssh:*)", "Bash(scp:*)", "Bash(nc:*)",
+  "Bash(rm -rf /:*)", "Bash(sudo:*)",
+];
+
+/**
  * CLI args; the prompt is NOT included, it is delivered on stdin.
  * - `--tools` restricts the AVAILABLE tools (`--allowedTools` only pre-approves, and acceptEdits auto-approves
  *   Edit/Write); an empty list yields `--tools ""` (everything disabled), never "omit" (= all tools).
@@ -63,6 +92,7 @@ export function buildClaudeArgs(i: AdapterInput): string[] {
   const args = ["-p", "--output-format", "stream-json", "--verbose", "--no-session-persistence"];
   args.push("--tools", toolNames(i.allowedTools).join(","));
   if (i.allowedTools.length > 0) args.push("--allowedTools", i.allowedTools.join(","));
+  args.push("--disallowedTools", CLAUDE_DENIED_TOOLS.join(","));
   args.push("--strict-mcp-config", "--setting-sources", "");
   if (i.model) args.push("--model", i.model);
   if (i.maxBudgetUsd != null) args.push("--max-budget-usd", String(i.maxBudgetUsd));
@@ -75,8 +105,9 @@ export function claudeAdapter(bin = "claude"): Adapter {
     runtime: "claude",
     async *run(i: AdapterInput) {
       let gotResult = false;
-      for await (const line of spawnLines(bin, buildClaudeArgs(i), { cwd: i.cwd, signal: i.signal, stdin: i.prompt })) {
-        const evs = normalizeClaudeLine(line);
+      const normalize = createClaudeNormalizer();
+      for await (const line of spawnLines(bin, buildClaudeArgs(i), { cwd: i.cwd, signal: i.signal, stdin: i.prompt, env: workerEnv() })) {
+        const evs = normalize(line);
         const f = claudeFailure(line);
         if (f) {
           for (const e of evs) if (e.type === "usage") yield e; // keep the cost of a failed run

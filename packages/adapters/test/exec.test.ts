@@ -82,7 +82,7 @@ describe("spawnLines", () => {
   });
   it("does not signal a child that is still flushing a normal exit", async () => {
     // child keeps working after closing stdout early; the old unconditional stop() would SIGTERM it -> `exited null`
-    const script = "console.log('a');require('fs').closeSync(1);setTimeout(()=>{process.exit(0)},300)";
+    const script = "console.log('a');require('fs').closeSync(1);setTimeout(()=>{process.exit(0)},300)"; // exit delay is the behaviour under test
     const out: string[] = [];
     for await (const l of spawnLines("node", ["-e", script], { cwd: process.cwd(), signal: new AbortController().signal })) out.push(l);
     expect(out).toEqual(["a"]);
@@ -90,8 +90,8 @@ describe("spawnLines", () => {
   it("reports a genuine non-zero exit even if abort fires afterwards", async () => {
     const ac = new AbortController();
     const run = async () => {
-      for await (const _ of spawnLines("node", ["-e", "console.log('x');setTimeout(()=>process.exit(4),50)"], { cwd: process.cwd(), signal: ac.signal })) {
-        await new Promise((r) => setTimeout(r, 300)); // child has exited on its own by now
+      for await (const _ of spawnLines("node", ["-e", "console.log(process.pid);setTimeout(()=>process.exit(4),50)"], { cwd: process.cwd(), signal: ac.signal })) {
+        await waitFor(() => !alive(Number(_))); // child has exited on its own by now
         ac.abort();
       }
     };
