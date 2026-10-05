@@ -1,0 +1,35 @@
+import { MAX_BB_BODY_CHARS, estimateTokens, type BbEntry, type TaskResult, type TaskSpec } from "@mar/core";
+import type { Store } from "../../server/src/store.js";
+
+const clip = (s: string) => (s.length <= MAX_BB_BODY_CHARS ? s : s.slice(0, MAX_BB_BODY_CHARS - 1) + "…");
+
+export function publishResult(store: Store, runId: string, taskId: string, r: TaskResult): BbEntry[] {
+  const out: BbEntry[] = [];
+  const put = (suffix: string, kind: BbEntry["kind"], body: string, refs: string[] = []) => {
+    const e = store.writeBb({ run_id: runId, key: `${taskId}/${suffix}`, author_task: taskId, kind, body: clip(body), refs });
+    store.appendEvent({ run_id: runId, task_id: taskId, agent_id: taskId, type: "blackboard_write", payload: { key: e.key, version: e.version, kind } });
+    out.push(e);
+  };
+  put("summary", "summary", r.summary);
+  if (r.decisions.length) put("decisions", "decision", r.decisions.map((d) => `- ${d}`).join("\n"));
+  if (r.openQuestions.length) put("open_questions", "open_question", r.openQuestions.map((q) => `- ${q}`).join("\n"));
+  if (r.filesChanged.length) {
+    const list = r.filesChanged.join("\n");
+    if (list.length <= MAX_BB_BODY_CHARS) put("files", "file_change", list, r.filesChanged);
+    else put("files", "artifact_ref", `${r.filesChanged.length} files changed; see refs`, r.filesChanged.slice(0, 20));
+  }
+  return out;
+}
+
+export function injectSlices(store: Store, runId: string, task: TaskSpec) {
+  const slices: { key: string; version: number; body: string; tokens: number }[] = [];
+  const missing: string[] = [];
+  for (const key of task.needs) {
+    const e = store.latestBb(runId, key);
+    if (!e) { missing.push(key); continue; }
+    const tokens = estimateTokens(e.body);
+    slices.push({ key, version: e.version, body: e.body, tokens });
+    store.appendEvent({ run_id: runId, task_id: task.id, agent_id: task.id, type: "blackboard_read", payload: { key, version: e.version, tokens, author: e.author_task } });
+  }
+  return { slices, missing };
+}
