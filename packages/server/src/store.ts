@@ -36,6 +36,7 @@ export class Store {
     return rows.map((r) => ({ ...r, payload: JSON.parse(r.payload) }));
   }
   onEvent(cb: (e: StoredEvent) => void) { this.subs.add(cb); return () => { this.subs.delete(cb); }; }
+  get subscriberCount() { return this.subs.size; }
 
   writeBb(w: BbWrite): BbEntry {
     if (w.body.length > MAX_BB_BODY_CHARS) throw new Error(`blackboard body too large (cap ${MAX_BB_BODY_CHARS} chars); use an artifact_ref`);
