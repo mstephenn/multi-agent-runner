@@ -1,14 +1,23 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { request } from "node:http";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, chmodSync, rmSync } from "node:fs";
+import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import WebSocket from "ws";
 import { Store } from "../src/store.js";
 import { startServer } from "../src/server.js";
 
+type RunSummary = { id: string };
+type Snapshot = { events: { id: number }[]; blackboard: unknown[]; tasks: unknown[]; plan: unknown; truncated?: boolean };
+const asJson = <T>(res: Response) => res.json() as Promise<T>;
+
 let srv: Awaited<ReturnType<typeof startServer>> | undefined;
-afterEach(async () => { await srv?.close(); srv = undefined; });
+const tmpDirs: string[] = [];
+afterEach(async () => {
+  await srv?.close(); srv = undefined;
+  for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true });
+});
 const ev = (s: Store, type: any = "task_started", payload: Record<string, unknown> = {}) => s.appendEvent({ run_id: "r", task_id: "a", agent_id: "a", type, payload });
 
 interface Raw { status: number; headers: Record<string, string | string[] | undefined>; body: string }
@@ -26,10 +35,29 @@ const wsProbe = (url: string, o: WebSocket.ClientOptions = {}) =>
     const ws = new WebSocket(url, o);
     ws.on("unexpected-response", (_q, res) => { resolve(String(res.statusCode)); ws.terminate(); });
     ws.on("error", () => { /* surfaced via unexpected-response/close */ });
-    // an immediate server-side close (e.g. 1008) arrives right after "open", so settle "open" only if no close follows
-    let t: NodeJS.Timeout | undefined;
-    ws.on("open", () => { t = setTimeout(() => { resolve("open"); ws.close(); }, 50); });
-    ws.on("close", (code) => { clearTimeout(t); resolve(`close:${code}`); });
+    // a ping/pong round trip orders after any immediate server-side close (e.g. 1008), so "open" is settled deterministically
+    ws.on("open", () => ws.ping());
+    ws.on("pong", () => { resolve("open"); ws.close(); });
+    ws.on("close", (code) => resolve(`close:${code}`));
+  });
+// Raw TCP websocket client that never reads until told to: a slow consumer without poking ws internals.
+const slowClient = (port: number, run: string) =>
+  new Promise<{ resume: () => Promise<Buffer>; destroy: () => void }>((resolve, reject) => {
+    const sock = connect(port, "127.0.0.1");
+    sock.on("error", reject);
+    sock.once("data", () => {
+      sock.pause();
+      resolve({
+        destroy: () => sock.destroy(),
+        resume: () => new Promise<Buffer>((done) => {
+          const chunks: Buffer[] = [];
+          sock.on("data", (d: Buffer) => chunks.push(d));
+          sock.on("close", () => done(Buffer.concat(chunks)));
+          sock.resume();
+        }),
+      });
+    });
+    sock.on("connect", () => sock.write(`GET /ws?run=${run} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n`));
   });
 const waitFor = async (cond: () => boolean, ms = 2000) => {
   const t = Date.now();
@@ -40,18 +68,18 @@ describe("server", () => {
   it("lists runs and returns a run snapshot", async () => {
     const s = new Store(":memory:"); s.createRun("r", "g", "/x"); ev(s);
     srv = await startServer(s, { port: 0 });
-    const runs = await (await fetch(`http://127.0.0.1:${srv.port}/api/runs`)).json();
+    const runs = await asJson<RunSummary[]>(await fetch(`http://127.0.0.1:${srv.port}/api/runs`));
     expect(runs[0].id).toBe("r");
     const res = await fetch(`http://127.0.0.1:${srv.port}/api/runs/r`);
     expect(res.headers.get("content-type")).toBe("application/json; charset=utf-8");
     expect(res.headers.get("access-control-allow-origin")).toBeNull();
-    const snap = await res.json();
+    const snap = await asJson<Snapshot>(res);
     expect(snap.events).toHaveLength(1);
     expect(snap.blackboard).toEqual([]);
     expect(snap.tasks).toEqual([]);
     expect(snap.plan).toBeNull();
     s.savePlan("r", { tasks: [] } as any);
-    expect((await (await fetch(`http://127.0.0.1:${srv.port}/api/runs/r`)).json()).plan).toEqual({ tasks: [] });
+    expect((await asJson<Snapshot>(await fetch(`http://127.0.0.1:${srv.port}/api/runs/r`))).plan).toEqual({ tasks: [] });
   });
 
   it("replays after cursor then streams live events in order", async () => {
@@ -136,18 +164,104 @@ describe("server", () => {
     await waitFor(() => s.subscriberCount === 0);
   });
 
-  it("closes a slow client with 1013 once its buffer exceeds 5 MB, and unsubscribes", async () => {
+  it("closes a slow client with 1013 once its live buffer exceeds 5 MB, and unsubscribes", async () => {
+    const s = new Store(":memory:"); s.createRun("r", "g", "/x");
+    srv = await startServer(s, { port: 0 });
+    const c = await slowClient(srv.port, "r");
+    const big = "x".repeat(1024 * 1024);
+    for (let i = 0; i < 300 && s.subscriberCount > 0; i++) ev(s, "usage", { big });
+    expect(s.subscriberCount).toBe(0);
+    const data = await c.resume();
+    // the final frame is an unmasked close frame: 0x88, len 15, code 1013 (0x03f5), "slow consumer"
+    expect([...data.subarray(data.length - 17, data.length - 11)]).toEqual([0x88, 15, 0x03, 0xf5, ..."sl".split("").map((ch) => ch.charCodeAt(0))]);
+  }, 20000);
+
+  it("replays a large run (far above 5 MB) without a 1013, in order", async () => {
+    const s = new Store(":memory:"); s.createRun("r", "g", "/x");
+    const pad = "y".repeat(10_000);
+    const N = 1500; // ~15 MB
+    for (let i = 0; i < N; i++) ev(s, "usage", { i, pad });
+    srv = await startServer(s, { port: 0 });
+    const ws = new WebSocket(`ws://127.0.0.1:${srv.port}/ws?run=r`);
+    const ids: number[] = []; let closed: number | undefined;
+    ws.on("message", (m) => ids.push(JSON.parse(m.toString()).id));
+    ws.on("close", (c) => { closed = c; });
+    await waitFor(() => ids.length === N || closed !== undefined, 15000);
+    expect(closed).toBeUndefined();
+    expect(ids).toEqual(Array.from({ length: N }, (_, i) => i + 1));
+    ev(s, "usage"); // still live after replay
+    await waitFor(() => ids.length === N + 1);
+    ws.close();
+  }, 30000);
+
+  it("snapshot honours ?limit= (default, clamp) and reports truncated", async () => {
+    const s = new Store(":memory:"); s.createRun("r", "g", "/x");
+    for (let i = 0; i < 5; i++) ev(s, "usage", { i });
+    srv = await startServer(s, { port: 0 });
+    const get = async (q: string) => asJson<Snapshot>(await fetch(`http://127.0.0.1:${srv!.port}/api/runs/r${q}`));
+    const cut = await get("?limit=2");
+    expect(cut.events.map((e) => e.id)).toEqual([4, 5]);
+    expect(cut.truncated).toBe(true);
+    const all = await get("");
+    expect(all.events).toHaveLength(5); expect(all.truncated).toBe(false);
+    expect((await get("?limit=abc")).events).toHaveLength(5);
+    expect((await get("?limit=0")).events).toHaveLength(5);
+    expect((await get("?limit=999999999")).truncated).toBe(false);
+  });
+
+  it("rejects messages over 1 KB from the client (1009)", async () => {
     const s = new Store(":memory:"); s.createRun("r", "g", "/x");
     srv = await startServer(s, { port: 0 });
     const ws = new WebSocket(`ws://127.0.0.1:${srv.port}/ws?run=r`);
     await new Promise((r) => ws.on("open", r));
-    (ws as any)._socket.pause();
-    const big = "x".repeat(1024 * 1024);
-    for (let i = 0; i < 200 && s.subscriberCount > 0; i++) ev(s, "usage", { big });
-    expect(s.subscriberCount).toBe(0);
-    const code = await new Promise<number>((r) => { ws.on("close", (c) => r(c)); (ws as any)._socket.resume(); });
-    expect(code).toBe(1013);
-  }, 20000);
+    const code = new Promise<number>((r) => ws.on("close", (c) => r(c)));
+    ws.send("z".repeat(2048));
+    expect(await code).toBe(1009);
+    await waitFor(() => s.subscriberCount === 0);
+  });
+
+  it("survives a malformed upgrade target and keeps serving", async () => {
+    const s = new Store(":memory:"); s.createRun("r", "g", "/x");
+    srv = await startServer(s, { port: 0 });
+    const port = srv.port;
+    const reply = await new Promise<string>((resolve, reject) => {
+      const sock = connect(port, "127.0.0.1"); let out = "";
+      sock.setEncoding("utf8"); sock.on("data", (d) => { out += d; }); sock.on("close", () => resolve(out)); sock.on("error", reject);
+      sock.write(`GET //[ HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n`);
+    });
+    expect(reply).toMatch(/^HTTP\/1\.1 400/);
+    expect((await raw(port, "/api/runs")).status).toBe(200);
+  });
+
+  describe("error paths", () => {
+    it("a throwing store yields a 500 JSON without stack or paths, and the server stays up", async () => {
+      const s = new Store(":memory:"); s.createRun("r", "g", "/x");
+      srv = await startServer(s, { port: 0 });
+      const orig = s.listRuns.bind(s);
+      s.listRuns = () => { throw new Error("boom /secret/path"); };
+      const r = await raw(srv.port, "/api/runs");
+      expect(r.status).toBe(500);
+      expect(JSON.parse(r.body)).toEqual({ error: "internal" });
+      s.loadPlan = () => { throw new Error("corrupt"); };
+      expect((await raw(srv.port, "/api/runs/r")).status).toBe(500);
+      s.listRuns = orig;
+      expect((await raw(srv.port, "/api/runs")).status).toBe(200);
+    });
+    it("a throw during WS replay closes with 1011 and unsubscribes", async () => {
+      const s = new Store(":memory:"); s.createRun("r", "g", "/x");
+      srv = await startServer(s, { port: 0 });
+      s.listEvents = () => { throw new Error("db gone"); };
+      expect(await wsProbe(`ws://127.0.0.1:${srv.port}/ws?run=r`)).toBe("close:1011");
+      await waitFor(() => s.subscriberCount === 0);
+    });
+    it("a throwing hasRun during upgrade closes with 1011", async () => {
+      const s = new Store(":memory:"); s.createRun("r", "g", "/x");
+      srv = await startServer(s, { port: 0 });
+      s.hasRun = () => { throw new Error("db gone"); };
+      expect(await wsProbe(`ws://127.0.0.1:${srv.port}/ws?run=r`)).toBe("close:1011");
+      expect(s.subscriberCount).toBe(0);
+    });
+  });
 
   it("stop endpoint calls onStop; unknown run is 404; bad id is 400", async () => {
     const s = new Store(":memory:"); s.createRun("r", "g", "/x");
@@ -185,6 +299,14 @@ describe("server", () => {
       expect((await raw(srv.port, "/api/runs", { headers: { host: "127.0.0.1" } })).status).toBe(403);
       expect((await raw(srv.port, "/api/runs", { headers: { host: `localhost:${srv.port}` } })).status).toBe(200);
       expect((await raw(srv.port, "/api/runs", { headers: { host: `127.0.0.1:${srv.port}` } })).status).toBe(200);
+    });
+    it("compares Host case-insensitively and ignores a trailing dot", async () => {
+      srv = await startServer(new Store(":memory:"), { port: 0 });
+      for (const h of [`LOCALHOST:${srv.port}`, `localhost.:${srv.port}`, `127.0.0.1.:${srv.port}`]) {
+        expect((await raw(srv.port, "/api/runs", { headers: { host: h } })).status, h).toBe(200);
+      }
+      expect((await raw(srv.port, "/api/runs", { headers: { host: `evil.localhost:${srv.port}` } })).status).toBe(403);
+      expect(await wsProbe(`ws://127.0.0.1:${srv.port}/ws?run=nope`, { origin: `HTTP://LOCALHOST.:${srv.port}` })).toBe("close:1008");
     });
     it("rejects forged Host and foreign Origin on WS upgrade", async () => {
       const s = new Store(":memory:"); s.createRun("r", "g", "/x");
@@ -229,6 +351,9 @@ describe("server", () => {
       mkdirSync(join(root, ".git")); writeFileSync(join(root, ".git", "config"), "SECRET=2");
       writeFileSync(join(evil, "secret.txt"), "SECRET=3");
       writeFileSync(join(base, "outside.txt"), "SECRET=4");
+      symlinkSync(join(base, "outside.txt"), join(root, "link.txt"));
+      symlinkSync(base, join(root, "linkdir"));
+      tmpDirs.push(base);
       return { root, base };
     };
     it("serves files, index at /, and SPA fallback with mime types", async () => {
@@ -239,6 +364,32 @@ describe("server", () => {
       expect((await raw(srv.port, "/")).body).toContain("INDEX");
       expect((await raw(srv.port, "/some/spa/route")).body).toContain("INDEX");
       expect((await raw(srv.port, "/api/nope")).status).toBe(404);
+    });
+    it("serves HEAD without a body, 404s missing assets but falls back for extensionless routes", async () => {
+      const { root } = setup();
+      srv = await startServer(new Store(":memory:"), { port: 0, staticDir: root });
+      const h = await raw(srv.port, "/assets/a.js", { method: "HEAD" });
+      expect(h.status).toBe(200); expect(h.body).toBe(""); expect(h.headers["content-length"]).toBe("14");
+      expect((await raw(srv.port, "/assets/missing.js")).status).toBe(404);
+      expect((await raw(srv.port, "/favicon.ico")).status).toBe(404);
+      expect((await raw(srv.port, "/runs/abc")).body).toContain("INDEX");
+      expect((await raw(srv.port, "/", { method: "POST" })).status).toBe(405);
+    });
+    it("does not follow symlinks out of the root", async () => {
+      const { root } = setup();
+      srv = await startServer(new Store(":memory:"), { port: 0, staticDir: root });
+      for (const p of ["/link.txt", "/linkdir/outside.txt"]) {
+        const r = await raw(srv.port, p);
+        expect(r.body, p).not.toContain("SECRET");
+        expect(r.status, p).not.toBe(200);
+      }
+    });
+    it.skipIf(process.getuid?.() === 0)("an unreadable file is a 500, not a crash", async () => {
+      const { root } = setup();
+      chmodSync(join(root, "assets", "a.js"), 0o000);
+      srv = await startServer(new Store(":memory:"), { port: 0, staticDir: root });
+      expect((await raw(srv.port, "/assets/a.js")).status).toBe(500);
+      expect((await raw(srv.port, "/")).status).toBe(200);
     });
     it("blocks traversal, sibling-prefix dirs, malformed encoding and dotfiles", async () => {
       const { root } = setup();

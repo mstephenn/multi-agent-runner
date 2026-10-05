@@ -1,8 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { readFileSync, writeFileSync, chmodSync, mkdtempSync, existsSync } from "node:fs";
+import { readFileSync, mkdtempSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { normalizeClaudeLine, buildClaudeArgs, claudeAdapter } from "../src/claude.js";
+import { normalizeClaudeLine, buildClaudeArgs, claudeAdapter, claudeFailure } from "../src/claude.js";
+import { fakeBin, waitFor } from "./helpers.js";
 import { AdapterError, type AdapterInput, type AgentEvent } from "../src/types.js";
 
 const lines = readFileSync(new URL("./fixtures/claude-basic.jsonl", import.meta.url), "utf8").split("\n").filter(Boolean);
@@ -60,7 +61,9 @@ describe("buildClaudeArgs", () => {
   it("omits the prompt (delivered on stdin) and builds the default args", () => {
     expect(buildClaudeArgs(base)).toEqual([
       "-p", "--output-format", "stream-json", "--verbose", "--no-session-persistence",
-      "--allowedTools", "Read,Edit", "--permission-mode", "acceptEdits",
+      "--tools", "Read,Edit", "--allowedTools", "Read,Edit",
+      "--strict-mcp-config", "--setting-sources", "",
+      "--permission-mode", "acceptEdits",
     ]);
   });
   it("adds --model only when set", () => {
@@ -82,17 +85,35 @@ describe("buildClaudeArgs", () => {
     expect(unsafe).toContain("--dangerously-skip-permissions");
     expect(unsafe).not.toContain("--permission-mode");
   });
-  it("omits --allowedTools when the list is empty", () => {
-    expect(buildClaudeArgs({ ...base, allowedTools: [] })).not.toContain("--allowedTools");
+  it("empty tool list becomes --tools \"\" (all tools disabled), never omitted; no --allowedTools", () => {
+    const a = buildClaudeArgs({ ...base, allowedTools: [] });
+    expect(a.slice(a.indexOf("--tools"), a.indexOf("--tools") + 2)).toEqual(["--tools", ""]);
+    expect(a).not.toContain("--allowedTools");
+  });
+  it("restricts the available tool set per role (read-only roles cannot Edit/Write)", () => {
+    const tools = (t: string[]) => { const a = buildClaudeArgs({ ...base, allowedTools: t }); return a[a.indexOf("--tools") + 1]; };
+    expect(tools(["Read", "Grep", "Glob"])).toBe("Read,Grep,Glob");
+    expect(tools(["Read", "Grep", "Glob"])).not.toMatch(/Edit|Write/);
+    expect(tools(["Read", "Edit", "Write", "Bash"])).toBe("Read,Edit,Write,Bash");
+  });
+  it("reduces permission patterns to tool names for --tools but keeps them for --allowedTools", () => {
+    const a = buildClaudeArgs({ ...base, allowedTools: ["Bash(git *)", "Bash(npm test)", "Read"] });
+    expect(a[a.indexOf("--tools") + 1]).toBe("Bash,Read");
+    expect(a[a.indexOf("--allowedTools") + 1]).toBe("Bash(git *),Bash(npm test),Read");
+  });
+  it("isolates the worker from user MCP servers and user/project settings", () => {
+    const a = buildClaudeArgs(base);
+    expect(a).toContain("--strict-mcp-config");
+    expect(a).not.toContain("--mcp-config");
+    expect(a[a.indexOf("--setting-sources") + 1]).toBe("");
+  });
+  it("applies a budget of 0/negative/NaN as an error instead of unlimited", () => {
+    for (const b of [0, -1, NaN, Infinity]) expect(() => buildClaudeArgs({ ...base, maxBudgetUsd: b })).toThrow(AdapterError);
+    expect(buildClaudeArgs({ ...base, maxBudgetUsd: 0.5 })).toContain("0.5");
+    expect(buildClaudeArgs({ ...base, maxBudgetUsd: undefined })).not.toContain("--max-budget-usd");
   });
 });
 
-function fakeBin(body: string): string {
-  const p = join(mkdtempSync(join(tmpdir(), "mar-fake-")), "fake");
-  writeFileSync(p, `#!${process.execPath}\n${body}`);
-  chmodSync(p, 0o755);
-  return p;
-}
 async function collect(it: AsyncIterable<AgentEvent>) { const o: AgentEvent[] = []; for await (const e of it) o.push(e); return o; }
 
 describe("claudeAdapter", () => {
@@ -113,8 +134,57 @@ describe("claudeAdapter", () => {
     const bin = fakeBin(`require("fs").writeFileSync(${JSON.stringify(marker)},"x")`);
     const ac = new AbortController(); ac.abort();
     const evs = await collect(claudeAdapter(bin).run({ ...base, signal: ac.signal }));
-    await new Promise((r) => setTimeout(r, 300));
     expect(evs).toEqual([]);
     expect(existsSync(marker)).toBe(false);
+  });
+  it("kills the child and ends silently when aborted mid-run", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mar-marker-"));
+    const marker = join(dir, "started");
+    const bin = fakeBin(`require("fs").writeFileSync(${JSON.stringify(marker)},"x");setInterval(()=>{},1000)`);
+    const ac = new AbortController();
+    const p = collect(claudeAdapter(bin).run({ ...base, signal: ac.signal }));
+    await waitFor(() => existsSync(marker));
+    ac.abort();
+    expect(await p).toEqual([]);
+  });
+  it("throws AdapterError on an is_error result (subtype and message surfaced) and still yields usage", async () => {
+    const bin = fakeBin(`console.log(JSON.stringify({type:"result",subtype:"error_max_turns",is_error:true,result:"",errors:["hit max turns"],total_cost_usd:0.5,usage:{input_tokens:1,output_tokens:2}}))`);
+    const seen: AgentEvent[] = [];
+    const run = async () => { for await (const e of claudeAdapter(bin).run(base)) seen.push(e); };
+    const err = await run().catch((e: Error) => e);
+    expect(err).toBeInstanceOf(AdapterError);
+    expect((err as Error).message).toMatch(/error_max_turns/);
+    expect((err as Error).message).toMatch(/hit max turns/);
+    expect(seen.some((e) => e.type === "result")).toBe(false);
+    expect(seen.find((e) => e.type === "usage")).toMatchObject({ costUsd: 0.5 });
+  });
+  it("throws on non-zero exit after partial output, keeping the earlier events", async () => {
+    const bin = fakeBin(`console.log(JSON.stringify({type:"assistant",message:{content:[{type:"text",text:"partial"}]}}));console.error("crashed API_KEY=sekret");process.exit(2)`);
+    const seen: AgentEvent[] = [];
+    const run = async () => { for await (const e of claudeAdapter(bin).run(base)) seen.push(e); };
+    const err = await run().catch((e: Error) => e);
+    expect(err).toBeInstanceOf(AdapterError);
+    expect((err as Error).message).toMatch(/exited 2.*crashed/);
+    expect((err as Error).message).not.toContain("sekret");
+    expect(seen).toEqual([{ type: "assistant_text", text: "partial" }]);
+  });
+  it("throws when the run ends cleanly without any result line", async () => {
+    const bin = fakeBin(`console.log(JSON.stringify({type:"assistant",message:{content:[{type:"text",text:"hi"}]}}))`);
+    await expect(collect(claudeAdapter(bin).run(base))).rejects.toThrow(/no result/);
+  });
+});
+
+describe("claudeFailure", () => {
+  it("detects is_error and error_* subtypes, ignores success and other lines", () => {
+    expect(claudeFailure('{"type":"result","subtype":"success","is_error":false,"result":"ok"}')).toBeNull();
+    expect(claudeFailure('{"type":"assistant"}')).toBeNull();
+    expect(claudeFailure("garbage")).toBeNull();
+    expect(claudeFailure('{"type":"result","subtype":"error_max_budget_usd"}')).toMatchObject({ subtype: "error_max_budget_usd" });
+    expect(claudeFailure('{"type":"result","subtype":"success","is_error":true,"result":"API Error: 500"}')).toEqual({ subtype: "success", message: "API Error: 500" });
+    expect(claudeFailure('{"type":"result","subtype":"error_during_execution","errors":["a","b"]}')).toEqual({ subtype: "error_during_execution", message: "a; b" });
+  });
+  it("caps and redacts the message", () => {
+    const f = claudeFailure(JSON.stringify({ type: "result", is_error: true, result: "TOKEN=abc " + "x".repeat(1000) }));
+    expect(Array.from(f!.message).length).toBeLessThanOrEqual(300);
   });
 });

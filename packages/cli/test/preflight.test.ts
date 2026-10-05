@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { mkdtempSync } from "node:fs";
+import { describe, it, expect, afterAll } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os"; import { join } from "node:path";
 import { preflight, nodeRunner } from "../src/preflight.js";
 
@@ -19,6 +19,17 @@ describe("preflight", () => {
   it("fails for a dirty tree", async () => {
     expect((await preflight("/r", runner({ ...good, "git status --porcelain": { code: 0, out: " M a.ts" } }))).join()).toMatch(/uncommitted|dirty/i);
   });
+  it("treats a failed git status as a problem, not as clean", async () => {
+    expect((await preflight("/r", runner({ ...good, "git status --porcelain": { code: 128, out: "" } }))).join()).toMatch(/git status/i);
+  });
+  it("ignores untracked .mar/ and .mar.json but not other untracked files", async () => {
+    expect(await preflight("/r", runner({ ...good, "git status --porcelain": { code: 0, out: "?? .mar/\n?? .mar.json\n" } }))).toEqual([]);
+    expect((await preflight("/r", runner({ ...good, "git status --porcelain": { code: 0, out: "?? .mar/\n?? a.ts\n" } }))).join()).toMatch(/uncommitted/);
+    expect((await preflight("/r", runner({ ...good, "git status --porcelain": { code: 0, out: " M .mar.json\n" } }))).join()).toMatch(/uncommitted/);
+  });
+  it("rejects a bare repo (is-inside-work-tree prints false with exit 0)", async () => {
+    expect((await preflight("/r", runner({ ...good, "git rev-parse --is-inside-work-tree": { code: 0, out: "false\n" } }))).join()).toMatch(/work tree|bare/i);
+  });
   it("fails for a repo with no commits", async () => {
     expect((await preflight("/r", runner({ ...good, "git rev-parse --verify HEAD": { code: 128, out: "" } }))).join()).toMatch(/no commits/i);
   });
@@ -30,6 +41,7 @@ describe("preflight", () => {
 
 describe("nodeRunner", () => {
   const cwd = mkdtempSync(join(tmpdir(), "mar-nr-"));
+  afterAll(() => rmSync(cwd, { recursive: true, force: true }));
   it("returns code 0 and stdout on success", async () => {
     const r = await nodeRunner(cwd)(process.execPath, ["-e", "process.stdout.write('hi')"]);
     expect(r).toEqual({ code: 0, out: "hi" });
@@ -44,5 +56,11 @@ describe("nodeRunner", () => {
   it("does not use a shell", async () => {
     const r = await nodeRunner(cwd)(process.execPath, ["-e", "process.stdout.write(process.argv[1])", "$(echo x);y"]);
     expect(r.out).toBe("$(echo x);y");
+  });
+  it("times out hung commands, kills the child and returns 124", async () => {
+    const t0 = Date.now();
+    const r = await nodeRunner(cwd, 200)(process.execPath, ["-e", "setInterval(()=>{},1000)"]);
+    expect(r.code).toBe(124);
+    expect(Date.now() - t0).toBeLessThan(5000);
   });
 });

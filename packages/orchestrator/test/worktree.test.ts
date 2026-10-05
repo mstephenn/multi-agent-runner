@@ -1,11 +1,17 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, afterAll, afterEach, vi } from "vitest";
 import { mkdtempSync, writeFileSync, existsSync, rmSync, mkdirSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { createWorktrees } from "../src/worktree.js";
 
 vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
+// Tests must not depend on the developer's global/system git config.
+const savedEnv = { g: process.env.GIT_CONFIG_GLOBAL, s: process.env.GIT_CONFIG_NOSYSTEM };
+beforeAll(() => { process.env.GIT_CONFIG_GLOBAL = "/dev/null"; process.env.GIT_CONFIG_NOSYSTEM = "1"; });
+afterAll(() => {
+  for (const [k, v] of [["GIT_CONFIG_GLOBAL", savedEnv.g], ["GIT_CONFIG_NOSYSTEM", savedEnv.s]] as const) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+});
 const roots: string[] = [];
 const tmp = (p: string) => { const d = mkdtempSync(join(tmpdir(), p)); roots.push(d); return d; };
 afterEach(() => { while (roots.length) rmSync(roots.pop()!, { recursive: true, force: true }); });
@@ -101,6 +107,93 @@ describe("worktrees", () => {
     const w = createWorktrees(repo, "run1");
     await expect(w.create("c", ["ghost"])).rejects.toThrow(/ghost/);
     expect(existsSync(join(repo, ".mar", "worktrees", "run1", "c"))).toBe(false);
+  });
+  const branches = (r: string) => execFileSync("git", ["branch", "--list", "mar/*"], { cwd: r }).toString();
+  const rev = (r: string, ref: string) => execFileSync("git", ["rev-parse", ref], { cwd: r }).toString().trim();
+  async function commitFile(w: ReturnType<typeof createWorktrees>, t: string, file: string, body: string) {
+    const d = await w.create(t);
+    writeFileSync(join(d, file), body);
+    await w.commit(t, `mar(${t}): ${file}`); await w.remove(t);
+  }
+
+  it("failed create of a NEW branch deletes the branch it made", async () => {
+    const w = createWorktrees(repo, "run1");
+    await expect(w.create("c", ["ghost"])).rejects.toThrow(/ghost/);
+    expect(branches(repo)).not.toContain("mar/run1/c");
+  });
+  it("failed create on a RESUMED branch keeps the branch and its prior commits", async () => {
+    const w = createWorktrees(repo, "run1");
+    await commitFile(w, "c", "prior.txt", "P");
+    const before = rev(repo, "mar/run1/c");
+    await expect(w.create("c", ["ghost"])).rejects.toThrow(/ghost/);
+    expect(rev(repo, "mar/run1/c")).toBe(before);
+  });
+  it("failed dependency merge on a resumed branch resets earlier dep merges", async () => {
+    const w = createWorktrees(repo, "run1");
+    await commitFile(w, "a", "a.new", "A");
+    await commitFile(w, "b", "a.txt", "BBB");          // b edits a.txt
+    await commitFile(w, "c", "a.txt", "CCC");          // c (resumed below) also edits a.txt -> conflicts with b
+    const before = rev(repo, "mar/run1/c");
+    await expect(w.create("c", ["a", "b"])).rejects.toThrow(/\bb\b.*failed/);
+    expect(rev(repo, "mar/run1/c")).toBe(before);       // a's merge was rolled back
+    expect(execFileSync("git", ["ls-tree", "-r", "--name-only", "mar/run1/c"], { cwd: repo }).toString()).not.toContain("a.new");
+    expect(existsSync(join(repo, ".mar", "worktrees", "run1", "c"))).toBe(false);
+  });
+  it("queue recovers after a rejected create", async () => {
+    const w = createWorktrees(repo, "run1");
+    await expect(w.create("x", ["ghost"])).rejects.toThrow(/ghost/);
+    const d = await w.create("y");
+    expect(existsSync(join(d, "a.txt"))).toBe(true);
+  });
+  it("concurrent creates all succeed with distinct dirs, even with a failing one in the mix", async () => {
+    const w = createWorktrees(repo, "run1");
+    const res = await Promise.allSettled([w.create("a"), w.create("b", ["ghost"]), w.create("c"), w.create("d"), w.create("e")]);
+    expect(res.map((r) => r.status)).toEqual(["fulfilled", "rejected", "fulfilled", "fulfilled", "fulfilled"]);
+    const dirs = res.filter((r): r is PromiseFulfilledResult<string> => r.status === "fulfilled").map((r) => r.value);
+    expect(new Set(dirs).size).toBe(4);
+    for (const d of dirs) expect(existsSync(join(d, "a.txt"))).toBe(true);
+  });
+  it("works with a relative repo path (create/commit/remove)", async () => {
+    const rel = relative(process.cwd(), repo);
+    expect(rel.startsWith("/")).toBe(false);
+    const w = createWorktrees(rel, "run1");
+    const a = await w.create("a");
+    expect(a).toBe(join(repo, ".mar", "worktrees", "run1", "a"));
+    writeFileSync(join(a, "n.txt"), "n");
+    await w.commit("a", "mar(a): n");
+    await w.remove("a");
+    expect(existsSync(a)).toBe(false);
+    expect(execFileSync("git", ["show", "mar/run1/a:n.txt"], { cwd: repo }).toString()).toBe("n");
+  });
+  it("works when the repo is itself a linked worktree", async () => {
+    const linked = join(tmp("mar-linked-"), "lw");
+    execFileSync("git", ["worktree", "add", "-q", "-b", "side", linked], { cwd: repo });
+    const w = createWorktrees(linked, "run1");
+    const a = await w.create("a");
+    expect(existsSync(join(a, "a.txt"))).toBe(true);
+    writeFileSync(join(a, "n.txt"), "n");
+    await w.commit("a", "mar(a): n");
+    await w.remove("a");
+    expect(execFileSync("git", ["show", "mar/run1/a:n.txt"], { cwd: linked }).toString()).toBe("n");
+    expect(execFileSync("git", ["status", "--porcelain"], { cwd: linked }).toString()).toBe("");
+  });
+  it("commit never stages .env* files a worker created", async () => {
+    const r = tmp("mar-env-");
+    initRepo(r, ".mar/\n"); rmSync(join(r, ".env"));
+    const w = createWorktrees(r, "run1");
+    const a = await w.create("a");
+    mkdirSync(join(a, "sub"));
+    for (const f of [".env", ".env.local", "sub/.env.production"]) writeFileSync(join(a, f), "SECRET=1");
+    writeFileSync(join(a, "keep.txt"), "k");
+    await w.commit("a", "mar(a): files");
+    const files = execFileSync("git", ["ls-tree", "-r", "--name-only", "mar/run1/a"], { cwd: r }).toString();
+    expect(files).toContain("keep.txt");
+    expect(files).not.toMatch(/\.env/);
+    // only env files changed -> nothing to commit, no error
+    const b = await w.create("b");
+    writeFileSync(join(b, ".env"), "SECRET=2");
+    await w.commit("b", "noop");
+    expect(execFileSync("git", ["rev-list", "--count", "mar/run1/b"], { cwd: r }).toString().trim()).toBe("1");
   });
   it("create after remove for the same task reuses the branch (resume)", async () => {
     const w = createWorktrees(repo, "run1");

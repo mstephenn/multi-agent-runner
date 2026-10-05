@@ -162,4 +162,118 @@ describe("runDag", () => {
     expect(add).toHaveBeenCalledTimes(3);
     expect(rem).toHaveBeenCalledTimes(3);
   });
+
+  const toolRun = (input: unknown) => [{ type: "tool_call", name: "Bash", input }, ...ok()] as any;
+  const toolInput = (store: Store) => (store.listEvents("r").find((e) => e.type === "tool_call")!.payload as any).input;
+
+  it("redacts the failure reason", async () => {
+    const { store, deps } = harness([T("a")], () => new Error("boom DB_PASSWORD=hunter2"));
+    await runDag(deps);
+    expect(JSON.stringify(store.taskStatuses("r"))).not.toContain("hunter2");
+    expect(JSON.stringify(store.listEvents("r").filter((e) => e.type === "task_failed"))).not.toContain("hunter2");
+  });
+  it("masks values under secret-named keys whatever their type", async () => {
+    const input = { password: 12345, token: { nested: "x" }, apiKey: ["a", "b"], private_key: true, name: "bob", n: 3 };
+    const { store, deps } = harness([T("a")], () => toolRun(input));
+    await runDag(deps);
+    expect(toolInput(store)).toEqual({ password: "[REDACTED]", token: "[REDACTED]", apiKey: "[REDACTED]", private_key: "[REDACTED]", name: "bob", n: 3 });
+  });
+  it("never passes values deeper than 20 levels through raw", async () => {
+    let deep: any = { leaf: "DB_PASSWORD=hunter2" };
+    for (let i = 0; i < 30; i++) deep = { x: deep };
+    const { store, deps } = harness([T("a")], () => toolRun(deep));
+    await runDag(deps);
+    const s = JSON.stringify(toolInput(store));
+    expect(s).toContain("[TRUNCATED]");
+    expect(s).not.toContain("hunter2");
+  });
+  it("stringifies bigint/function/symbol values in tool input", async () => {
+    const { store, deps } = harness([T("a")], () => toolRun({ a: 10n, b: () => 1, c: Symbol("s") }));
+    await runDag(deps);
+    expect(toolInput(store)).toEqual({ a: "10", b: "[function]", c: "Symbol(s)" });
+  });
+  it("replaces oversized tool_call input with a marker object", async () => {
+    const { store, deps } = harness([T("a")], () => toolRun({ blob: "z".repeat(10_000) }));
+    await runDag(deps);
+    const inp = toolInput(store);
+    expect(inp).toMatchObject({ truncated: "[TRUNCATED]" });
+    expect(JSON.stringify(inp).length).toBeLessThan(200);
+  });
+  it("emits unsafe in task_started", async () => {
+    for (const [unsafe, want] of [[true, true], [undefined, false], [false, false]] as const) {
+      const { store, deps } = harness([T("a")], () => ok(), { unsafe });
+      await runDag(deps);
+      expect((store.listEvents("r").find((e) => e.type === "task_started")!.payload as any).unsafe).toBe(want);
+    }
+  });
+
+  it("abort before start: nothing runs, every task is blocked", async () => {
+    const ctl = new AbortController(); ctl.abort();
+    const { store, f, deps } = harness([T("a"), T("b", { dependsOn: ["a"] })], () => ok(), { signal: ctl.signal });
+    expect(await runDag(deps)).toEqual({ a: "blocked", b: "blocked" });
+    expect(f.calls).toHaveLength(0);
+    expect(store.taskStatuses("r").map((s) => s.status)).toEqual(["blocked", "blocked"]);
+  });
+  it("abort mid-flight: running task fails, the rest are blocked, worktree is removed", async () => {
+    const ctl = new AbortController();
+    const removed: string[] = [];
+    const wt = { create: async (id: string) => `/wt/${id}`, commit: async () => {}, remove: async (id: string) => { removed.push(id); } };
+    const { store, deps } = harness([T("a"), T("b", { dependsOn: ["a"] }), T("c", { dependsOn: ["b"] })], () => { ctl.abort(); return ok(); }, { signal: ctl.signal, worktrees: wt });
+    expect(await runDag(deps)).toEqual({ a: "failed", b: "blocked", c: "blocked" });
+    const st = Object.fromEntries(store.taskStatuses("r").map((s) => [s.task_id, s.status]));
+    expect(st).toEqual({ a: "failed", b: "blocked", c: "blocked" });
+    expect(removed).toEqual(["a"]);
+  });
+  it("worktrees.create throwing fails that task only and does not call remove", async () => {
+    const removed: string[] = [];
+    const wt = { create: async (id: string) => { if (id === "a") throw new Error("no worktree"); return `/wt/${id}`; }, commit: async () => {}, remove: async (id: string) => { removed.push(id); } };
+    const { store, deps } = harness([T("a"), T("b", { dependsOn: ["a"] }), T("c")], () => ok(), { worktrees: wt });
+    expect(await runDag(deps)).toEqual({ a: "failed", b: "blocked", c: "done" });
+    expect(store.taskStatuses("r").find((s) => s.task_id === "a")?.detail).toContain("no worktree");
+    expect(removed).toEqual(["c"]);
+  });
+  it("calls remove after a budget kill", async () => {
+    const big = [{ type: "usage", input: 500, output: 500, cached: null, costUsd: null }, { type: "assistant_text", text: "more" }];
+    const removed: string[] = [];
+    const wt = { create: async (id: string) => `/wt/${id}`, commit: async () => { throw new Error("must not commit"); }, remove: async (id: string) => { removed.push(id); } };
+    const { deps } = harness([T("a", { budgetTokens: 100 })], () => big as any, { worktrees: wt });
+    expect(await runDag(deps)).toEqual({ a: "failed" });
+    expect(removed).toEqual(["a"]);
+  });
+  it("a result arriving after the budget cap still fails the task (hard cap)", async () => {
+    const evs = [{ type: "usage", input: 500, output: 500, cached: null, costUsd: null }, ...ok()];
+    const { store, deps } = harness([T("a", { budgetTokens: 100 })], () => evs as any);
+    expect(await runDag(deps)).toEqual({ a: "failed" });
+    expect(store.taskStatuses("r")[0].detail).toBe("failed:budget");
+  });
+  it("shares one budget across attempts", async () => {
+    const evs = [{ type: "usage", input: 60, output: 0, cached: null, costUsd: null }, { type: "assistant_text", text: "x" }]; // no result -> retryable
+    const { f, store, deps } = harness([T("a", { budgetTokens: 100 })], () => evs as any, { maxAttempts: 3 });
+    expect(await runDag(deps)).toEqual({ a: "failed" });
+    expect(f.calls).toHaveLength(2); // 60 + 60 > 100 on the second attempt; a fresh budget would allow a third
+    expect(store.taskStatuses("r")[0].detail).toBe("failed:budget");
+  });
+
+  it("a store throw while starting one task fails only that task and resolves", async () => {
+    const { store, deps } = harness([T("a"), T("b", { dependsOn: ["a"] }), T("c")], () => ok());
+    const orig = store.setTaskStatus.bind(store);
+    vi.spyOn(store, "setTaskStatus").mockImplementation((r, t, st, d) => { if (t === "a" && st === "running") throw new Error("disk full"); orig(r, t, st, d); });
+    expect(await runDag(deps)).toEqual({ a: "failed", b: "blocked", c: "done" });
+    const st = Object.fromEntries(store.taskStatuses("r").map((s) => [s.task_id, s.status]));
+    expect(st).toMatchObject({ a: "failed", c: "done" });
+    expect(Object.values(st)).not.toContain("running");
+  });
+  it("a store throw while publishing the result marks the task failed, not running", async () => {
+    const { store, deps } = harness([T("a"), T("c")], () => ok());
+    const orig = store.writeBb.bind(store);
+    vi.spyOn(store, "writeBb").mockImplementation((e) => { if (e.author_task === "a") throw new Error("bb write failed"); return orig(e); });
+    expect(await runDag(deps)).toEqual({ a: "failed", c: "done" });
+    expect(store.taskStatuses("r").find((s) => s.task_id === "a")?.status).toBe("failed");
+  });
+  it("a completely dead store still lets runDag resolve with outcomes", async () => {
+    const { store, deps } = harness([T("a"), T("b", { dependsOn: ["a"] })], () => ok());
+    const boom = () => { throw new Error("db closed"); };
+    for (const m of ["setTaskStatus", "appendEvent", "taskStatuses", "latestBb", "writeBb"] as const) vi.spyOn(store, m).mockImplementation(boom as never);
+    expect(await runDag(deps)).toEqual({ a: "failed", b: "blocked" });
+  });
 });

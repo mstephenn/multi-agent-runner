@@ -1,6 +1,8 @@
 const TOKEN_PATTERNS: [RegExp, string][] = [
   [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, "[REDACTED]"],
-  [/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@:]+:[^\s/@]+@/gi, "$1[REDACTED]@"],
+  // Scheme length and user/password lengths are capped (no quadratic backtracking on long inputs). The password
+  // may contain `/` or `@`: it runs greedily to the LAST `@` of the whitespace-delimited token.
+  [/\b([a-z][a-z0-9+.-]{0,15}:\/\/)[^\s/@:]{1,256}:[^\s]{1,256}@/gi, "$1[REDACTED]@"],
   [/\bsk-[A-Za-z0-9_-]{10,}/g, "[REDACTED]"],
   [/\bgithub_pat_[A-Za-z0-9_]{20,}/g, "[REDACTED]"],
   [/\bgh[pos]_[A-Za-z0-9]{20,}/g, "[REDACTED]"],
@@ -10,15 +12,31 @@ const TOKEN_PATTERNS: [RegExp, string][] = [
   [/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [REDACTED]"],
 ];
 
-// name (optionally quoted, JSON-style) + [=:] + double-quoted | single-quoted | bare value
-const KV = /(["']?)([A-Za-z][A-Za-z0-9_-]{0,63})\1(\s*[=:]\s*)("(?:[^"\\]|\\.)*"|'[^']*'|[^\s,;&}"']+)/g;
+// name (optionally quoted, JSON-style) followed by [=:]; the value is parsed separately (VALUE, sticky) and only
+// consumed for secret names, so `Note: DB_PASSWORD=x` still redacts the inner assignment (re-scan after the separator).
+const NAME_SEP = /(["']?)([A-Za-z][A-Za-z0-9_-]{0,63})\1(\s*[=:]\s*)/g;
+const VALUE = /"(?:[^"\\]|\\.)*"|'[^']*'|[^\s,;&}"']+/y;
 
+const SECRET_SUFFIX = /(secret|token|password|passwd|apikey|privatekey)$/;
 function isSecretName(name: string): boolean {
   const seg = name.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase().split(/[_-]/);
-  return seg.some((w, i) => w === "secret" || w === "token" || w === "password" || w === "passwd" || w === "apikey" || (w === "api" && seg[i + 1] === "key"));
+  return seg.some((w, i) => SECRET_SUFFIX.test(w) || w === "pwd" || (w === "api" && seg[i + 1] === "key") || (w === "private" && seg[i + 1] === "key"));
 }
 
-export const redact = (s: string): string => {
-  const out = TOKEN_PATTERNS.reduce((acc, [re, to]) => acc.replace(re, to), s);
-  return out.replace(KV, (m, q: string, name: string, sep: string) => (isSecretName(name) ? `${q}${name}${q}${sep}[REDACTED]` : m));
-};
+function redactAssignments(s: string): string {
+  let out = "", last = 0;
+  NAME_SEP.lastIndex = 0;
+  for (let m: RegExpExecArray | null; (m = NAME_SEP.exec(s)); ) {
+    const end = m.index + m[0].length;
+    if (!isSecretName(m[2])) continue; // keep scanning right after the separator: the value is not consumed
+    VALUE.lastIndex = end;
+    const v = VALUE.exec(s);
+    if (!v) continue;
+    const jsonString = m[1] === '"' && v[0].startsWith('"');
+    out += s.slice(last, end) + (jsonString ? '"[REDACTED]"' : "[REDACTED]");
+    last = NAME_SEP.lastIndex = end + v[0].length;
+  }
+  return out + s.slice(last);
+}
+
+export const redact = (s: string): string => redactAssignments(TOKEN_PATTERNS.reduce((acc, [re, to]) => acc.replace(re, to), s));

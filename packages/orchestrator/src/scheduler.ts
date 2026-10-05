@@ -30,20 +30,38 @@ async function parseResult(raw: string, repair?: (r: string) => Promise<string>)
 }
 
 // Redact every string leaf of a JSON-like value (key=value patterns inside quoted JSON strings are
-// not caught when the whole document is redacted at once). Values under secret-looking keys are masked.
+// not caught when the whole document is redacted at once). Values under secret-looking keys are masked
+// whatever their type. Anything we cannot inspect (too deep, bigint/function/symbol) is never passed through raw.
 const isSecretKey = (k: string) => redact(`${k}=x`) !== `${k}=x`;
+const MAX_DEPTH = 20;
 function redactJson(v: unknown, depth = 0): unknown {
   if (typeof v === "string") return redact(v);
-  if (depth > 20 || v === null || typeof v !== "object") return v ?? null;
+  if (v === null || v === undefined) return null;
+  if (typeof v === "bigint" || typeof v === "symbol") return redact(String(v));
+  if (typeof v === "function") return "[function]";
+  if (typeof v !== "object") return v; // number | boolean
+  if (depth > MAX_DEPTH) return "[TRUNCATED]";
   if (Array.isArray(v)) return v.map((x) => redactJson(x, depth + 1));
-  return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, typeof x === "string" && isSecretKey(k) ? "[REDACTED]" : redactJson(x, depth + 1)]));
+  return Object.fromEntries(Object.entries(v).map(([k, x]) => [redact(k), isSecretKey(k) ? "[REDACTED]" : redactJson(x, depth + 1)]));
 }
+
+const MAX_TOOL_INPUT_CHARS = 4000;
+// Redacted tool input, replaced by a marker object when its serialised form is too large (or not serialisable).
+function boundedToolInput(input: unknown): unknown {
+  const red = redactJson(input);
+  let n: number;
+  try { n = JSON.stringify(red)?.length ?? 0; } catch { return { truncated: "[TRUNCATED]", chars: null }; }
+  return n > MAX_TOOL_INPUT_CHARS ? { truncated: "[TRUNCATED]", chars: n } : red;
+}
+
+// Bookkeeping must never take the run down: a failing store write is swallowed here.
+const bestEffort = (f: () => void) => { try { f(); } catch { /* store unavailable */ } };
 
 export async function runDag(d: RunDeps): Promise<Record<string, Outcome>> {
   const { store, runId } = d;
   const outcome = new Map<string, Outcome>();
   // Resume: only tasks already `done` are seeded; failed/running/blocked ones run again.
-  for (const s of store.taskStatuses(runId)) if (s.status === "done") outcome.set(s.task_id, "done");
+  bestEffort(() => { for (const s of store.taskStatuses(runId)) if (s.status === "done") outcome.set(s.task_id, "done"); });
   const byId = new Map(d.dag.tasks.map((t) => [t.id, t]));
   const running = new Map<string, Promise<void>>();
   const emit = (task: TaskSpec, type: any, payload: Record<string, unknown> = {}) =>
@@ -67,9 +85,10 @@ export async function runDag(d: RunDeps): Promise<Record<string, Outcome>> {
       })) {
         if (ev.type === "usage") { budget.add(ev); emit(task, "usage", { ...ev }); }
         else if (ev.type === "assistant_text") emit(task, "assistant_text", { text: redact(ev.text) });
-        else if (ev.type === "tool_call") emit(task, "tool_call", { name: redact(ev.name), input: redactJson(ev.input) });
+        else if (ev.type === "tool_call") emit(task, "tool_call", { name: redact(ev.name), input: boundedToolInput(ev.input) });
         else if (ev.type === "tool_result") emit(task, "tool_result", { name: redact(ev.name), output: redact(ev.output).slice(0, 2000), isError: ev.isError ?? false });
         else raw = ev.text;
+        // Budget is a hard cap: even if the final `result` event arrives after the cap was crossed, the task fails.
         if (budget.exceeded) { ac.abort(); throw new TaskFailure("failed:budget", false); }
       }
       if (raw === undefined) throw new TaskFailure("no-result", !d.signal?.aborted);
@@ -83,9 +102,10 @@ export async function runDag(d: RunDeps): Promise<Record<string, Outcome>> {
     }
   }
 
-  async function runTask(task: TaskSpec) {
+  // `budget` is created once per task and shared by all of its attempts (retries do not get a fresh allowance).
+  async function runTaskInner(task: TaskSpec) {
     store.setTaskStatus(runId, task.id, "running");
-    emit(task, "task_started", { runtime: task.runtime, tier: task.tier, role: task.role });
+    emit(task, "task_started", { runtime: task.runtime, tier: task.tier, role: task.role, unsafe: d.unsafe === true });
     const budget = new BudgetTracker(task.budgetTokens ?? d.defaultBudgetTokens);
     let extra = "";
     const max = d.maxAttempts ?? 1;
@@ -101,9 +121,9 @@ export async function runDag(d: RunDeps): Promise<Record<string, Outcome>> {
         const msg = redact(e instanceof Error ? e.message : String(e)).slice(0, 300);
         const retryable = !(e instanceof TaskFailure) || e.retryable;
         if (n >= max || !retryable || d.signal?.aborted) {
-          emit(task, "task_failed", { reason: msg });
-          store.setTaskStatus(runId, task.id, "failed", msg);
           outcome.set(task.id, "failed");
+          bestEffort(() => emit(task, "task_failed", { reason: msg }));
+          bestEffort(() => store.setTaskStatus(runId, task.id, "failed", msg));
           return;
         }
         extra = `\n\nPrevious attempt failed: ${msg}`;
@@ -111,7 +131,19 @@ export async function runDag(d: RunDeps): Promise<Record<string, Outcome>> {
     }
   }
 
-  const block = (id: string) => { outcome.set(id, "blocked"); store.setTaskStatus(runId, id, "blocked"); };
+  // Never rejects: a bookkeeping failure for one task marks that task failed (best effort) instead of
+  // rejecting runDag and orphaning the other running tasks.
+  async function runTask(task: TaskSpec) {
+    try { await runTaskInner(task); }
+    catch (e) {
+      const msg = redact(e instanceof Error ? e.message : String(e)).slice(0, 300);
+      outcome.set(task.id, "failed");
+      bestEffort(() => emit(task, "task_failed", { reason: msg }));
+      bestEffort(() => store.setTaskStatus(runId, task.id, "failed", msg));
+    }
+  }
+
+  const block = (id: string) => { outcome.set(id, "blocked"); bestEffort(() => store.setTaskStatus(runId, id, "blocked")); };
 
   while (outcome.size < byId.size) {
     // Propagate failed/blocked to transitive dependents (to a fixpoint, independent of declaration order).

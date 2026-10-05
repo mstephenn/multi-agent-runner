@@ -17,6 +17,20 @@ function git(args: string[], cwd: string): Promise<string> {
 }
 const ok = (args: string[], cwd: string) => git(args, cwd).then(() => true, () => false);
 
+// Exit code of a git call: 0 / 1 are answers, anything else (128, spawn failure, ...) is an error.
+function gitExit(args: string[], cwd: string): Promise<number> {
+  return new Promise((res, rej) => {
+    execFile("git", args, { cwd, maxBuffer: 16 * 1024 * 1024 }, (err, _out, stderr) => {
+      if (!err) return res(0);
+      const code = (err as { code?: unknown }).code;
+      if (code === 1) return res(1);
+      rej(new Error(`git ${args[0]} failed: ${(String(stderr || "") || err.message).trim().slice(0, 300)}`));
+    });
+  });
+}
+// true / false for exit 0 / 1; any other failure is rethrown (never read as "branch missing").
+const branchExists = async (name: string, cwd: string) => (await gitExit(["rev-parse", "--verify", "--quiet", `refs/heads/${name}`], cwd)) === 0;
+
 export interface Worktrees {
   create(taskId: string, dependsOn?: string[]): Promise<string>;
   commit(taskId: string, message: string): Promise<void>;
@@ -33,18 +47,22 @@ export async function ensureMarExcluded(repo: string): Promise<void> {
   await appendFile(p, `${cur === "" || cur.endsWith("\n") ? "" : "\n"}.mar/\n`);
 }
 
-export function createWorktrees(repo: string, runId: string): Worktrees {
+// Ids are restricted to [A-Za-z0-9_-]. NOTE: ids that differ only by case (`A` / `a`) collide on
+// case-insensitive filesystems (macOS/Windows default): same worktree dir and loose branch ref file.
+// Planner ids are lowercase (`[a-z0-9_-]+`), so this only matters for hand-written DAGs.
+export function createWorktrees(repoPath: string, runId: string): Worktrees {
   if (!SAFE.test(runId)) throw new Error(`invalid run id: ${runId}`);
-  const dirFor = (t: string) => join(repo, ".mar", "worktrees", runId, t);
+  const root = resolve(repoPath); // absolute once: git runs with cwd=root, so relative paths must never reach it
+  const dirFor = (t: string) => join(root, ".mar", "worktrees", runId, t);
   const branchFor = (t: string) => `mar/${runId}/${t}`;
   const check = (t: string, what = "task") => { if (!SAFE.test(t)) throw new Error(`invalid ${what} id: ${t}`); };
 
-  const ensureExcluded = () => ensureMarExcluded(repo);
+  const ensureExcluded = () => ensureMarExcluded(root);
 
   async function discard(dir: string) {
-    await ok(["worktree", "remove", "--force", dir], repo);
+    await ok(["worktree", "remove", "--force", "--", dir], root);
     await rm(dir, { recursive: true, force: true });
-    await ok(["worktree", "prune"], repo);
+    await ok(["worktree", "prune"], root);
   }
 
   async function createOne(taskId: string, dependsOn: string[]): Promise<string> {
@@ -52,15 +70,18 @@ export function createWorktrees(repo: string, runId: string): Worktrees {
     for (const d of dependsOn) check(d, "dependency");
     const dir = dirFor(taskId), branch = branchFor(taskId);
     await ensureExcluded();
-    await ok(["worktree", "prune"], repo);
+    await ok(["worktree", "prune"], root);
     await discard(dir); // stale leftover from a crashed run
-    const existed = await ok(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], repo);
+    const existed = await branchExists(branch, root);
+    let createdBranch = false;   // true only if THIS call's `worktree add -b` succeeded
+    let preMerge: string | null = null; // HEAD of a resumed branch before any dependency merge
     try {
-      await git(existed ? ["worktree", "add", dir, branch] : ["worktree", "add", "-b", branch, dir, "HEAD"], repo);
+      if (existed) await git(["worktree", "add", "--", dir, branch], root);
+      else { await git(["worktree", "add", "-b", branch, "--", dir, "HEAD"], root); createdBranch = true; }
+      if (existed) preMerge = (await git(["rev-parse", "HEAD"], dir)).trim();
       for (const dep of dependsOn) {
         const depBranch = branchFor(dep);
-        if (!(await ok(["rev-parse", "--verify", "--quiet", `refs/heads/${depBranch}`], repo)))
-          throw new Error(`dependency ${dep}: branch ${depBranch} not found`);
+        if (!(await branchExists(depBranch, root))) throw new Error(`dependency ${dep}: branch ${depBranch} not found`);
         try {
           await git([...IDENT, "merge", "--no-edit", depBranch], dir);
         } catch (e) {
@@ -69,14 +90,18 @@ export function createWorktrees(repo: string, runId: string): Worktrees {
         }
       }
     } catch (e) {
+      // A resumed branch holds earlier work: undo dependency merges that already committed, never delete it.
+      if (preMerge) await ok(["reset", "--hard", preMerge], dir);
       await discard(dir);
-      if (!existed) await ok(["branch", "-D", branch], repo);
+      if (createdBranch) await ok(["branch", "-D", branch], root);
       throw e;
     }
     return dir;
   }
 
-  // Serialised: concurrent `git worktree add`/prune/exclude edits in one repo race each other.
+  // Serialised per createWorktrees() instance: concurrent `git worktree add`/prune/exclude edits in one repo race
+  // each other. The lock does NOT span instances or processes: use one instance per repo and do not run two
+  // runs against the same repo at once.
   let queue: Promise<unknown> = Promise.resolve();
   return {
     branchFor,
@@ -88,13 +113,14 @@ export function createWorktrees(repo: string, runId: string): Worktrees {
     async commit(taskId: string, message: string) {
       check(taskId);
       const cwd = dirFor(taskId);
-      await git(["add", "-A"], cwd);
-      if (!(await git(["status", "--porcelain"], cwd)).trim()) return;
+      // Never stage env files a worker created (secrets); they are discarded with the worktree.
+      await git(["add", "-A", "--", ".", ":(exclude,glob)**/.env*"], cwd);
+      if ((await gitExit(["diff", "--cached", "--quiet"], cwd)) === 0) return; // nothing staged
       await git([...IDENT, "commit", "-m", message], cwd);
     },
     async remove(taskId: string) {
       check(taskId);
-      await ok(["worktree", "remove", "--force", dirFor(taskId)], repo);
+      await ok(["worktree", "remove", "--force", "--", dirFor(taskId)], root);
       await rm(dirFor(taskId), { recursive: true, force: true });
     },
   };
