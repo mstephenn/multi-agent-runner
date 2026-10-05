@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterAll } from "vitest";
 import { execFile, spawn } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs"; import { tmpdir } from "node:os"; import { join } from "node:path";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"; import { tmpdir } from "node:os"; import { join } from "node:path";
 import { exitCodeFor, nodeVersionAtLeast } from "../bin/supervise.mjs";
 import { fileURLToPath } from "node:url";
 
@@ -59,6 +59,30 @@ supervise(process.execPath, [process.argv[2]], { graceMs: Number(process.argv[3]
     const p = exec(fake("fw.mjs", "process.on('SIGTERM',()=>process.exit(7)); console.log('up'); setInterval(()=>{},1000)"));
     await ready(p); p.kill("SIGTERM");
     expect(await done(p)).toBe(7);
+  });
+  it("a process-group SIGINT (terminal Ctrl-C) reaches the child exactly once", async () => {
+    const child = fake("grp.mjs", `process.on('SIGINT',()=>{console.log('sigint'); setTimeout(()=>process.exit(0),700)}); console.log('up'); setInterval(()=>{},1000)`);
+    // detached: the wrapper leads its own process group, like a foreground job; the group gets the SIGINT.
+    const p = spawn(process.execPath, [wrapper, child, "5000"], { stdio: ["ignore", "pipe", "inherit"], detached: true });
+    let out = ""; p.stdout!.on("data", (d) => { out += d; });
+    await vi.waitFor(() => expect(out).toContain("up"));
+    process.kill(-p.pid!, "SIGINT");
+    expect(await done(p)).toBe(0);
+    expect(out.match(/sigint/g)).toHaveLength(1);
+  });
+  it("kills the child's process group when the supervisor itself exits", async () => {
+    const pidFile = join(dir, "pid");
+    const child = fake("orph.mjs", `import {writeFileSync} from 'node:fs'; writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); process.on('SIGTERM',()=>{}); setInterval(()=>{},1000)`);
+    const quitter = join(dir, "quit.mjs");
+    writeFileSync(quitter, `import { supervise } from ${JSON.stringify(sup)};
+supervise(process.execPath, [process.argv[2]]);
+setTimeout(() => process.exit(0), 800);`);
+    const p = spawn(process.execPath, [quitter, child], { stdio: "ignore" });
+    await new Promise((res) => p.on("exit", res));
+    const cpid = Number(readFileSync(pidFile, "utf8"));
+    const alive = () => { try { process.kill(cpid, 0); return true; } catch { return false; } };
+    try { await vi.waitFor(() => expect(alive()).toBe(false)); }
+    finally { try { process.kill(cpid, "SIGKILL"); } catch { /* gone */ } }
   });
   it("escalates to SIGKILL when the child ignores the forwarded signal", async () => {
     const p = exec(fake("ig.mjs", "process.on('SIGTERM',()=>{}); console.log('up'); setInterval(()=>{},1000)"), 300);

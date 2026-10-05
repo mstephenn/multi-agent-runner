@@ -15,6 +15,8 @@ const Schema = z.object({
   maxAttempts: z.number().int().min(1).max(3).default(1),
   defaultBudgetTokens: z.number().int().positive().default(200000),
   plannerModel: z.string().min(1).default("claude-sonnet-5-5"),
+  taskTimeoutMinutes: z.number().int().min(1).max(240).default(20),
+  maxBudgetUsdPerTask: z.number().positive().optional(),
   allowOpus: z.boolean().default(false),
   // Partial overrides are allowed and merged with the defaults below.
   tiers: z.object({ claude: tierKeys.partial().strict().optional(), codex: tierKeys.partial().strict().optional() }).strict().optional(),

@@ -56,10 +56,11 @@ describe("executeRun", () => {
   });
   it("abort while the planner is running records the event and throws", async () => {
     const store = new Store(":memory:");
-    const adapter = { runtime: "claude" as const, async *run(i: any) { await new Promise<void>((r) => i.signal.addEventListener("abort", () => r())); throw new Error("killed"); } };
+    let started = false;
+    const adapter = { runtime: "claude" as const, async *run(i: any) { started = true; await new Promise<void>((r) => i.signal.addEventListener("abort", () => r())); throw new Error("killed"); } };
     const ac = new AbortController();
     const p = executeRun({ ...mk(fakeAdapter(script), tmp(), store), adapters: { claude: adapter, codex: adapter }, runId: "ry", signal: ac.signal });
-    await new Promise((r) => setTimeout(r, 30)); ac.abort();
+    await vi.waitFor(() => expect(started).toBe(true)); ac.abort();
     await expect(p).rejects.toThrow(/aborted during planning/);
     expect(store.listEvents("ry")[0]).toMatchObject({ type: "task_failed", task_id: null });
   });
@@ -75,17 +76,20 @@ describe("executeRun", () => {
   });
   it("abort mid-task: waiting adapter is cancelled, no task left running", async () => {
     const store = new Store(":memory:");
+    let taskStarted = false; let res: () => void = () => {};
     const adapter = {
       runtime: "claude" as const,
       async *run(i: any) {
         if (i.taskId === "planner") { yield { type: "result", text: JSON.stringify(plan) } as any; return; }
-        await new Promise<void>((res) => i.signal.addEventListener("abort", () => res()));
+        i.signal.addEventListener("abort", () => res());
+        taskStarted = true;
+        await new Promise<void>((r) => { res = r; });
         throw new Error("aborted");
       },
     };
     const ac = new AbortController();
     const p = executeRun({ goal: "g", repo: tmp(), store, adapters: { claude: adapter, codex: adapter }, config: loadConfig(tmp()), worktrees: wt, repoMapFn: () => "a.ts", signal: ac.signal });
-    await new Promise((r) => setTimeout(r, 50));
+    await vi.waitFor(() => expect(taskStarted).toBe(true));
     ac.abort();
     const { runId, results } = await p;
     expect(results.a).toBe("failed");
@@ -103,6 +107,31 @@ describe("executeRun", () => {
     const store = new Store(":memory:"); const f = fakeAdapter(script);
     await executeRun({ ...mk(f, tmp(), store), unsafe: true });
     expect(f.calls.filter((c) => c.taskId !== "planner").every((c) => c.unsafe === true)).toBe(true);
+  });
+});
+
+describe("executeRun wiring and redaction", () => {
+  it("passes taskTimeoutMs and maxBudgetUsdPerTask to runDag", async () => {
+    const store = new Store(":memory:"); const f = fakeAdapter(script); const repo = tmp();
+    writeFileSync(join(repo, ".mar.json"), JSON.stringify({ taskTimeoutMinutes: 7, maxBudgetUsdPerTask: 1.5 }));
+    let seen: any;
+    await executeRun({ ...mk(f, repo, store), runDagFn: async (d) => { seen = d; return {}; } });
+    expect(seen.taskTimeoutMs).toBe(7 * 60_000);
+    expect(seen.maxBudgetUsdPerTask).toBe(1.5);
+  });
+  it("defaults to a 20 minute timeout and no USD cap", async () => {
+    const store = new Store(":memory:"); const f = fakeAdapter(script);
+    let seen: any;
+    await executeRun({ ...mk(f, tmp(), store), runDagFn: async (d) => { seen = d; return {}; } });
+    expect(seen.taskTimeoutMs).toBe(20 * 60_000);
+    expect(seen.maxBudgetUsdPerTask).toBeUndefined();
+  });
+  it("redacts secrets in the goal before storing and before the planner prompt", async () => {
+    const store = new Store(":memory:"); const f = fakeAdapter(script);
+    const { runId } = await executeRun({ ...mk(f, tmp(), store), goal: "deploy with API_KEY=abc123xyz now" });
+    expect(JSON.stringify(store.listRuns())).not.toContain("abc123xyz");
+    expect(store.listRuns().find((r) => r.id === runId)?.goal).toContain("deploy");
+    expect(f.calls.find((c) => c.taskId === "planner")?.prompt).not.toContain("abc123xyz");
   });
 });
 
@@ -251,11 +280,12 @@ describe("runMain", () => {
   });
   it("abort during planning exits non-zero with 'aborted during planning'; server and DB closed", async () => {
     const c = capture();
-    const adapter = { runtime: "claude" as const, async *run(i: any) { await new Promise<void>((r) => i.signal.addEventListener("abort", () => r())); throw new Error("x"); } };
+    let started = false;
+    const adapter = { runtime: "claude" as const, async *run(i: any) { started = true; await new Promise<void>((r) => i.signal.addEventListener("abort", () => r())); throw new Error("x"); } };
     const h = harness({ adapters: () => ({ claude: adapter, codex: adapter }) });
     const p = runMain(["run", "g", "--repo", gitRepo(), "--port", String(await free())], h.deps);
     await vi.waitFor(() => expect(h.proc!.listenerCount("SIGINT")).toBeGreaterThan(0));
-    await new Promise((r) => setTimeout(r, 50));
+    await vi.waitFor(() => expect(started).toBe(true));
     h.proc!.emit("SIGINT");
     expect(await p).toBe(1);
     expect(c.err.join("\n")).toMatch(/aborted during planning/);
@@ -265,13 +295,29 @@ describe("runMain", () => {
   it("second signal force-exits 130 after closing server and DB", async () => {
     capture();
     const adapter = { runtime: "claude" as const, async *run() { await new Promise(() => {}); } }; // ignores the abort signal
-    const h = harness({ adapters: () => ({ claude: adapter, codex: adapter }) });
+    let t = 1000;
+    const h = harness({ adapters: () => ({ claude: adapter, codex: adapter }), now: () => t });
     void runMain(["run", "g", "--repo", gitRepo(), "--port", String(await free())], h.deps);
     await vi.waitFor(() => expect(h.proc!.listenerCount("SIGINT")).toBeGreaterThan(0));
     h.proc!.emit("SIGINT");
     expect(h.exits).toEqual([]);
+    t += 1500; // a distinct second Ctrl-C, well after the debounce window
     h.proc!.emit("SIGINT");
     await vi.waitFor(() => expect(h.exits).toEqual([130]));
     expect(h.closed).toEqual({ server: 1, db: 1 });
+  });
+  it("a duplicate signal within the debounce window does not force-exit", async () => {
+    capture();
+    const adapter = { runtime: "claude" as const, async *run() { await new Promise(() => {}); } };
+    let t = 1000;
+    const h = harness({ adapters: () => ({ claude: adapter, codex: adapter }), now: () => t, forceExitTimeoutMs: 10 });
+    void runMain(["run", "g", "--repo", gitRepo(), "--port", String(await free())], h.deps);
+    await vi.waitFor(() => expect(h.proc!.listenerCount("SIGINT")).toBeGreaterThan(0));
+    h.proc!.emit("SIGINT");
+    t += 200; h.proc!.emit("SIGINT"); h.proc!.emit("SIGTERM");
+    await new Promise((r) => setTimeout(r, 100));
+    expect(h.exits).toEqual([]);
+    t += 5000; h.proc!.emit("SIGINT");
+    await vi.waitFor(() => expect(h.exits).toEqual([130]));
   });
 });

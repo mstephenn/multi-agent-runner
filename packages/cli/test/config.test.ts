@@ -24,6 +24,14 @@ describe("loadConfig", () => {
     expect(loadConfig(repo({ concurrency: 1 })).concurrency).toBe(1);
     expect(() => loadConfig(repo({ nope: 1 }))).toThrow(/\.mar\.json/);
   });
+  it("taskTimeoutMinutes defaults to 20, bounded 1..240; maxBudgetUsdPerTask optional and positive", () => {
+    const c = loadConfig(repo());
+    expect(c.taskTimeoutMinutes).toBe(20);
+    expect(c.maxBudgetUsdPerTask).toBeUndefined();
+    expect(loadConfig(repo({ taskTimeoutMinutes: 240, maxBudgetUsdPerTask: 0.5 }))).toMatchObject({ taskTimeoutMinutes: 240, maxBudgetUsdPerTask: 0.5 });
+    for (const bad of [0, 241, 1.5]) expect(() => loadConfig(repo({ taskTimeoutMinutes: bad }))).toThrow(/taskTimeoutMinutes/);
+    for (const bad of [0, -1]) expect(() => loadConfig(repo({ maxBudgetUsdPerTask: bad }))).toThrow(/maxBudgetUsdPerTask/);
+  });
   it("maxAttempts 0 is rejected, 3 accepted", () => {
     expect(() => loadConfig(repo({ maxAttempts: 0 }))).toThrow(/maxAttempts/);
     expect(loadConfig(repo({ maxAttempts: 3 })).maxAttempts).toBe(3);

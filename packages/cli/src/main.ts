@@ -5,7 +5,7 @@ import { parseArgs } from "node:util";
 import type { Dag, Role, Runtime, Tier } from "@mar/core";
 import { claudeAdapter, codexAdapter, type Adapter } from "@mar/adapters";
 import { Store, startServer } from "@mar/server";
-import { createWorktrees, ensureMarExcluded, planGoal, redact, repoMap, runDag, type Worktrees } from "@mar/orchestrator";
+import { createWorktrees, ensureMarExcluded, planGoal, redact, repoMap, runDag as realRunDag, type Worktrees } from "@mar/orchestrator";
 import { loadConfig, type MarConfig } from "./config.js";
 import { nodeRunner, preflight } from "./preflight.js";
 
@@ -103,13 +103,16 @@ export interface ExecuteOpts {
   goal: string; repo: string; store: Store; adapters: Record<Runtime, Adapter>; config: MarConfig;
   runId?: string; unsafe?: boolean; signal?: AbortSignal;
   worktrees?: Pick<Worktrees, "create" | "commit" | "remove">; repoMapFn?: (repo: string) => string;
+  runDagFn?: typeof realRunDag;
 }
 
 export async function executeRun(o: ExecuteOpts): Promise<{ runId: string; results: Record<string, string> }> {
   const repo = resolve(o.repo);
   const runId = o.runId ?? newRunId();
   const { store, config, adapters } = o;
-  store.createRun(runId, o.goal, repo);
+  // The goal is persisted, served by /api/runs and sent to the planner: never keep secrets in it.
+  const goal = redact(o.goal);
+  store.createRun(runId, goal, repo);
   let dag: Dag | undefined = store.loadPlan(runId);
   if (!dag) {
     // Without a plan there are no task rows, so the failure is recorded as a run-level event.
@@ -120,7 +123,7 @@ export async function executeRun(o: ExecuteOpts): Promise<{ runId: string; resul
     if (o.signal?.aborted) failPlanning("aborted during planning");
     try {
       dag = await planGoal({
-        goal: o.goal, repoMap: (o.repoMapFn ?? repoMap)(repo), adapter: adapters.claude,
+        goal, repoMap: (o.repoMapFn ?? repoMap)(repo), adapter: adapters.claude,
         model: config.plannerModel, cwd: repo, signal: o.signal,
       });
     } catch (e) {
@@ -130,12 +133,13 @@ export async function executeRun(o: ExecuteOpts): Promise<{ runId: string; resul
     store.savePlan(runId, dag);
   }
   try {
-    const results = await runDag({
+    const results = await (o.runDagFn ?? realRunDag)({
       store, runId, dag, repo, adapters,
       worktrees: o.worktrees ?? createWorktrees(repo, runId),
       modelFor: (rt, tier: Tier) => config.tiers[rt][tier],
       toolsFor, concurrency: config.concurrency, defaultBudgetTokens: config.defaultBudgetTokens,
       maxAttempts: config.maxAttempts, unsafe: o.unsafe, signal: o.signal,
+      taskTimeoutMs: config.taskTimeoutMinutes * 60_000, maxBudgetUsdPerTask: config.maxBudgetUsdPerTask,
       repairResult: makeRepair(adapters, config, repo, o.signal),
     });
     return { runId, results };
@@ -157,14 +161,19 @@ export interface MainDeps {
   proc?: Pick<NodeJS.Process, "on" | "off">;
   /** Hard exit used by the second signal (default: process.exit). */
   exit?: (code: number) => void;
-  /** Closes the DB handle (Store has no close() yet; the default reaches into its private field). */
+  /** Closes the DB handle (default: store.close()). */
   closeStore?: (store: Store) => void;
   worktrees?: ExecuteOpts["worktrees"];
   repoMapFn?: ExecuteOpts["repoMapFn"];
   forceExitTimeoutMs?: number;
+  /** Clock for the signal debounce (default: Date.now). */
+  now?: () => number;
 }
 
-const defaultCloseStore = (store: Store) => { (store as unknown as { db: { close(): void } }).db.close(); };
+/** A signal arriving this soon after the previous one is a duplicate delivery, not a second Ctrl-C. */
+export const SIGNAL_DEBOUNCE_MS = 1000;
+
+const defaultCloseStore = (store: Store) => { store.close(); };
 const errMessage = (e: unknown) => redact(e instanceof Error ? e.message : String(e)).slice(0, 500);
 const reportError = (e: unknown) => {
   console.error(`mar: ${errMessage(e)}`);
@@ -186,12 +195,16 @@ export async function runMain(argv: string[], deps: MainDeps = {}): Promise<numb
   const ac = new AbortController();
   let store: Store | undefined;
   let server: Server | undefined;
-  let signals = 0;
+  const now = deps.now ?? Date.now;
+  let signals = 0; let lastSignalAt = 0;
   const closeAll = async () => {
     await server?.close().catch(() => {});
     if (store) { try { closeStore(store); } catch { /* already closed */ } }
   };
   const onSignal = () => {
+    const t = now();
+    if (signals > 0 && t - lastSignalAt < SIGNAL_DEBOUNCE_MS) return;
+    lastSignalAt = t;
     if (++signals === 1) { ac.abort(); return; }
     // Second signal: stop waiting for a graceful shutdown.
     const timeout = new Promise<void>((r) => setTimeout(r, deps.forceExitTimeoutMs ?? 2000).unref());
@@ -224,7 +237,7 @@ export async function runMain(argv: string[], deps: MainDeps = {}): Promise<numb
       goal = run.goal;
     } else { runId = newRunId(); goal = cli.goal; }
 
-    proc.on("SIGINT", onSignal); proc.on("SIGTERM", onSignal); handlersOn = true;
+    proc.on("SIGINT", onSignal); proc.on("SIGTERM", onSignal); proc.on("SIGHUP", onSignal); handlersOn = true;
     const dist = uiDist();
     try {
       server = await (deps.startServer ?? startServer)(store, { port: cli.port, staticDir: existsSync(dist) ? dist : undefined, onStop: (id) => { if (id === runId) ac.abort(); } });
@@ -263,7 +276,7 @@ export async function runMain(argv: string[], deps: MainDeps = {}): Promise<numb
     reportError(e);
     return 1;
   } finally {
-    if (handlersOn) { proc.off("SIGINT", onSignal); proc.off("SIGTERM", onSignal); }
+    if (handlersOn) { proc.off("SIGINT", onSignal); proc.off("SIGTERM", onSignal); proc.off("SIGHUP", onSignal); }
     await closeAll();
   }
 }

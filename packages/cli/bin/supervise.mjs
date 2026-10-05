@@ -17,17 +17,31 @@ export function exitCodeFor(code, signal) {
 }
 
 export function supervise(cmd, args, { env, graceMs = 5000, proc = process } = {}) {
-  const child = spawn(cmd, args, { stdio: "inherit", env });
+  // detached: the child leads its own process group, so a terminal Ctrl-C (SIGINT to the foreground group)
+  // reaches only this supervisor, which forwards it exactly once. Otherwise the child would see it twice
+  // and its "second signal force-exits" path would skip the graceful abort.
+  const child = spawn(cmd, args, { stdio: "inherit", env, detached: true });
   let timer;
+  let exited = false;
+  const killGroup = (sig) => {
+    if (child.pid === undefined) return;
+    try { process.kill(-child.pid, sig); } catch { /* group already gone */ }
+  };
   const forward = (sig) => {
     child.kill(sig);
-    timer ??= setTimeout(() => { child.kill("SIGKILL"); }, graceMs);
+    timer ??= setTimeout(() => { killGroup("SIGKILL"); }, graceMs);
   };
   const handlers = ["SIGINT", "SIGTERM", "SIGHUP"].map((sig) => { const h = () => forward(sig); proc.on(sig, h); return [sig, h]; });
+  // The child is outside our group, so make sure it (and its workers) cannot outlive the supervisor.
+  const onParentExit = () => { if (!exited) killGroup("SIGKILL"); };
+  proc.on("exit", onParentExit);
   child.on("error", (e) => { console.error(`mar: cannot start: ${e.message}`); proc.exit(1); });
   child.on("exit", (code, signal) => {
+    exited = true;
     clearTimeout(timer);
+    killGroup("SIGKILL"); // stragglers left in the child's group
     for (const [sig, h] of handlers) proc.off(sig, h);
+    proc.off("exit", onParentExit);
     proc.exit(exitCodeFor(code, signal));
   });
   return child;
