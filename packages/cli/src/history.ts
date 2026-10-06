@@ -106,6 +106,8 @@ export function resolveRunId(ids: readonly string[], query: string): Resolve {
 export interface ListRow {
   id: string; goal: string; created: number; status: RunStatus; phases: number; tasksDone: number; tasksTotal: number;
   tokens: number | null; remaining: string; stopReason?: string;
+  /** Workspace runs: the repo folder names (empty for a single-repo run). */
+  repos?: string[];
 }
 const MIN_GOAL = 10;
 const GAP = "  ";
@@ -127,6 +129,7 @@ export const listJson = (rows: readonly ListRow[]): string =>
   JSON.stringify(rows.map((r) => ({
     id: r.id, goal: r.goal, created: new Date(r.created).toISOString(), status: r.status, phases: r.phases,
     tasksDone: r.tasksDone, tasksTotal: r.tasksTotal, tokens: r.tokens, remaining: r.remaining, stopReason: r.stopReason ?? null,
+    repos: r.repos ?? [],
   })), null, 2);
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -136,6 +139,7 @@ export const listJson = (rows: readonly ListRow[]): string =>
 interface PhaseData { phase: number; tasks: TaskSpec[]; remaining: string; status: string }
 interface RunRow { id: string; goal: string; repo: string; created: number }
 interface Loaded {
+  repos: string[];
   run: RunRow; phases: PhaseData[]; summary: RunSummary; tokens: number | null; notes: string[];
   statuses: Map<string, { status: string; detail: string | null }>;
 }
@@ -183,10 +187,19 @@ function load(store: Store, run: RunRow, now: number): Loaded {
     ...(store.lastEventTs(run.id) !== undefined ? { lastEventTs: store.lastEventTs(run.id) } : {}), now,
   });
   const used = store.usageTokens(run.id);
-  return { run, phases, summary, tokens: used > 0 ? used : null, notes, statuses };
+  return { run, phases, summary, tokens: used > 0 ? used : null, notes, statuses, repos: workspaceRepos(store, run.id) };
+}
+
+/** Repo folder names of a workspace run (from its `run_started` event); [] for a single-repo run. */
+function workspaceRepos(store: Store, runId: string): string[] {
+  try {
+    const p = store.eventsOfType(runId, ["run_started"]).at(-1)?.payload;
+    return p && p.mode === "workspace" ? strs(p.repos) : [];
+  } catch { return []; }
 }
 
 const toRow = (l: Loaded): ListRow => ({
+  repos: l.repos,
   id: l.run.id, goal: l.run.goal, created: l.run.created, status: l.summary.status, phases: l.summary.phases,
   tasksDone: l.summary.tasksDone, tasksTotal: l.summary.tasksTotal, tokens: l.tokens, remaining: l.summary.remaining,
   ...(l.summary.stopReason ? { stopReason: l.summary.stopReason } : {}),
@@ -197,24 +210,31 @@ const toRow = (l: Loaded): ListRow => ({
 // ---------------------------------------------------------------------------------------------------------------
 
 function integrationLines(events: readonly StoredEvent[], phase: number): string[] {
-  const e = events.filter((x) => (typeof x.payload.phase === "number" ? x.payload.phase : 1) === phase).at(-1);
-  if (!e) return [];
+  const ofPhase = events.filter((x) => (typeof x.payload.phase === "number" ? x.payload.phase : 1) === phase);
+  // One result per repo (the last one); a single-repo run has a single, unlabelled group.
+  const groups = new Map<string, StoredEvent>();
+  for (const e of ofPhase) groups.set(typeof e.payload.repo === "string" ? e.payload.repo : "", e);
+  return [...groups].flatMap(([repo, e]) => oneIntegration(e, repo));
+}
+
+function oneIntegration(e: StoredEvent, repo: string): string[] {
   const p = e.payload;
-  if (typeof p.branch !== "string") return [`  Integration failed: ${flat(str(p.error, "unknown error"))}`];
+  const tag = repo ? ` [${flat(repo)}]` : "";
+  if (typeof p.branch !== "string") return [`  Integration failed${tag}: ${flat(str(p.error, "unknown error"))}`];
   const merged = strs(p.merged).map((b) => b.split("/").pop()).join(", ") || "nothing";
   const lines: string[] = [];
   if (isRec(p.conflict)) {
-    lines.push(`  Integration stopped at ${flat(str(p.conflict.branch))}: conflict in ${strs(p.conflict.files).map(flat).join(", ") || "(unknown files)"}`);
+    lines.push(`  Integration stopped${tag} at ${flat(str(p.conflict.branch))}: conflict in ${strs(p.conflict.files).map(flat).join(", ") || "(unknown files)"}`);
     lines.push(`    Merged so far (kept on ${flat(p.branch)}): ${merged}`);
     return lines;
   }
   const v = isRec(p.verify) ? p.verify : undefined;
   if (v && v.ok === false) {
     const f = isRec(v.failed) ? v.failed : undefined;
-    lines.push(`  Integration: ${flat(p.branch)} (merged ${merged}; verify failed (${flat(str(f?.command, "unknown"))}${f?.timedOut === true ? ", timed out" : ""}))`);
+    lines.push(`  Integration${tag}: ${flat(p.branch)} (merged ${merged}; verify failed (${flat(str(f?.command, "unknown"))}${f?.timedOut === true ? ", timed out" : ""}))`);
     const tail = sanitizeForTerminal(redact(str(v.tail))).slice(-MAX_TAIL);
     if (tail) lines.push(...tail.split("\n").map((l) => `    | ${l}`));
-  } else lines.push(`  Integration: ${flat(p.branch)} (merged ${merged}${v ? "; verify passed" : ""})`);
+  } else lines.push(`  Integration${tag}: ${flat(p.branch)} (merged ${merged}${v ? "; verify passed" : ""})`);
   return lines;
 }
 
@@ -235,6 +255,7 @@ async function renderDetail(store: Store, l: Loaded, now: number, branchExists: 
   out.push(`Run ${run.id}`);
   out.push(`Goal:      ${sanitizeForTerminal(run.goal)}`);
   out.push(`Repo:      ${flat(run.repo)}`);
+  if (l.repos.length) out.push(`Repos:     ${l.repos.map(flat).join(", ")}`);
   out.push(`Started:   ${formatDate(run.created)} (${relativeTime(run.created, now)})`);
   out.push(`Duration:  ${last !== undefined && last >= run.created ? formatDuration(last - run.created) : "n/a"}`);
   out.push(`Status:    ${summary.status}${summary.stopReason ? ` (${flat(summary.stopReason)})` : ""}`);
@@ -250,14 +271,16 @@ async function renderDetail(store: Store, l: Loaded, now: number, branchExists: 
   for (const p of phases) {
     out.push("", `== Phase ${p.phase} ==`);
     if (p.tasks.length === 0) { out.push("(no tasks)"); continue; }
-    out.push(renderPlanTable(p.tasks, (t) => shared.get(t.id) === true));
+    out.push(renderPlanTable(p.tasks, (t) => shared.get(t.id) === true, { workspace: l.repos.length > 0 }));
     const branches = await Promise.all(p.tasks.map(async (t) => {
       const name = `mar/${run.id}/${t.id}`;
-      return (await branchExists(run.repo, name)) ? name : undefined;
+      // Workspace runs: the branch lives in the task's repo folder under the run root.
+      const where = l.repos.length > 0 ? (t.repo !== undefined ? join(run.repo, t.repo) : undefined) : run.repo;
+      return where !== undefined && (await branchExists(where, name)) ? name : undefined;
     }));
     p.tasks.forEach((t, i) => {
       const s = l.statuses.get(t.id);
-      out.push(`  ${flat(t.id)}  ${s?.status ?? "not-run"}${s?.detail ? ` (${flat(s.detail)})` : ""}${branches[i] ? `  ${flat(branches[i]!)}` : ""}`);
+      out.push(`  ${flat(t.id)}  ${s?.status ?? "not-run"}${s?.detail ? ` (${flat(s.detail)})` : ""}${branches[i] ? `  ${l.repos.length > 0 && t.repo ? `${flat(t.repo)}:` : ""}${flat(branches[i]!)}` : ""}`);
     });
     out.push(...integrationLines(integrations, p.phase));
     if (p.remaining.trim()) out.push(`  Remaining after this phase: ${flat(p.remaining)}`);

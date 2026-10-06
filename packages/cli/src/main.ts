@@ -6,11 +6,11 @@ import { setTimeout as delay } from "node:timers/promises";
 import { type Dag, type Role, type Runtime, type Tier } from "@mar/core";
 import { claudeAdapter, codexAdapter, type Adapter } from "@mar/adapters";
 import { Store, startServer } from "@mar/server";
-import { createWorktrees, ensureMarExcluded, git, integrate as realIntegrate, planGoal, redact, repoMap, runDag as realRunDag, runPhases, usesSharedWorktree, type IntegrationOutcome, type PhasePlanArgs, type PhaseRec, type PhaseStop, type Plan, type Worktrees } from "@mar/orchestrator";
-import { effectiveMaxTotalTokens, loadConfig, type MarConfig } from "./config.js";
+import { createWorkspaceWorktrees, createWorktrees, ensureMarExcluded, git, integrate as realIntegrate, planGoal, redact, REPO_NAME, repoMap, resolveWorkspace, runDag as realRunDag, runPhases, usesSharedWorktree, workspaceRepoMap, type IntegrationOutcome, type PhasePlanArgs, type PhaseRec, type PhaseStop, type Plan, type Worktrees, type WorkspaceRepo } from "@mar/orchestrator";
+import { effectiveMaxTotalTokens, loadConfig, loadWorkspaceConfig, type MarConfig, type RepoConfig } from "./config.js";
 import { renderPhaseHeader, renderPhaseSummary, renderPlanTable, renderStop } from "./phaseOutput.js";
 import { renderAnswer, saveReports } from "./answer.js";
-import { nodeRunner, preflight } from "./preflight.js";
+import { nodeRunner, preflight, preflightWorkspace } from "./preflight.js";
 import { runHistory, SIGNAL_DEBOUNCE_MS, type HistoryCli, type HistoryDeps } from "./history.js";
 import { sanitizeForTerminal } from "./sanitize.js";
 
@@ -19,14 +19,16 @@ export { SIGNAL_DEBOUNCE_MS };
 export class UsageError extends Error {}
 
 const USAGE = `Usage:
-  mar run "<goal>" [--repo <path>] [--port <n>] [--unsafe] [--budget <tokens>] [--phases <n>]
-  mar resume <runId> [--repo <path>] [--port <n>] [--unsafe] [--budget <tokens>] [--phases <n>]
+  mar run "<goal>" [--repo <path>] [--repos <a,b>] [--port <n>] [--unsafe] [--budget <tokens>] [--phases <n>]
+  mar resume <runId> [--repo <path>] [--repos <a,b>] [--port <n>] [--unsafe] [--budget <tokens>] [--phases <n>]
   mar history [<runId>] [--repo <path>] [--limit <n>] [--json] [--task <id>] [--ui] [--port <n>]
   mar --help
   mar --version
 
 Options:
-  --repo <path>     repository to work on (default: .)
+  --repo <path>     repository to work on (default: .); a folder that is not a git repo but has git repos as immediate
+                    subfolders is treated as a multi-repo workspace
+  --repos <a,b>     workspace only: restrict the run to these repo folders (overrides "repos" in .mar.json)
   --port <n>        UI/event server port (default: 4317)
   --budget <n>      default per-task token budget (overrides config)
   --phases <n>      max planning phases for this invocation, 1-10 (overrides maxPhases; use with resume to go past the limit)
@@ -45,8 +47,8 @@ const MAX_GOAL = 20000;
 export type Cli =
   | { cmd: "help" }
   | { cmd: "version" }
-  | { cmd: "run"; goal: string; repo: string; port: number; unsafe: boolean; budget?: number; phases?: number }
-  | { cmd: "resume"; runId: string; repo: string; port: number; unsafe: boolean; budget?: number; phases?: number }
+  | { cmd: "run"; goal: string; repo: string; repos?: string[]; port: number; unsafe: boolean; budget?: number; phases?: number }
+  | { cmd: "resume"; runId: string; repo: string; repos?: string[]; port: number; unsafe: boolean; budget?: number; phases?: number }
   | HistoryCli;
 
 const posInt = (name: string, v: string): number => {
@@ -67,6 +69,12 @@ const limitOpt = (v: string): number => {
   return n;
 };
 
+const reposOpt = (v: string): string[] => {
+  const names = v.split(",").map((x) => x.trim());
+  if (names.some((n) => !REPO_NAME.test(n))) throw new UsageError(`--repos must be a comma-separated list of repo folder names ([A-Za-z0-9._-]+), got "${v}"`);
+  return [...new Set(names)];
+};
+
 const port = (v: string): number => {
   const n = posInt("port", v);
   if (n > 65535) throw new UsageError(`--port must be between 1 and 65535 (got "${v}")`);
@@ -79,7 +87,7 @@ export function parseCli(argv: string[]): Cli {
     parsed = parseArgs({
       args: argv, allowPositionals: true, strict: true,
       options: {
-        repo: { type: "string", default: "." }, port: { type: "string" }, budget: { type: "string" }, phases: { type: "string" },
+        repo: { type: "string", default: "." }, port: { type: "string" }, budget: { type: "string" }, phases: { type: "string" }, repos: { type: "string" },
         unsafe: { type: "boolean", default: false }, limit: { type: "string" }, json: { type: "boolean", default: false },
         task: { type: "string" }, ui: { type: "boolean", default: false }, help: { type: "boolean", short: "h", default: false },
         version: { type: "boolean", short: "v", default: false },
@@ -91,7 +99,7 @@ export function parseCli(argv: string[]): Cli {
   if (values.version) return { cmd: "version" };
   const [cmd, ...rest] = positionals;
   if (cmd === "history") {
-    for (const f of ["unsafe", "budget", "phases"] as const) if (values[f] !== undefined && values[f] !== false) throw new UsageError(`--${f} does not apply to history`);
+    for (const f of ["unsafe", "budget", "phases", "repos"] as const) if (values[f] !== undefined && values[f] !== false) throw new UsageError(`--${f} does not apply to history`);
     if (rest.length > 1) throw new UsageError("history takes at most one run id");
     const runId = rest[0];
     if (runId !== undefined && !runId.trim()) throw new UsageError("run id must not be empty");
@@ -113,6 +121,7 @@ export function parseCli(argv: string[]): Cli {
     port: values.port === undefined ? 4317 : port(values.port),
     ...(values.budget === undefined ? {} : { budget: posInt("budget", values.budget) }),
     ...(values.phases === undefined ? {} : { phases: phasesOpt(values.phases) }),
+    ...(values.repos === undefined ? {} : { repos: reposOpt(values.repos) }),
   };
   if (cmd === "run") {
     if (rest.length !== 1) throw new UsageError('run requires exactly one quoted goal');
@@ -184,6 +193,8 @@ export interface ExecuteOpts {
   runDagFn?: typeof realRunDag;
   /** Test seam. Without it, integration runs only against real worktrees (injected fakes have no branches). */
   integrateFn?: typeof realIntegrate;
+  /** Workspace run: `repo` is then the PARENT folder (state lives in `<repo>/.mar`); one entry per in-scope git repo. */
+  workspace?: { repos: readonly WorkspaceRepo[]; repoConfigs: Record<string, RepoConfig> };
   /** Prints progress lines (phase headers and plan tables). Default: silent. */
   log?: (line: string) => void;
 }
@@ -202,7 +213,14 @@ export async function executeRun(o: ExecuteOpts): Promise<ExecuteResult> {
   // The goal is persisted, served by /api/runs and sent to the planner: never keep secrets in it.
   const goal = redact(o.goal);
   store.createRun(runId, goal, repo);
+  const ws = o.workspace;
+  // Persisted once per run (resume reads it); single-repo runs record nothing, as before.
+  if (ws && !store.listEvents(runId).some((e) => e.type === "run_started"))
+    store.appendEvent({ run_id: runId, task_id: null, agent_id: null, type: "run_started", payload: { root: repo, repos: ws.repos.map((r) => r.name), mode: "workspace" } });
   const verifyCfg = { commands: config.verify, timeoutMs: config.verifyTimeoutMinutes * 60_000 };
+  const repoCfg = (name: string | undefined): RepoConfig | undefined => (ws && name !== undefined ? ws.repoConfigs[name] : undefined);
+  const verifyOf = (name: string | undefined) => { const c = repoCfg(name); return c ? (c.verify.length ? { commands: c.verify, timeoutMs: c.verifyTimeoutMinutes * 60_000 } : undefined) : config.verify.length ? verifyCfg : undefined; };
+  const repoPath = (name: string | undefined) => ws?.repos.find((r) => r.name === name)?.path;
   const sharedOn = o.worktrees ? o.worktrees.shared !== undefined : true;
 
   // Plans phase `a.phase`: Claude first, then Codex. Phase 1 failures are recorded as a run-level event and thrown;
@@ -216,11 +234,15 @@ export async function executeRun(o: ExecuteOpts): Promise<ExecuteResult> {
     try {
       const mapFn = o.repoMapFn ?? repoMap;
       let map: string;
-      try { map = mapFn(repo, config.repoMapChars, a.integrationBranch); }
-      catch (e) { if (!a.integrationBranch) throw e; map = mapFn(repo, config.repoMapChars); }
+      if (ws) map = workspaceRepoMap(ws.repos, config.repoMapChars, mapFn, a.integrationBranch);
+      else {
+        try { map = mapFn(repo, config.repoMapChars, a.integrationBranch); }
+        catch (e) { if (!a.integrationBranch) throw e; map = mapFn(repo, config.repoMapChars); }
+      }
       const common = {
         goal, repoMap: map, cwd: repo, signal: o.signal, phase: a.phase, maxTasks: a.maxTasks, previousRemaining: a.previousRemaining,
         history: a.history, takenIds: a.takenIds, externalIds: a.externalIds, onUsage: a.onUsage,
+        ...(ws ? { workspace: ws.repos.map((r) => r.name) } : {}),
       };
       try { return await planGoal({ ...common, adapter: adapters.claude, model: config.plannerModel }); }
       catch (claudeError) {
@@ -238,7 +260,8 @@ export async function executeRun(o: ExecuteOpts): Promise<ExecuteResult> {
     }
   }
 
-  const canIntegrate = config.integrate && (o.integrateFn !== undefined || o.worktrees === undefined); // injected fakes have no real branches
+  const integrateOn = ws ? ws.repos.some((r) => ws.repoConfigs[r.name]?.integrate !== false) : config.integrate;
+  const canIntegrate = integrateOn && (o.integrateFn !== undefined || o.worktrees === undefined); // injected fakes have no real branches
   try {
     const out = await runPhases({
       store, runId, signal: o.signal,
@@ -246,21 +269,29 @@ export async function executeRun(o: ExecuteOpts): Promise<ExecuteResult> {
       plan,
       run: (dag, ctx) => (o.runDagFn ?? realRunDag)({
         store, runId, dag, repo, adapters,
-        worktrees: o.worktrees ?? createWorktrees(repo, runId, { linkPaths: config.linkPaths, ...(ctx.baseRef ? { baseRef: ctx.baseRef } : {}) }),
+        worktrees: o.worktrees ?? (ws
+          ? createWorkspaceWorktrees(repo, runId, ws.repos, { linkPaths: Object.fromEntries(ws.repos.map((r) => [r.name, ws.repoConfigs[r.name]?.linkPaths ?? []])), ...(ctx.baseRef ? { baseRef: ctx.baseRef } : {}) })
+          : createWorktrees(repo, runId, { linkPaths: config.linkPaths, ...(ctx.baseRef ? { baseRef: ctx.baseRef } : {}) })),
         modelFor: (rt, tier: Tier) => config.tiers[rt][tier],
         fallbackRuntime: true,
         toolsFor, concurrency: config.concurrency, defaultBudgetTokens: config.defaultBudgetTokens,
         maxAttempts: config.maxAttempts, unsafe: o.unsafe, signal: o.signal,
         taskTimeoutMs: config.taskTimeoutMinutes * 60_000, maxBudgetUsdPerTask: config.maxBudgetUsdPerTask,
         repairResult: makeRepair(adapters, config, repo, o.signal),
-        ...(config.verify.length ? { verify: verifyCfg } : {}), ownership: config.ownership,
+        ...(ws
+          ? { workspace: { repos: ws.repos.map((r) => r.name) }, verifyFor: verifyOf, ownershipFor: (n: string | undefined) => repoCfg(n)?.ownership ?? config.ownership }
+          : { ...(config.verify.length ? { verify: verifyCfg } : {}), ownership: config.ownership }),
       }),
       ...(canIntegrate ? {
+        ...(ws ? { integrates: (n: string) => ws.repoConfigs[n]?.integrate !== false } : {}),
         integrate: async (a) => {
           try {
+            const rc = repoCfg(a.repo);
+            const verify = verifyOf(a.repo);
             const result = await (o.integrateFn ?? realIntegrate)({
-              repo, runId, branches: a.branches, signal: o.signal, linkPaths: config.linkPaths,
-              ...(config.verify.length ? { verify: verifyCfg } : {}),
+              repo: repoPath(a.repo) ?? repo, runId, branches: a.branches, signal: o.signal, linkPaths: rc?.linkPaths ?? config.linkPaths,
+              ...(verify ? { verify } : {}),
+              ...(ws && a.repo ? { stateRoot: repo, repoName: a.repo } : {}),
               ...(a.accumulate ? { baseRef: a.baseRef, reset: false } : {}),
             });
             return { result };
@@ -268,15 +299,16 @@ export async function executeRun(o: ExecuteOpts): Promise<ExecuteResult> {
         },
       } : {}),
       ...(o.worktrees ? {} : {
-        diffStat: async (branch: string) => {
-          const base = (await git(["merge-base", "HEAD", branch], repo)).trim();
-          return git(["diff", "--stat", `${base}..${branch}`], repo);
+        diffStat: async (branch: string, name?: string) => {
+          const dir = repoPath(name) ?? repo;
+          const base = (await git(["merge-base", "HEAD", branch], dir)).trim();
+          return git(["diff", "--stat", `${base}..${branch}`], dir);
         },
       }),
       onPhaseStart: (p) => {
         log(`\n${renderPhaseHeader(p.phase, p.maxPhases)}`);
         const byId = new Map(p.dag.tasks.map((t) => [t.id, t]));
-        log(renderPlanTable(p.dag.tasks, (t) => sharedOn && usesSharedWorktree(t, byId, toolsFor)));
+        log(renderPlanTable(p.dag.tasks, (t) => sharedOn && usesSharedWorktree(t, byId, toolsFor), { workspace: ws !== undefined }));
         if (p.remaining) log(`Remaining after this phase: ${sanitizeForTerminal(redact(p.remaining)).replace(/\s+/g, " ")}`);
       },
     });
@@ -288,27 +320,49 @@ export async function executeRun(o: ExecuteOpts): Promise<ExecuteResult> {
   }
 }
 
-/** Prints the integration outcome. `built`: a usable integration branch exists; `healthy`: no conflict, verify failure or error. */
-function printIntegration(runId: string, integration: IntegrationOutcome | undefined): { built: boolean; healthy: boolean } {
+/**
+ * Prints the integration outcome. `built`: a usable integration branch exists; `healthy`: no conflict, verify failure or error.
+ * Workspace runs print one block per repo (`repoPath` tells where to merge from); a single repo prints exactly as before.
+ */
+function printIntegration(runId: string, integration: IntegrationOutcome | undefined, repoPath?: (name: string) => string | undefined): { built: boolean; healthy: boolean } {
   if (!integration) return { built: false, healthy: true };
   const r = integration.result;
-  if (!r) { console.log(`\nIntegration failed: ${sanitizeForTerminal(integration.error ?? "unknown error")}`); return { built: false, healthy: false }; }
+  const name = integration.repo;
+  const tag = name ? ` [${sanitizeForTerminal(name)}]` : "";
+  if (!r) { console.log(`\nIntegration failed${tag}: ${sanitizeForTerminal(integration.error ?? "unknown error")}`); return { built: false, healthy: false }; }
   console.log("");
   if (r.conflict) {
-    console.log(sanitizeForTerminal(`Integration stopped at ${r.conflict.branch}: conflict in ${r.conflict.files.join(", ") || "(unknown files)"}`));
+    console.log(sanitizeForTerminal(`Integration${tag} stopped at ${r.conflict.branch}: conflict in ${r.conflict.files.join(", ") || "(unknown files)"}`));
     console.log(sanitizeForTerminal(`  Merged so far (kept on ${r.branch}): ${r.merged.length ? r.merged.join(", ") : "nothing"}`));
     return { built: false, healthy: false };
   }
   const merged = r.merged.map((b) => b.split("/").pop()).join(", ");
   if (r.verify && !r.verify.ok) {
     const f = r.verify.failed;
-    console.log(sanitizeForTerminal(`Integration: ${r.branch} (merged ${merged}; verify failed (${redact(f?.command ?? "unknown")}${f?.timedOut ? ", timed out" : ""}))`));
+    console.log(sanitizeForTerminal(`Integration${tag}: ${r.branch} (merged ${merged}; verify failed (${redact(f?.command ?? "unknown")}${f?.timedOut ? ", timed out" : ""}))`));
     if (r.verify.tail) console.log(sanitizeForTerminal(redact(r.verify.tail)).split("\n").map((l) => `  | ${l}`).join("\n"));
     return { built: false, healthy: false };
   }
-  console.log(sanitizeForTerminal(`Integration: ${r.branch} (merged ${merged}${r.verify ? "; verify passed" : ""})`));
-  console.log(sanitizeForTerminal(`To take it: git merge ${r.branch} (on a feature branch, never main)`));
+  console.log(sanitizeForTerminal(`Integration${tag}: ${r.branch} (merged ${merged}${r.verify ? "; verify passed" : ""})`));
+  const path = name ? repoPath?.(name) : undefined;
+  console.log(sanitizeForTerminal(`To take it: git ${path ? `-C ${path} ` : ""}merge ${r.branch} (on a feature branch, never main)`));
   return { built: true, healthy: true };
+}
+
+/** Which repos (workspace) the run covers and how each is configured; undefined = a single repository. */
+interface WorkspaceInfo { repos: WorkspaceRepo[]; repoConfigs: Record<string, RepoConfig> }
+
+/** Repo names a workspace run was started with (its `run_started` event), read through a read-only snapshot; undefined when unknown. */
+function recordedWorkspace(root: string, runId: string): string[] | undefined {
+  const db = join(root, ".mar", "mar.db");
+  if (!existsSync(db)) return undefined;
+  let st: Store | undefined;
+  try {
+    st = new Store(db, { readOnly: true });
+    const p = st.eventsOfType(runId, ["run_started"]).at(-1)?.payload;
+    return p && p.mode === "workspace" && Array.isArray(p.repos) ? p.repos.filter((x): x is string => typeof x === "string") : undefined;
+  } catch { return undefined; }
+  finally { try { st?.close(); } catch { /* ignore */ } }
 }
 
 /** Replaced at build time by scripts/build.mjs; undefined when running from the TypeScript sources. */
@@ -330,6 +384,8 @@ export interface MainDeps {
   adapters?: () => Record<Runtime, Adapter>;
   startServer?: (store: Store, opts: Parameters<typeof startServer>[1]) => Promise<Server>;
   preflight?: (repo: string) => Promise<string[]>;
+  /** Overrides the workspace resolver (tests). */
+  resolveWorkspace?: typeof resolveWorkspace;
   /** Signal source (default: process). */
   proc?: Pick<NodeJS.Process, "on" | "off">;
   /** Hard exit used by the second signal (default: process.exit). */
@@ -392,14 +448,46 @@ export async function runMain(argv: string[], deps: MainDeps = {}): Promise<numb
   let handlersOn = false;
 
   try {
-    const repo = resolve(cli.repo);
+    const repo = resolve(cli.repo); // the repository, or the parent folder of a workspace
     let config = loadConfig(repo);
+    const resolveWs = deps.resolveWorkspace ?? resolveWorkspace;
+    let found = await resolveWs(repo, { repos: cli.repos });
+    let workspace: WorkspaceInfo | undefined;
+    if (found.kind === "workspace") {
+      // resume: the run's recorded repos must all still exist, and are the default scope.
+      const resumeId = cli.cmd === "resume" ? cli.runId : undefined;
+      const recorded = resumeId !== undefined ? recordedWorkspace(repo, resumeId) : undefined;
+      if (recorded) {
+        const all = await resolveWs(repo);
+        const have = new Set(all.kind === "workspace" ? all.repos.map((r) => r.name) : []);
+        const missing = recorded.filter((n) => !have.has(n));
+        if (missing.length) throw new Error(`run "${resumeId}" used repo ${missing.map((n) => `"${n}"`).join(", ")}, which is missing from ${repo}`);
+      }
+      const scope = cli.repos ?? (config.repos?.length ? config.repos : undefined) ?? recorded;
+      if (scope) found = await resolveWs(repo, { repos: scope });
+      if (recorded) {
+        const inScope = new Set(found.kind === "workspace" ? found.repos.map((r) => r.name) : []);
+        const out = recorded.filter((n) => !inScope.has(n));
+        if (out.length) throw new Error(`run "${resumeId}" used repo ${out.map((n) => `"${n}"`).join(", ")}, which is excluded by --repos / "repos" in .mar.json`);
+      }
+    }
+    if (found.kind === "workspace") {
+      const w = loadWorkspaceConfig(repo, found.repos);
+      config = w.config;
+      workspace = { repos: found.repos, repoConfigs: w.repoConfigs };
+      for (const m of [...(found.warnings ?? []), ...w.notes]) console.log(`Note: ${sanitizeForTerminal(m)}`);
+    }
     if (cli.budget !== undefined) config = { ...config, defaultBudgetTokens: cli.budget };
     if (cli.phases !== undefined) config = { ...config, maxPhases: cli.phases };
 
-    const problems = await (deps.preflight ?? ((r: string) => preflight(r, nodeRunner(r))))(repo);
+    let problems: string[];
+    if (workspace) {
+      problems = deps.preflight
+        ? (await Promise.all(workspace.repos.map(async (r) => (await deps.preflight!(r.path)).map((p) => `${r.name}: ${p}`)))).flat()
+        : await preflightWorkspace(workspace.repos, (cwd) => nodeRunner(cwd));
+    } else problems = await (deps.preflight ?? ((r: string) => preflight(r, nodeRunner(r))))(repo);
     if (problems.length) { console.error("mar: preflight failed:\n" + problems.map((p) => `  - ${p}`).join("\n")); return 1; }
-    await ensureMarExcluded(repo);
+    if (!workspace) await ensureMarExcluded(repo); // a workspace root is not a repo; its worktrees live outside every child repo
     mkdirSync(join(repo, ".mar"), { recursive: true });
     store = new Store(join(repo, ".mar", "mar.db"));
 
@@ -431,7 +519,7 @@ export async function runMain(argv: string[], deps: MainDeps = {}): Promise<numb
     if (cli.unsafe) console.log("WARNING: --unsafe is on. Agents run with permission prompts DISABLED and can run arbitrary commands.");
 
     const out = await executeRun({
-      goal, repo, store, runId, config, unsafe: cli.unsafe, signal: ac.signal, log: (l) => console.log(l),
+      goal, repo, store, runId, config, unsafe: cli.unsafe, ...(workspace ? { workspace } : {}), signal: ac.signal, log: (l) => console.log(l),
       adapters: deps.adapters?.() ?? { claude: claudeAdapter(), codex: codexAdapter() },
       worktrees: deps.worktrees, repoMapFn: deps.repoMapFn, integrateFn: deps.integrateFn,
     });
@@ -452,27 +540,37 @@ export async function runMain(argv: string[], deps: MainDeps = {}): Promise<numb
     console.log(`\nRun ${runId}${ac.signal.aborted ? " (stopped)" : ""}:`);
     // Read-only tasks ran in the shared detached worktree and have no branch (injected fakes without `shared` get one each).
     const sharedOn = deps.worktrees ? deps.worktrees.shared !== undefined : true;
-    const doneBranches: string[] = [];
+    const doneBranches: { branch: string; repo?: string }[] = [];
     let anyBranch = false;
     let integ = { built: false, healthy: true };
+    const builtRepos = new Set<string>(); // workspace: repos whose integration branch was built
+    const wsPath = (n: string) => workspace?.repos.find((r) => r.name === n)?.path;
     for (const p of phases) {
       const byId = new Map(p.dag.tasks.map((t) => [t.id, t]));
       const summaryRows = p.dag.tasks.map((t) => {
         const st = results[t.id] ?? status.get(t.id) ?? "not-run";
         const noBranch = sharedOn && usesSharedWorktree(t, byId, toolsFor);
-        const branch = noBranch ? "(shared read-only worktree, no branch)" : `mar/${runId}/${t.id}`;
+        const plain = `mar/${runId}/${t.id}`;
+        const branch = noBranch ? "(shared read-only worktree, no branch)" : workspace ? `${t.repo ?? "?"}:${plain}` : plain;
         if (!noBranch) anyBranch = true;
-        if (st === "done" && !noBranch) doneBranches.push(branch);
+        if (st === "done" && !noBranch) doneBranches.push({ branch: plain, ...(t.repo ? { repo: t.repo } : {}) });
         return { id: t.id, status: st, detail: detail.get(t.id), branch };
       });
       const text = renderPhaseSummary(multi ? p.phase : null, summaryRows);
       if (text) console.log(text);
-      if (multi && p.integration) integ = printIntegration(runId, p.integration);
+      if (workspace) {
+        for (const i of p.integrations ?? (p.integration ? [p.integration] : [])) {
+          const r = printIntegration(runId, i, wsPath);
+          if (r.built && i.repo) builtRepos.add(i.repo);
+          integ = { built: integ.built || r.built, healthy: integ.healthy && r.healthy };
+        }
+      } else if (multi && p.integration) integ = printIntegration(runId, p.integration);
     }
-    if (!multi) integ = printIntegration(runId, out.integration);
-    if (doneBranches.length && !integ.built) {
+    if (!workspace && !multi) integ = printIntegration(runId, out.integration);
+    const unmerged = workspace ? doneBranches.filter((b) => !(b.repo && builtRepos.has(b.repo))) : integ.built ? [] : doneBranches;
+    if (unmerged.length) {
       console.log("\nNothing was merged. To integrate, do it on a feature branch (not main), e.g.:");
-      for (const b of doneBranches) console.log(`  git merge ${b}`);
+      for (const b of unmerged) console.log(`  git ${workspace && b.repo ? `-C ${wsPath(b.repo) ?? b.repo} ` : ""}merge ${b.branch}`);
     }
     if (!anyBranch && phases.some((p) => p.dag.tasks.length > 0)) console.log("\nNo branches were created: all tasks were read-only.");
     if (out.stop) console.log(`\n${renderStop(out.stop, out.remaining, runId, config.maxPhases)}`);

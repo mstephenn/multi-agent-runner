@@ -113,7 +113,8 @@ describe("renderRunTable", () => {
 describe("listJson", () => {
   it("has a stable shape with the full goal, ISO date and null tokens", () => {
     const out = JSON.parse(listJson([row({ goal: "full\ngoal ".repeat(50), tokens: null, remaining: "more" })]));
-    expect(Object.keys(out[0])).toEqual(["id", "goal", "created", "status", "phases", "tasksDone", "tasksTotal", "tokens", "remaining", "stopReason"]);
+    expect(Object.keys(out[0])).toEqual(["id", "goal", "created", "status", "phases", "tasksDone", "tasksTotal", "tokens", "remaining", "stopReason", "repos"]);
+    expect(out[0].repos).toEqual([]); // [] for single-repo runs
     expect(out[0]).toMatchObject({ id: "r1abc", created: new Date(NOW - 2 * 3_600_000).toISOString(), status: "done", phases: 2, tasksDone: 3, tasksTotal: 4, tokens: null, remaining: "more", stopReason: null });
     expect(out[0].goal.length).toBeGreaterThan(300);
   });
