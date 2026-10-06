@@ -36,7 +36,7 @@ test.beforeAll(async () => {
   }
   // A two-phase run: the second phase builds on the first.
   store.createRun("r3", "Two phase goal", "/tmp/repo");
-  const tk = (id: string, phase: number) => ({ id, role: "implementer", runtime: "codex", tier: "mid", goal: id, dependsOn: [], needs: phase > 1 ? ["p1-api/summary"] : [], paths: [], phase });
+  const tk = (id: string, phase: number) => ({ id, role: "implementer" as const, runtime: "codex" as const, tier: "mid" as const, goal: id, dependsOn: [], needs: phase > 1 ? ["p1-api/summary"] : [], paths: [], phase });
   store.savePlan("r3", { tasks: [tk("p1-api", 1), tk("p2-ui", 2)] });
   store.setTaskStatus("r3", "p1-api", "done"); store.setTaskStatus("r3", "p2-ui", "running");
   store.appendEvent({ run_id: "r3", task_id: null, agent_id: null, type: "phase_started", payload: { phase: 1, maxPhases: 5, tasks: ["p1-api"], remaining: "wire the UI" } });
