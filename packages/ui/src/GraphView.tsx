@@ -1,12 +1,12 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
-import { Background, Handle, Position, ReactFlow, useReactFlow, type Node, type NodeProps } from "@xyflow/react";
+import { Background, Handle, MiniMap, Position, ReactFlow, ReactFlowProvider, useReactFlow, type Node, type NodeProps } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import type { Dag } from "@mar/core";
 import { matchesGraphFilter, taskDuration, phaseBadge, planPhases, type GraphFilter, type AgentView, type FlowEdge } from "./derive.js";
 import { fmtDuration, fmtTokens, STATUS_ICON } from "./fmt.js";
 import { layoutGraph, type Bounds } from "./layout.js";
 import { GraphEdge, type RoutedEdge } from "./GraphEdge.js";
-import { GraphControls } from "./GraphControls.js";
+import { GraphControls, fitOptions } from "./GraphControls.js";
 import "./graph.css";
 import { nodeIn, pulseRing, reducedMotion, statusFlash } from "./motion.js";
 
@@ -57,7 +57,12 @@ const AgentNode = memo(function AgentNode({ data }: NodeProps<Node<NodeData>>) {
     </div>
   );
 });
-const nodeTypes = { agent: AgentNode };
+// Passive background band: a phase column or a repository swimlane. Decorative, so hidden from assistive tech.
+type BandData = { label: string; kind: "phase" | "repo" };
+const BandNode = memo(function BandNode({ data }: NodeProps<Node<BandData>>) {
+  return <div className={`band band-${data.kind}`} data-testid={`band-${data.kind}-${data.label}`} aria-hidden="true"><span>{data.kind === "phase" ? `Phase ${data.label}` : data.label === "*" ? "All repos" : data.label}</span></div>;
+});
+const nodeTypes = { agent: AgentNode, band: BandNode };
 const edgeTypes = { routed: GraphEdge };
 
 // Re-centres the graph whenever its pane is resized (e.g. the inspector drawer opens or closes), so no node ends up hidden.
@@ -71,7 +76,7 @@ function RefitOnResize({ bounds }: { bounds: Bounds }) {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const ro = new ResizeObserver(() => {
       clearTimeout(timer);
-      timer = setTimeout(() => { void fitBounds({ x, y, width, height }, { padding: 0.25, duration: reducedMotion() ? 0 : 300 }); }, 80);
+      timer = setTimeout(() => { void fitBounds({ x, y, width, height }, fitOptions()); }, 80);
     });
     ro.observe(pane);
     return () => { clearTimeout(timer); ro.disconnect(); };
@@ -98,16 +103,23 @@ export function GraphView({ agents, plan, flow, selected, onSelect }: Props) {
       if (known.has(f.from) && known.has(f.to)) links.set(id, { id, source: f.from, target: f.to, label: f.key });
     }
     const layout = layoutGraph(visible, [...links.values()], {
-      nodeWidth: 250, nodeHeight: 160, columnGap: 180, rowGap: 40, edgeOffset: 28,
+      nodeWidth: 250, nodeHeight: 140, columnGap: 150, rowGap: 24, edgeOffset: 28,
       swimlanes: agents.some((a) => a.repo !== undefined),
     });
     return { layout, links };
   }, [visible, agents, plan, flow]);
-  const nodes = useMemo<Node<NodeData>[]>(() => visible.map((agent) => ({
+  const bands = useMemo<Node<BandData>[]>(() => [
+    ...(graph.layout.columns.length > 1 ? graph.layout.columns.map((c) => ({ id: `band-phase-${c.phase}`, label: String(c.phase), kind: "phase" as const, b: c })) : []),
+    ...(graph.layout.lanes.length > 1 ? graph.layout.lanes.map((l) => ({ id: `band-repo-${l.repo}`, label: l.repo, kind: "repo" as const, b: l })) : []),
+  ].map(({ id, label, kind, b }) => ({
+    id, type: "band", position: { x: b.x, y: b.y }, data: { label, kind }, style: { width: b.width, height: b.height },
+    draggable: false, selectable: false, focusable: false, zIndex: -1,
+  })), [graph]);
+  const nodes = useMemo<(Node<NodeData> | Node<BandData>)[]>(() => [...bands, ...visible.map((agent) => ({
     id: agent.id, type: "agent", position: graph.layout.positions.get(agent.id)!,
-    style: { width: 250, height: 160 },
+    style: { width: 250, height: 140 },
     data: { agent, selected: agent.id === selected, phaseCount: planPhases(plan) },
-  })), [visible, graph, selected, plan]);
+  }))], [bands, visible, graph, selected, plan]);
   const edges = useMemo<RoutedEdge[]>(() => graph.layout.edges.map((edge) => ({
     id: edge.id, source: edge.source, target: edge.target, type: "routed",
     selected: edge.id === selectedEdge,
@@ -119,18 +131,27 @@ export function GraphView({ agents, plan, flow, selected, onSelect }: Props) {
 
   if (agents.length === 0) return <div className="empty" role="status"><span className="spinner" aria-hidden="true" /><span>No agents yet. Waiting for the planner.</span></div>;
   return (
+    <ReactFlowProvider>
     <div className="graph" aria-label="Task graph">
+      <GraphControls agents={agents} filter={filter} onFilter={setFilter} minimap={minimap} onMinimap={() => setMinimap((value) => !value)} bounds={graph.layout.bounds} />
+      <div className="graph-canvas">
       <ReactFlow
-        nodes={nodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes} fitView fitViewOptions={{ padding: 0.25, maxZoom: 1 }}
+        nodes={nodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes} fitView fitViewOptions={{ ...fitOptions(), duration: 0 }}
         nodesDraggable={false} nodesConnectable={false} elementsSelectable edgesFocusable proOptions={{ hideAttribution: true }}
         onEdgeClick={(_e, edge) => setSelectedEdge(edge.id)} onPaneClick={() => setSelectedEdge(null)}
         onNodeClick={(_e, n) => onSelect(n.id)} minZoom={0.05}
       >
         <Background gap={20} />
         <RefitOnResize bounds={graph.layout.bounds} />
-        <GraphControls agents={agents} filter={filter} onFilter={setFilter} minimap={minimap} onMinimap={() => setMinimap((value) => !value)} bounds={graph.layout.bounds} />
+        {minimap && <MiniMap pannable zoomable ariaLabel="Task graph minimap" nodeColor={(node) => {
+          if (node.type === "band") return "transparent";
+          const status = (node.data.agent as AgentView | undefined)?.status;
+          return status === "failed" ? "var(--err)" : status === "running" ? "var(--accent)" : "var(--muted)";
+        }} />}
         {!visible.length && <div className="graph-no-matches" role="status">No tasks match these filters.</div>}
       </ReactFlow>
+      </div>
     </div>
+    </ReactFlowProvider>
   );
 }

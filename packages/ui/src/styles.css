@@ -32,7 +32,9 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
 .app { display: flex; flex-direction: column; height: 100%; min-height: 0; }
 .app > * { flex: none; }
 .app > .main { flex: 1 1 auto; min-height: 0; }
-.state { padding: 48px 24px; text-align: center; color: var(--muted); }
+.state { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 64px 24px; text-align: center; color: var(--muted); }
+.state strong { color: var(--ink); font-size: 15px; }
+.state-error strong { color: var(--err); }
 .banner { padding: 6px 16px; background: color-mix(in srgb, var(--err) 14%, var(--panel)); border-bottom: 1px solid var(--err); }
 .banner.info { background: color-mix(in srgb, var(--accent) 12%, var(--panel)); border-color: var(--accent); }
 
@@ -57,7 +59,7 @@ button.danger.armed { background: var(--err); color: var(--panel); }
 
 .main { position: relative; display: flex; min-height: 0; overflow: hidden; } /* clips the drawer while it slides in */
 .graph { flex: 1; min-width: 0; min-height: 260px; }
-.empty { flex: 1; display: grid; place-items: center; color: var(--muted); }
+.empty { flex: 1; display: flex; flex-direction: column; gap: 10px; align-items: center; justify-content: center; color: var(--muted); }
 .react-flow { --xy-background-color: var(--bg); --xy-edge-stroke: var(--muted); --xy-edge-label-color: var(--ink); --xy-edge-label-background-color: var(--panel); background: var(--bg); }
 .react-flow__edge.flow .react-flow__edge-path { stroke: var(--accent); stroke-width: 2; }
 .react-flow__edge-text { font: 11px var(--mono); }
@@ -226,6 +228,7 @@ pre.io { max-height: 320px; overflow: auto; white-space: pre-wrap; word-break: b
 
 .phase { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
 .phase-badge, .phase-tag { color: var(--muted); }
+.phase-badge { white-space: nowrap; }
 .phase-remaining { color: var(--muted); font-size: 12px; max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Keep repository names case-sensitive and contained, even for long folder names. */

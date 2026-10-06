@@ -224,7 +224,7 @@ test("a truncated snapshot shows the banner and marks header totals as partial",
   await expect(banner).toHaveAttribute("role", "status");
   await expect(banner).toContainText(`Showing the latest ${real.events.length} events of a longer run`);
   await expect(page.getByTestId("total-tokens")).toHaveText("≥ 1,200");
-  await expect(page.getByText("Tokens (partial)")).toBeVisible();
+  await expect(page.getByText("Token budget (partial)")).toBeVisible();
 });
 
 test("the page sends no referrer", async ({ page }) => {
@@ -708,7 +708,7 @@ test("graph cards keep completed durations fixed while running elapsed time adva
 });
 
 test("goal expands and phase remaining work opens dismissible history", async ({ page }) => {
-  await page.goto("/?run=r3");
+  await page.goto(`${base}/?run=r3`);
   const goal = page.getByRole("heading", { level: 1 }).getByRole("button");
   await expect(goal).toHaveAttribute("aria-expanded", "false");
   await goal.click();
