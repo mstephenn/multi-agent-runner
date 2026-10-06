@@ -239,7 +239,7 @@ pnpm test:live                 # opt-in, spends tokens
 - History is per repository, in `<repo>/.mar` (in the parent folder for workspaces), and disappears if that folder is deleted.
 - Verify gates only run when `verify` is configured; otherwise nothing checks that a task's changes build or pass tests.
 - Codex tier models default to Codex's built-in default until set in `.mar.json`; your own Codex config is ignored.
-- In workspace mode, a task's read-only view of another repo is a checkout of that repo as it was when the run (or phase) started; it does not yet include work from tasks it depends on in that other repo (fix in progress).
+- In workspace mode, a task's read-only view of another repo reflects the finished work of the tasks it depends on in that repo; tasks with no such dependency see that repo as it was when the run (or phase) started. Sibling repos are for reading contracts only: workers are told not to import from them, and a worker that modifies a sibling checkout has the change detected and reverted.
 - The live path (real Claude and Codex) is not exercised in CI; `pnpm test:live` is manual and opt-in.
 - Under `/tmp` and other temp directories the Codex sandbox treats the temp dir as writable (see workspaces).
 

@@ -12,7 +12,7 @@ export interface WorkspacePrompt {
 
 const workspaceNote = (w: WorkspacePrompt, task: TaskSpec): string => {
   if (w.repo !== undefined && w.siblings?.length)
-    return `\nWorkspace: you are working in repo \`${w.repo}\` (your cwd). Other repos of this project are available READ-ONLY at ${w.siblings.map((n) => `\`../${n}\``).join(", ")} \u2014 read them for contracts; do not modify them.\n`;
+    return `\nWorkspace: you are working in repo \`${w.repo}\` (your cwd). Other repos of this project are available READ-ONLY at ${w.siblings.map((n) => `\`../${n}\``).join(", ")} \u2014 read them for contracts; do not modify them. Sibling repos reflect the finished work of the tasks you depend on. Use them ONLY to read contracts (function signatures, API shapes, types); do NOT import or require files from a sibling repo \u2014 your repo must remain self-contained and its own tests must pass without the sibling present.\n`;
   if (w.all?.length)
     return `\nWorkspace: your cwd holds one read-only checkout per repo of this project (${w.all.map((n) => `\`${n}\``).join(", ")}).${task.repo ? ` This task concerns repo \`${task.repo}\`.` : ""} Do not modify anything.\n`;
   return "";

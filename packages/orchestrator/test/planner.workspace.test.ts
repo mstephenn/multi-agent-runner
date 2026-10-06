@@ -29,6 +29,7 @@ describe("planGoal in a workspace", () => {
     expect(prompt).toMatch(/dependsOn/);
     expect(prompt).toMatch(/`paths` are relative to the task's repo/);
     expect(prompt).toMatch(/may omit `repo`/);
+    expect(prompt).toContain("state the exact contract (names, parameters, return values) in the dependent task's goal; do not assume the dependent will import it.");
   });
   it("re-plans carry the workspace rules too", async () => {
     const { f, p } = plan(() => res({ tasks: [W("p2-a", "web")], remaining: "" }), { phase: 2, takenIds: new Set(["p1-a"]), externalIds: new Set(["p1-a"]) });
@@ -39,6 +40,7 @@ describe("planGoal in a workspace", () => {
     const f = fakeAdapter((() => res({ tasks: [W("p1-a")] })) as never);
     await planGoal({ goal: "g", repoMap: "a.ts", adapter: f.adapter, model: null, cwd: "/r" });
     expect(f.calls[0].prompt).not.toContain("Workspace repos");
+    expect(f.calls[0].prompt).not.toContain("exact contract");
   });
   it("accepts per-repo writers (parallel with identical paths) and read-only tasks without repo", async () => {
     const { p } = plan(() => res({ tasks: [W("p1-a", "api", { paths: ["src/**"] }), W("p1-b", "web", { paths: ["src/**"] }), { id: "p1-r", role: "researcher", runtime: "claude", tier: "low", goal: "look" }] }));

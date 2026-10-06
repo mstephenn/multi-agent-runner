@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, readlinkSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Store } from "../../server/src/store.js";
 import { parseDag } from "@mar/core";
@@ -99,6 +99,9 @@ describe("runDag in a workspace", () => {
     expect(a.extraDirs?.map((d) => d.slice(d.lastIndexOf("/") + 1)).sort()).toEqual(["docs", "web"]);
     expect(a.prompt).toContain("Workspace: you are working in repo `api` (your cwd).");
     expect(a.prompt).toContain("READ-ONLY at `../docs`, `../web`");
+    expect(a.prompt).toContain("Sibling repos reflect the finished work of the tasks you depend on. Use them ONLY to read contracts (function signatures, API shapes, types); do NOT import or require files from a sibling repo");
+    expect(a.prompt).toContain("its own tests must pass without the sibling present");
+    expect(h.f.calls.find((c) => c.taskId === "r")!.prompt).not.toContain("Sibling repos reflect");
     expect(h.f.calls.find((c) => c.taskId === "r")!.extraDirs).toBeUndefined();
     expect(h.f.calls.find((c) => c.taskId === "r")!.prompt).not.toContain("you are working in repo");
   });
@@ -109,6 +112,7 @@ describe("runDag in a workspace", () => {
     const a = h.f.calls[0];
     expect(a.extraDirs).toBeUndefined();
     expect(a.prompt).not.toContain("Workspace:");
+    expect(a.prompt).not.toContain("Sibling repos reflect");
   });
   it("a sibling modified by a writer is reported (sibling_modified), reverted, and the task still succeeds in warn mode", async () => {
     const h = harness([T("a", { repo: "api" })], (i) => {
@@ -139,5 +143,84 @@ describe("runDag in a workspace", () => {
     expect(await runDag(h.deps)).toEqual({ a: "done" });
     expect(branches(h.repos[0].path)).toEqual(["mar/r/a"]);
     expect(h.f.calls[0].extraDirs).toBeUndefined(); // nothing to be a sibling
+  });
+  describe("sibling views include cross-repo dependency work", () => {
+    const worktreeCount = (repo: string) => g(repo, "worktree", "list", "--porcelain").split("\n").filter((l) => l.startsWith("worktree ")).length;
+    it("the dependent's sibling symlink resolves to a checkout containing the upstream task's committed file; unrelated siblings stay shared", async () => {
+      const seen: Record<string, string> = {};
+      const h = harness(
+        [T("p1-api", { repo: "api" }), T("p1-web", { repo: "web", dependsOn: ["p1-api"] }), T("p1-docs", { repo: "docs" })],
+        (i) => {
+          if (i.taskId === "p1-api") writeFileSync(join(i.cwd, "users.ts"), "export const getUser = 1;\n");
+          if (i.taskId === "p1-web") {
+            seen.api = readFileSync(join(i.cwd, "..", "api", "users.ts"), "utf8");
+            seen.apiLink = realpathSync(join(i.cwd, "..", "api"));
+            seen.docsLink = readlinkSync(join(i.cwd, "..", "docs"));
+            seen.extra = (i.extraDirs ?? []).map((d) => d.slice(d.lastIndexOf("/") + 1)).sort().join(",");
+            seen.extraIsLink = String((i.extraDirs ?? []).every((d) => lstatSync(d).isSymbolicLink()));
+          }
+          return ok();
+        },
+        { concurrency: 1 },
+      );
+      expect(await runDag(h.deps)).toEqual({ "p1-api": "done", "p1-web": "done", "p1-docs": "done" });
+      expect(seen.api).toContain("getUser");
+      expect(seen.apiLink).not.toContain(".shared");
+      expect(seen.docsLink).toContain(".shared");
+      expect(seen.extra).toBe("api,docs");
+      expect(seen.extraIsLink).toBe("true");
+      for (const r of h.repos) expect(worktreeCount(r.path)).toBe(1);
+      expect(branches(h.repos[0].path)).toEqual(["mar/r/p1-api"]);
+      expect(existsSync(join(h.root, ".mar", "worktrees", "r"))).toBe(false);
+    });
+    it("transitive cross-repo dependencies count (web -> docs -> api)", async () => {
+      let sawApi = false;
+      const h = harness(
+        [T("a", { repo: "api" }), T("d", { repo: "docs", dependsOn: ["a"] }), T("w", { repo: "web", dependsOn: ["d"] })],
+        (i) => {
+          if (i.taskId === "a") writeFileSync(join(i.cwd, "a.txt"), "A");
+          if (i.taskId === "d") writeFileSync(join(i.cwd, "d.txt"), "D");
+          if (i.taskId === "w") sawApi = existsSync(join(i.cwd, "..", "api", "a.txt")) && existsSync(join(i.cwd, "..", "docs", "d.txt"));
+          return ok();
+        },
+      );
+      expect(await runDag(h.deps)).toEqual({ a: "done", d: "done", w: "done" });
+      expect(sawApi).toBe(true);
+    });
+    it("a read-only task with a writer ancestor also sees the dependency work in its other-repo view", async () => {
+      let saw: boolean | undefined;
+      const h = harness(
+        [T("a", { repo: "api" }), T("rev", { role: "reviewer", repo: "web", dependsOn: ["a"] })],
+        (i) => {
+          if (i.taskId === "a") writeFileSync(join(i.cwd, "a.txt"), "A");
+          else saw = existsSync(join(i.cwd, "..", "api", "a.txt"));
+          return ok();
+        },
+      );
+      expect(await runDag(h.deps)).toEqual({ a: "done", rev: "done" });
+      expect(saw).toBe(true);
+      for (const r of h.repos) expect(worktreeCount(r.path)).toBe(1);
+    });
+    it("a failing task leaves git worktree list clean in every repo", async () => {
+      const h = harness(
+        [T("a", { repo: "api" }), T("w", { repo: "web", dependsOn: ["a"] })],
+        (i) => { if (i.taskId === "a") writeFileSync(join(i.cwd, "a.txt"), "A"); return i.taskId === "w" ? new Error("boom") : ok(); },
+      );
+      expect(await runDag(h.deps)).toEqual({ a: "done", w: "failed" });
+      for (const r of h.repos) expect(worktreeCount(r.path)).toBe(1);
+      expect(existsSync(join(h.root, ".mar", "worktrees", "r"))).toBe(false);
+    });
+    it("a missing dependency branch fails the task with a message naming repo and dependency", async () => {
+      const h = harness(
+        [T("a", { repo: "api" }), T("w", { repo: "web", dependsOn: ["a"] })],
+        (i) => { if (i.taskId === "a") writeFileSync(join(i.cwd, "a.txt"), "A"); return ok(); },
+      );
+      const real = h.worktrees.create.bind(h.worktrees);
+      h.deps.worktrees = { ...h.worktrees, create: async (id: string, deps?: string[], ctx?: Parameters<typeof real>[2]) => { if (id === "w") await g(h.repos[0].path, "branch", "-D", "mar/r/a"); return real(id, deps, ctx); } } as typeof h.deps.worktrees;
+      const out = await runDag(h.deps);
+      expect(out).toEqual({ a: "done", w: "failed" });
+      expect(h.store.taskStatuses("r").find((s) => s.task_id === "w")!.detail).toMatch(/repo api.*dependency a.*not found/);
+      for (const r of h.repos) expect(worktreeCount(r.path)).toBe(1);
+    });
   });
 });

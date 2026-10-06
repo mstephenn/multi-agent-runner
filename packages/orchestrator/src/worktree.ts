@@ -125,6 +125,12 @@ export interface CreateCtx {
   repo?: string;
   /** Also expose the other repos as read-only symlinks next to the task's repo worktree. */
   siblings?: boolean;
+  /**
+   * Workspace mode, with `siblings`: per OTHER repo, the finished tasks (of that repo) the new task depends on, directly or
+   * transitively. That repo's sibling view is then a per-task detached checkout with their branches merged in,
+   * instead of the shared checkout.
+   */
+  siblingDeps?: Record<string, string[]>;
 }
 
 export interface Worktrees {
