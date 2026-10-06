@@ -1,9 +1,9 @@
-import type { StoredEvent } from "@mar/core";
+import type { Dag, StoredEvent } from "@mar/core";
 
 export type AgentStatus = "pending" | "running" | "done" | "failed" | "blocked";
 export type AgentView = {
   id: string; role?: string; runtime?: string; tier?: string; status: AgentStatus; detail?: string;
-  tokens: number | null; costUsd: number | null; startedAt?: number; endedAt?: number; unsafe: boolean;
+  tokens: number | null; costUsd: number | null; startedAt?: number; endedAt?: number; unsafe: boolean; phase?: number;
 };
 export type FlowEdge = { from: string; to: string; key: string; version: number; tokens: number };
 // One segment per attempt (a resumed/retried task yields several); the latest attempt is the only one that can be open-ended.
@@ -232,4 +232,29 @@ export function isRunActive(lanes: Lane[], agents: AgentView[], conn: { error: s
   if (conn.notFound || conn.error !== null) return false;
   const status = new Map(agents.map((a) => [a.id, a.status]));
   return lanes.some((l) => l.end === null && !TERMINAL.includes(status.get(l.id) ?? "running"));
+}
+
+export type PhaseInfo = { phase: number; maxPhases: number | null; remaining: string };
+// The latest phase_started event: which phase the run is in and the work the planner says is left after it.
+export function derivePhase(events: StoredEvent[]): PhaseInfo | null {
+  let out: PhaseInfo | null = null;
+  for (const ev of events) {
+    if (ev.type !== "phase_started") continue;
+    const p = rec(ev.payload);
+    const phase = num(p.phase);
+    if (phase === undefined) continue;
+    out = { phase, maxPhases: num(p.maxPhases) ?? null, remaining: str(p.remaining) ?? "" };
+  }
+  return out;
+}
+
+// Number of distinct phases in the plan (0 without a plan); tasks without `phase` belong to phase 1.
+export function planPhases(plan: Dag | null): number {
+  return plan ? new Set(plan.tasks.map((t) => t.phase ?? 1)).size : 0;
+}
+
+// "P<n>" when the task is in a later phase or the plan has several phases; null for plain single-phase runs.
+export function phaseBadge(phase: number | undefined, phaseCount: number): string | null {
+  const n = phase ?? 1;
+  return n > 1 || phaseCount > 1 ? `P${n}` : null;
 }

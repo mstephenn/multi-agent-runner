@@ -261,3 +261,32 @@ describe("final-review fixes", () => {
     expect(budgetUsage(5, undefined)).toBeNull();
   });
 });
+
+describe("phases", () => {
+  it("derivePhase reads the latest phase_started (null without one, tolerant of junk)", async () => {
+    const { derivePhase } = await import("../src/derive.js");
+    expect(derivePhase([e("a", "task_started")])).toBeNull();
+    const p = derivePhase([
+      e(null, "phase_started", { phase: 1, maxPhases: 5, tasks: ["p1-a"], remaining: "later" }),
+      e(null, "phase_started", { phase: 2, maxPhases: 5, tasks: ["p2-a"], remaining: "docs and UI" }),
+    ]);
+    expect(p).toEqual({ phase: 2, maxPhases: 5, remaining: "docs and UI" });
+    expect(derivePhase([e(null, "phase_started", { phase: "x" })])).toBeNull();
+    expect(derivePhase([e(null, "phase_started", { phase: 3 })])).toEqual({ phase: 3, maxPhases: null, remaining: "" });
+  });
+  it("planPhases counts distinct phases (tasks without phase = 1)", async () => {
+    const { planPhases } = await import("../src/derive.js");
+    expect(planPhases(null)).toBe(0);
+    expect(planPhases({ tasks: [{ id: "a" }, { id: "b", phase: 1 }] } as any)).toBe(1);
+    expect(planPhases({ tasks: [{ id: "a" }, { id: "b", phase: 2 }] } as any)).toBe(2);
+  });
+  it("phaseBadge shows P<n> only when phase > 1 or the plan has several phases", async () => {
+    const { phaseBadge } = await import("../src/derive.js");
+    expect(phaseBadge(undefined, 1)).toBeNull();
+    expect(phaseBadge(1, 1)).toBeNull();
+    expect(phaseBadge(2, 2)).toBe("P2");
+    expect(phaseBadge(1, 2)).toBe("P1");
+    expect(phaseBadge(undefined, 2)).toBe("P1");
+    expect(phaseBadge(3, 1)).toBe("P3");
+  });
+});

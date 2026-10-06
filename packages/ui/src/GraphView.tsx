@@ -2,12 +2,12 @@ import { memo, useEffect, useMemo, useRef } from "react";
 import { Background, Handle, Position, ReactFlow, useReactFlow, type Edge, type Node, type NodeProps } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import type { Dag } from "@mar/core";
-import type { AgentView, FlowEdge } from "./derive.js";
+import { phaseBadge, planPhases, type AgentView, type FlowEdge } from "./derive.js";
 import { fmtTokens, STATUS_ICON } from "./fmt.js";
 import { depths, positions } from "./layout.js";
 import { nodeIn, pulseRing, reducedMotion, statusFlash } from "./motion.js";
 
-type NodeData = { agent: AgentView; selected: boolean };
+type NodeData = { agent: AgentView; selected: boolean; phaseCount: number };
 
 const AgentNode = memo(function AgentNode({ data }: NodeProps<Node<NodeData>>) {
   const a = data.agent;
@@ -31,6 +31,7 @@ const AgentNode = memo(function AgentNode({ data }: NodeProps<Node<NodeData>>) {
           {a.runtime && <span className={`badge rt-${a.runtime}`}>{a.runtime}</span>}
           {a.tier && <span className="badge tier">{a.tier}</span>}
           {a.role && <span className="role">{a.role}</span>}
+          {phaseBadge(a.phase, data.phaseCount) && <span className="badge phase-tag" data-testid={`phase-${a.id}`}>{phaseBadge(a.phase, data.phaseCount)}</span>}
         </span>
         <span className="agent-foot">
           <span className="status-text" data-status={a.status}><span aria-hidden="true">{STATUS_ICON[a.status]}</span> {a.status}</span>
@@ -69,7 +70,7 @@ export function GraphView({ agents, plan, flow, selected, onSelect }: Props) {
     const pos = positions(ids, depths(ids, plan, flow));
     return agents.map((agent) => ({
       id: agent.id, type: "agent", position: pos.get(agent.id) ?? { x: 0, y: 0 },
-      data: { agent, selected: agent.id === selected },
+      data: { agent, selected: agent.id === selected, phaseCount: planPhases(plan) },
     }));
   }, [agents, plan, flow, selected]);
 

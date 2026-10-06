@@ -217,3 +217,7 @@ pre.io { max-height: 320px; overflow: auto; white-space: pre-wrap; word-break: b
 .agent { position: relative; }
 .pulse-ring { position: absolute; inset: -2px; border-radius: 10px; border: 2px solid var(--accent); pointer-events: none; opacity: 0.35; }
 @media (prefers-reduced-motion: reduce) { .pulse-ring { display: none; } }
+
+.phase { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
+.phase-badge, .phase-tag { color: var(--muted); }
+.phase-remaining { color: var(--muted); font-size: 12px; max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

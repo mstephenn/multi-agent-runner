@@ -34,6 +34,17 @@ test.beforeAll(async () => {
     store.appendEvent({ run_id: "r2", task_id: "big", agent_id: "big", type: "tool_call", payload: { name: "Read", input: { file_path: `src/f${i}.ts` } } });
     store.appendEvent({ run_id: "r2", task_id: "big", agent_id: "big", type: "tool_result", payload: { name: "Read", output: `content ${i}\nline2`, isError: false } });
   }
+  // A two-phase run: the second phase builds on the first.
+  store.createRun("r3", "Two phase goal", "/tmp/repo");
+  const tk = (id: string, phase: number) => ({ id, role: "implementer", runtime: "codex", tier: "mid", goal: id, dependsOn: [], needs: phase > 1 ? ["p1-api/summary"] : [], paths: [], phase });
+  store.savePlan("r3", { tasks: [tk("p1-api", 1), tk("p2-ui", 2)] });
+  store.setTaskStatus("r3", "p1-api", "done"); store.setTaskStatus("r3", "p2-ui", "running");
+  store.appendEvent({ run_id: "r3", task_id: null, agent_id: null, type: "phase_started", payload: { phase: 1, maxPhases: 5, tasks: ["p1-api"], remaining: "wire the UI" } });
+  store.appendEvent({ run_id: "r3", task_id: "p1-api", agent_id: "p1-api", type: "task_started", payload: { role: "implementer", runtime: "codex", tier: "mid" } });
+  store.appendEvent({ run_id: "r3", task_id: "p1-api", agent_id: "p1-api", type: "task_finished", payload: { tokens: 10 } });
+  store.appendEvent({ run_id: "r3", task_id: null, agent_id: null, type: "phase_finished", payload: { phase: 1, done: 1, failed: 0, blocked: 0, tokens: 10 } });
+  store.appendEvent({ run_id: "r3", task_id: null, agent_id: null, type: "phase_started", payload: { phase: 2, maxPhases: 5, tasks: ["p2-ui"], remaining: "docs and release notes" } });
+  store.appendEvent({ run_id: "r3", task_id: "p2-ui", agent_id: "p2-ui", type: "task_started", payload: { role: "implementer", runtime: "codex", tier: "mid" } });
   srv = await startServer(store, { port: 0, staticDir: dist });
   base = `http://127.0.0.1:${srv.port}`;
 });
@@ -604,3 +615,16 @@ for (const scheme of ["light", "dark"] as const) {
     await ctx.close();
   });
 }
+
+test("two-phase run: P<n> badges on nodes and Phase 2/5 with the remaining text in the header", async ({ page }) => {
+  await page.goto(`${base}/?run=r3`);
+  await expect(page.getByTestId("phase-indicator")).toContainText("Phase 2/5");
+  await expect(page.getByTestId("phase-remaining")).toHaveText("docs and release notes");
+  await expect(page.getByTestId("node-p1-api").getByTestId("phase-p1-api")).toHaveText("P1");
+  await expect(page.getByTestId("node-p2-ui").getByTestId("phase-p2-ui")).toHaveText("P2");
+  // single-phase runs show neither badge nor indicator
+  await page.goto(`${base}/?run=r1`);
+  await expect(page.getByTestId("node-impl")).toBeVisible();
+  await expect(page.getByTestId("phase-indicator")).toHaveCount(0);
+  await expect(page.locator(".phase-tag")).toHaveCount(0);
+});

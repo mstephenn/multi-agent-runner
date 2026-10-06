@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { fmtCost, fmtDuration, fmtTokens } from "./fmt.js";
-import { totals, type AgentView } from "./derive.js";
+import { totals, type AgentView, type PhaseInfo } from "./derive.js";
 import { countTo } from "./motion.js";
 import type { Conn } from "./useRun.js";
 
@@ -32,7 +32,7 @@ function StopButton({ runId }: { runId: string }) {
   );
 }
 
-type Props = { runs: RunInfo[]; run: RunInfo | undefined; runId: string; onRun: (id: string) => void; agents: AgentView[]; elapsedMs: number; conn: Conn; partial?: boolean };
+type Props = { runs: RunInfo[]; run: RunInfo | undefined; runId: string; onRun: (id: string) => void; agents: AgentView[]; elapsedMs: number; conn: Conn; partial?: boolean; phase?: PhaseInfo | null };
 
 // Displays `value`, tweening from the previous value whenever it changes (no tween on first render).
 function useCountUp(value: number): number {
@@ -46,7 +46,7 @@ function useCountUp(value: number): number {
   return shown;
 }
 
-export function Header({ runs, run, runId, onRun, agents, elapsedMs, conn, partial = false }: Props) {
+export function Header({ runs, run, runId, onRun, agents, elapsedMs, conn, partial = false, phase = null }: Props) {
   const t = totals(agents);
   const shownTokens = useCountUp(t.tokens);
   const lead = partial ? "≥ " : "";
@@ -60,6 +60,12 @@ export function Header({ runs, run, runId, onRun, agents, elapsedMs, conn, parti
           {!run && <option value={runId}>{runId}</option>}
         </select>
         <h1 title={run?.goal}>{run?.goal ?? "Run"}</h1>
+        {phase && (
+          <span className="phase" data-testid="phase-indicator" title={phase.remaining ? `Remaining after this phase: ${phase.remaining}` : "This phase completes the goal"}>
+            <span className="badge phase-badge">Phase {phase.phase}{phase.maxPhases !== null ? `/${phase.maxPhases}` : ""}</span>
+            {phase.remaining && <span className="phase-remaining" data-testid="phase-remaining">{phase.remaining}</span>}
+          </span>
+        )}
         {agents.some((a) => a.unsafe) && <span className="badge unsafe" role="status" title="Codex tasks do not map unsafe mode">unsafe mode (Claude workers)</span>}
       </div>
       <dl className="stats">
