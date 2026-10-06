@@ -3,6 +3,8 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { startServer } from "../../server/src/server.js";
 import { Store } from "../../server/src/store.js";
+import { failedRun, workspaceRun } from "./fixtures/board.js";
+import { serveFixture } from "./fixtures/serve.js";
 
 const fixture = JSON.parse(readFileSync(fileURLToPath(new URL("./fixtures/run.json", import.meta.url)), "utf8"));
 const dist = fileURLToPath(new URL("../dist", import.meta.url));
@@ -52,10 +54,19 @@ test.afterAll(async () => { await srv.close(); });
 
 const flowEdge = (page: import("@playwright/test").Page) => page.locator(".react-flow__edge.animated");
 
-test.beforeEach(async ({ page }) => { await page.goto(`${base}/?run=r1`); });
+// The Board is the default tab now; most of the older tests below exercise the graph, so they start on it (a saved choice wins).
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => { try { if (!localStorage.getItem("mar.main.tab")) localStorage.setItem("mar.main.tab", "graph"); } catch { /* storage blocked */ } });
+  await page.goto(`${base}/?run=r1`);
+});
+type Pg = import("@playwright/test").Page;
+// Start from the default tab (no saved choice) on the first load only, so a reload can still prove persistence.
+const freshTabs = (page: Pg) => page.addInitScript(() => { try { if (!sessionStorage.getItem("fresh")) { sessionStorage.setItem("fresh", "1"); localStorage.removeItem("mar.main.tab"); } } catch { /* storage blocked */ } });
+const openTab = (page: Pg, name: string | RegExp) => page.getByRole("tab", typeof name === "string" ? { name, exact: true } : { name }).click();
 
 const openActivity = async (page: import("@playwright/test").Page, node = "impl") => {
-  await page.getByTestId(`node-${node}`).click();
+  await openTab(page, "Board");
+  await page.getByTestId(`row-${node}`).getByRole("button").click();
   await page.getByRole("tab", { name: "Activity" }).click();
   await expect(page.locator(".feed-list")).toBeVisible();
 };
@@ -89,7 +100,8 @@ test("a task without usage shows n/a, never NaN", async ({ page }) => {
 
 test("selecting rev shows the injected key with its token count", async ({ page }) => {
   await page.getByTestId("node-rev").click();
-  await expect(page.getByRole("tab", { name: "Context" })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("tab", { name: "Activity" })).toHaveAttribute("aria-selected", "true"); // a running task opens on Activity
+  await page.getByRole("tab", { name: "Context" }).click();
   const row = page.getByRole("row", { name: /impl\/summary/ });
   await expect(row).toContainText("v1");
   await expect(row).toContainText("42");
@@ -102,7 +114,7 @@ test("selecting rev shows the injected key with its token count", async ({ page 
 test("keyboard: arrow keys switch inspector tabs", async ({ page }) => {
   await page.getByTestId("node-rev").getByRole("button").focus();
   await page.keyboard.press("Enter");
-  await page.getByRole("tab", { name: "Context" }).focus();
+  await page.getByRole("tab", { name: "Context" }).click();
   await page.keyboard.press("ArrowRight");
   await expect(page.getByRole("tab", { name: "Activity" })).toHaveAttribute("aria-selected", "true");
 });
@@ -119,10 +131,14 @@ test("replay scrubber hides later events in every view; Live restores them", asy
   const snap = await (await page.request.get(`${base}/api/runs/r1`)).json();
   const read = snap.events.find((e: { type: string }) => e.type === "blackboard_read");
   await expect(flowEdge(page)).toHaveCount(1);
+  await openTab(page, "Timeline");
   await page.getByLabel("Replay").fill(String(read.ts - 1));
-  await expect(flowEdge(page)).toHaveCount(0);
   await expect(page.getByRole("status").filter({ hasText: "Replaying" })).toBeVisible();
+  await openTab(page, "Graph"); // the replay position is shared by every tab
+  await expect(flowEdge(page)).toHaveCount(0);
+  await openTab(page, "Timeline");
   await page.getByRole("button", { name: "Live" }).click();
+  await openTab(page, "Graph");
   await expect(flowEdge(page)).toHaveCount(1);
 });
 
@@ -143,13 +159,14 @@ test("stop needs a confirm click and sends x-mar", async ({ page }) => {
   expect(reqs).toEqual(["POST 1"]);
 });
 
-test("layout: at 1280x800 the graph fills most of the viewport and the timeline stays small", async ({ page }) => {
+test("layout: at 1280x800 the active tab fills the space under the header and the page does not scroll", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
-  const graph = await page.locator(".graph").boundingBox();
-  const timeline = await page.locator(".timeline").boundingBox();
-  expect(graph!.height).toBeGreaterThanOrEqual(800 * 0.4);
-  expect(timeline!.height).toBeLessThanOrEqual(800 * 0.3);
-  expect(graph!.height).toBeGreaterThan(timeline!.height);
+  for (const name of ["Board", "Graph", "Timeline"]) {
+    await openTab(page, name);
+    const body = await page.locator(".tab-body").boundingBox();
+    expect(body!.height).toBeGreaterThanOrEqual(800 * 0.6);
+    expect(await page.evaluate(() => document.documentElement.scrollHeight - document.documentElement.clientHeight)).toBeLessThanOrEqual(1);
+  }
   await page.screenshot({ path: "test-results/layout-1280.png" });
 });
 
@@ -224,7 +241,7 @@ test("a truncated snapshot shows the banner and marks header totals as partial",
   await expect(banner).toHaveAttribute("role", "status");
   await expect(banner).toContainText(`Showing the latest ${real.events.length} events of a longer run`);
   await expect(page.getByTestId("total-tokens")).toHaveText("≥ 1,200");
-  await expect(page.getByText("Token budget (partial)")).toBeVisible();
+  await expect(page.getByRole("group", { name: "Run status" })).toHaveAttribute("title", /partial/);
 });
 
 test("the page sends no referrer", async ({ page }) => {
@@ -265,6 +282,7 @@ test("reduced motion: no animation styles are ever applied", async ({ browser })
   const ctx = await browser.newContext({ reducedMotion: "reduce" });
   const page = await ctx.newPage();
   await page.goto(`${base}/?run=r1`);
+  await openTab(page, "Graph");
   await expect(page.getByTestId("node-impl")).toBeVisible();
   await page.getByTestId("node-impl").click();
   await expect(page.locator(".inspector")).toBeVisible();
@@ -324,7 +342,7 @@ test("activity: expanding a row reveals the full output and the input JSON", asy
 
 test("activity: Errors chip shows only the failing step; counts are right; errors start expanded", async ({ page }) => {
   await openActivity(page);
-  const chip = (n: string) => page.getByRole("button", { name: new RegExp(`^${n}`) });
+  const chip = (n: string) => page.locator(".inspector").getByRole("button", { name: new RegExp(`^${n}`) }); // the board has its own All chip
   await expect(chip("All")).toContainText("7");
   await expect(chip("Messages")).toContainText("1");
   await expect(chip("Tools")).toContainText("6");
@@ -405,12 +423,12 @@ test("activity: screenshot of the expanded feed", async ({ page }) => {
   await page.screenshot({ path: "test-results/activity-1280.png" });
 });
 
-// ---- bottom dock: tabs, time axis, playhead, lanes, replay ----
+// ---- timeline tab: time axis, playhead, lanes, replay ----
 type Ev = { id: number; run_id: string; task_id: string; agent_id: string; ts: number; type: string; payload: Record<string, unknown> };
 
 // Serve r1 with its timestamps stretched over `spanMs` (ending a few seconds ago, so rev is still running up to "now"),
 // optionally with extra lanes: a long-named done task, a retried task and a failed one (or `many` generated lanes).
-async function mockRun(page: import("@playwright/test").Page, opts: { spanMs?: number; extra?: "rich" | number } = {}) {
+async function mockRun(page: import("@playwright/test").Page, opts: { spanMs?: number; extra?: "rich" | number; tab?: string } = {}) {
   const spanMs = opts.spanMs ?? 180_000;
   const real = await (await page.request.get(`${base}/api/runs/r1`)).json();
   const a: number = real.events[0].ts, b: number = real.events.at(-1).ts;
@@ -442,45 +460,11 @@ async function mockRun(page: import("@playwright/test").Page, opts: { spanMs?: n
   await page.route("**/api/runs/r1?*", (r) => r.fulfill({ json: snap }));
   await page.route("**/api/runs/r1", (r) => r.fulfill({ json: snap }));
   await page.goto(`${base}/?run=r1`);
+  await openTab(page, opts.tab ?? "Timeline");
   const read = events.find((e) => e.type === "blackboard_read" && e.task_id === "rev")!;
   return { t0: Math.min(...events.filter((e) => /^task_started$/.test(e.type)).map((e) => e.ts)), readTs: read.ts, spanMs };
 }
-const tabs = (page: import("@playwright/test").Page) => page.getByRole("tablist", { name: "Bottom panel" });
 const label = (page: import("@playwright/test").Page) => page.getByTestId("playhead-label");
-
-test("dock tabs: Timeline is the default; Blackboard (N) shows entries and readers; arrow keys, Home and End switch; the choice survives a reload", async ({ page }) => {
-  const timeline = tabs(page).getByRole("tab", { name: "Timeline" }), bb = tabs(page).getByRole("tab", { name: /^Blackboard \(1\)$/ });
-  await expect(timeline).toHaveAttribute("aria-selected", "true");
-  await expect(timeline).toHaveAttribute("tabindex", "0");
-  await expect(bb).toHaveAttribute("tabindex", "-1");
-  await expect(page.locator("#dock-panel-timeline")).toHaveAttribute("role", "tabpanel");
-  await bb.click();
-  await expect(bb).toHaveAttribute("aria-selected", "true");
-  const row = page.getByRole("region", { name: "Blackboard" }).getByRole("row", { name: /impl\/summary/ });
-  await expect(row).toContainText("rev");
-  await expect(row).toContainText("Added GET /health returning ok.");
-  await page.reload();
-  await expect(tabs(page).getByRole("tab", { name: /^Blackboard/ })).toHaveAttribute("aria-selected", "true");
-  await tabs(page).getByRole("tab", { name: /^Blackboard/ }).focus();
-  await page.keyboard.press("ArrowLeft");
-  await expect(tabs(page).getByRole("tab", { name: "Timeline" })).toHaveAttribute("aria-selected", "true");
-  await expect(tabs(page).getByRole("tab", { name: "Timeline" })).toBeFocused();
-  await page.keyboard.press("End");
-  await expect(tabs(page).getByRole("tab", { name: /^Blackboard/ })).toBeFocused();
-  await page.keyboard.press("Home");
-  await expect(tabs(page).getByRole("tab", { name: "Timeline" })).toHaveAttribute("aria-selected", "true");
-  await page.keyboard.press("ArrowRight");
-  await expect(page.locator("#dock-panel-blackboard")).toBeVisible();
-  await expect(page.locator(".bb-toggle")).toHaveCount(0);
-});
-
-test("dock tabs work when localStorage is unavailable", async ({ page }) => {
-  await page.addInitScript(() => { Object.defineProperty(window, "localStorage", { get() { throw new Error("blocked"); } }); });
-  await page.reload();
-  await tabs(page).getByRole("tab", { name: /^Blackboard/ }).click();
-  await expect(page.getByRole("region", { name: "Blackboard" })).toBeVisible();
-  await expect(page.locator("body")).not.toContainText(/NaN|undefined/);
-});
 
 test("axis: labelled human ticks; lane labels show the FULL agent id, never an ellipsis", async ({ page }) => {
   await mockRun(page, { extra: "rich" });
@@ -511,7 +495,6 @@ test("scrubber, axis and lanes share one x-scale; the scrubber moves the playhea
   expect(Math.abs(axis.width - scrub.width)).toBeLessThanOrEqual(1);
   expect(Math.abs(axis.x - lane.x)).toBeLessThanOrEqual(1);
   expect(Math.abs(axis.width - lane.width)).toBeLessThanOrEqual(1);
-  await expect(flowEdge(page)).toHaveCount(1);
   await expect(page.locator(".live-pill")).toBeVisible();
   const liveX = (await page.getByTestId("playhead").boundingBox())!.x;
   await page.getByLabel("Replay").fill(String(t0 + 90_000));
@@ -523,9 +506,13 @@ test("scrubber, axis and lanes share one x-scale; the scrubber moves the playhea
   await expect(page.locator(".live-pill")).toHaveCount(0);
   // a later event disappears from other views, then returns on Live
   await page.getByLabel("Replay").fill(String(readTs - 1));
+  await openTab(page, "Graph");
   await expect(flowEdge(page)).toHaveCount(0);
+  await openTab(page, "Timeline");
   await page.getByRole("button", { name: "Live" }).click();
+  await openTab(page, "Graph");
   await expect(flowEdge(page)).toHaveCount(1);
+  await openTab(page, "Timeline");
   await expect(page.getByRole("button", { name: "Live" })).toBeDisabled();
   await expect(page.locator(".live-pill")).toBeVisible();
   // keyboard: the slider steps with the arrow keys
@@ -542,6 +529,7 @@ test("scrubber, axis and lanes share one x-scale; the scrubber moves the playhea
 });
 
 test("clicking a lane label opens the Inspector for that agent; Enter on a bar does too", async ({ page }) => {
+  await openTab(page, "Timeline");
   await page.locator(".lane-label").filter({ has: page.locator(".lane-id", { hasText: /^rev$/ }) }).click();
   await expect(page.getByRole("complementary", { name: "Inspector for rev" })).toBeVisible();
   await page.getByRole("button", { name: "Close inspector" }).click();
@@ -555,7 +543,8 @@ test("bar tooltip shows status and duration on focus and on hover", async ({ pag
   const bar = page.getByRole("button", { name: /^investigate_sow_sprint_plan, done/ });
   await bar.focus();
   const tip = page.getByRole("tooltip");
-  await expect(tip).toHaveText("investigate_sow_sprint_plan · done · started +3s · ended +1m 15s · took 1m 12s · 1 write · 1 read");
+  // The start offset depends on how far apart the store stamped the first fixture events (machine timing), so only the duration is exact.
+  await expect(tip).toHaveText(/^investigate_sow_sprint_plan · done · started \+\d+s · ended \+1m \d+s · took 1m 12s · 1 write · 1 read$/);
   await expect(bar).toHaveAttribute("aria-describedby", "tl-tip");
   await page.keyboard.press("Escape");
   await expect(tip).toHaveCount(0);
@@ -596,6 +585,7 @@ test("shimmer animates running bars with motion enabled and leaves no inline sty
   await rp.route("**/api/runs/r1?*", (r) => r.fulfill({ json: real }));
   await rp.route("**/api/runs/r1", (r) => r.fulfill({ json: real }));
   await rp.goto(`${base}/?run=r1`);
+  await rp.getByRole("tab", { name: "Timeline", exact: true }).click();
   await expect(rp.getByRole("button", { name: /^rev, running/ })).toBeVisible();
   await rp.waitForTimeout(400);
   for (const st of await rp.locator(".shimmer").evaluateAll((els) => els.map((e) => e.getAttribute("style") ?? ""))) expect(st).toBe("");
@@ -605,7 +595,7 @@ test("shimmer animates running bars with motion enabled and leaves no inline sty
   await ctx.close();
 });
 
-test("800px wide: the dock is usable and the page does not scroll horizontally", async ({ page }) => {
+test("800px wide: the timeline is usable and the page does not scroll horizontally", async ({ page }) => {
   await page.setViewportSize({ width: 800, height: 700 });
   await mockRun(page, { extra: "rich" });
   await expect(page.getByRole("button", { name: "Play" })).toBeVisible();
@@ -613,22 +603,19 @@ test("800px wide: the dock is usable and the page does not scroll horizontally",
   expect(await page.getByTestId("tick").count()).toBeGreaterThanOrEqual(2);
   await page.getByLabel("Replay").fill(String(Date.now() - 100_000));
   expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(1);
-  expect((await page.locator(".dock").boundingBox())!.height).toBeLessThanOrEqual(700 * 0.3 + 1);
   await page.screenshot({ path: "test-results/timeline-800.png" });
 });
 
-test("dock stays within 30% of the viewport with many lanes, scrolls inside, and keeps the axis visible", async ({ page }) => {
+test("timeline with many lanes scrolls inside its tab and keeps the axis visible", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await mockRun(page, { extra: 14 });
-  const dock = (await page.locator(".dock").boundingBox())!;
-  expect(dock.height).toBeLessThanOrEqual(800 * 0.3 + 1);
-  expect((await page.locator(".graph").boundingBox())!.height).toBeGreaterThanOrEqual(800 * 0.4);
+  const body = (await page.locator(".tab-body").boundingBox())!;
   const tl = page.locator(".timeline");
   expect(await tl.evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true);
   await tl.evaluate((el) => { el.scrollTop = el.scrollHeight; });
   const ax = (await page.locator(".tl-axis").boundingBox())!;
-  expect(ax.y).toBeGreaterThanOrEqual(dock.y);
-  expect(ax.y + ax.height).toBeLessThanOrEqual(dock.y + dock.height + 1);
+  expect(ax.y).toBeGreaterThanOrEqual(body.y);
+  expect(ax.y + ax.height).toBeLessThanOrEqual(body.y + body.height + 1);
   expect(await page.evaluate(() => document.documentElement.scrollHeight - document.documentElement.clientHeight)).toBeLessThanOrEqual(1);
 });
 
@@ -677,8 +664,11 @@ test("workspace repos and sibling warnings appear in task views", async ({ page 
   await expect(warnings).toContainText("1 more file not listed.");
 });
 
-test("graph controls filter tasks, recover from empty results, and toggle the minimap", async ({ page }) => {
+test("graph options menu filters tasks, recovers from empty results, and toggles the minimap (off by default)", async ({ page }) => {
   const controls = page.getByLabel("Graph controls");
+  await expect(controls).toHaveCount(0);
+  await expect(page.locator(".react-flow__minimap")).toHaveCount(0);
+  await page.getByRole("button", { name: "Graph options" }).click();
   await controls.getByLabel("Running / failed").check();
   await expect(page.getByTestId("node-impl")).toHaveCount(0);
   await expect(page.getByTestId("node-rev")).toBeVisible();
@@ -691,6 +681,7 @@ test("graph controls filter tasks, recover from empty results, and toggle the mi
   await controls.getByRole("button", { name: "Minimap" }).click();
   await expect(page.locator(".react-flow__minimap")).toHaveCount(0);
   await page.goto(`${base}/?run=r3`);
+  await page.getByRole("button", { name: "Graph options" }).click();
   await controls.getByLabel("Phase", { exact: true }).selectOption("2");
   await expect(page.getByTestId("node-p1-api")).toHaveCount(0);
   await expect(page.getByTestId("node-p2-ui")).toBeVisible();
@@ -725,4 +716,308 @@ test("goal expands and phase remaining work opens dismissible history", async ({
   await remaining.click();
   await goal.click();
   await expect(popover).toHaveCount(0);
+});
+
+// ---- task board, problems strip, tabs, answer, details (fixtures replicating real runs; served through page.route) ----
+const gotoWorkspace = async (page: Pg) => { await serveFixture(page, base, workspaceRun(Date.now())); await openTab(page, "Board"); await expect(page.getByTestId("row-p2-ws-fix")).toBeVisible(); };
+const gotoFailed = async (page: Pg) => { await serveFixture(page, base, failedRun(Date.now())); await openTab(page, "Board"); await expect(page.getByTestId("row-p1-ui")).toBeVisible(); };
+const rowIds = (page: Pg) => page.locator(".board-item").evaluateAll((els) => els.map((e) => (e as HTMLElement).dataset.testid!.replace("row-", "")));
+const overflowX = (page: Pg) => page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+
+test("board: the default tab has one row per task with what each is doing now", async ({ page }) => {
+  await freshTabs(page);
+  await serveFixture(page, base, workspaceRun(Date.now()));
+  await expect(page.getByRole("tab", { name: "Board", exact: true })).toHaveAttribute("aria-selected", "true");
+  await expect(page.locator(".board-item")).toHaveCount(6);
+  const now = (id: string) => page.getByTestId(`row-${id}`).locator(".c-now");
+  await expect(now("p2-ws-fix")).toHaveText("Read src/app.js (lines 1–80)");
+  await expect(now("p2-ws-docs")).toHaveText("Bash: node --test");
+  await expect(now("p1-route53")).toHaveText("Added GET /v2/routes backed by a Route53 client wrapper.");
+  await expect(page.getByTestId("row-p2-ws-fix").locator(".c-tok")).toHaveText("reported when done");
+  await expect(page.getByTestId("row-p1-route53").locator(".c-tok")).toHaveText("21,500");
+  await expect(page.getByTestId("row-p1-validate").locator(".repo-badge")).toHaveText("All repos");
+  await expect(page.getByTestId("row-p1-fe").locator(".repo-badge")).toHaveText("r101-frontend");
+  await expect(page.getByTestId("row-p1-review").locator(".rt-claude")).toHaveText("claude");
+  await expect(page.locator("body")).not.toContainText(/NaN|undefined/);
+  // long text is clipped with the full text in the title
+  await expect(now("p1-review")).toHaveAttribute("title", /^Two findings: the handler swallows Route53 errors/);
+});
+
+test("board: failed and blocked rows say why; phases are grouped with a summary and collapse", async ({ page }) => {
+  await gotoFailed(page);
+  await expect(page.getByTestId("row-p1-queue").locator(".c-now")).toHaveText("Timed out");
+  await expect(page.getByTestId("row-p1-ui").locator(".c-now")).toContainText("Dependency merge conflict");
+  await expect(page.getByTestId("row-p2-docs").locator(".c-now")).toHaveText("waiting on p1-queue, p1-ui");
+  const phase1 = page.getByRole("button", { name: /^Phase 1/ });
+  await expect(phase1).toContainText("· 2 failed · 2 done");
+  await expect(phase1).toHaveAttribute("aria-expanded", "true");
+  await phase1.click();
+  await expect(page.getByTestId("row-p1-queue")).toHaveCount(0);
+  await expect(page.getByTestId("row-p2-docs")).toBeVisible();
+  await expect(phase1).toHaveAttribute("aria-expanded", "false");
+});
+
+test("board: rows sort running, failed, blocked, pending, done within a phase", async ({ page }) => {
+  await gotoWorkspace(page);
+  expect(await rowIds(page)).toEqual(["p1-route53", "p1-fe", "p1-validate", "p1-review", "p2-ws-fix", "p2-ws-docs"]);
+  await gotoFailed(page);
+  expect(await rowIds(page)).toEqual(["p1-queue", "p1-ui", "p1-schema", "p1-api", "p2-docs"]); // failed first, then done by start time
+});
+
+test("board: status chips with counts and the search box filter the rows", async ({ page }) => {
+  await gotoWorkspace(page);
+  const chip = (n: string) => page.getByRole("button", { name: new RegExp(`^${n}\\b`) });
+  await expect(chip("All")).toContainText("6");
+  await expect(chip("Running")).toContainText("2");
+  await expect(chip("Failed")).toContainText("0");
+  await expect(chip("Done")).toContainText("4");
+  await chip("Running").click();
+  await expect(chip("Running")).toHaveAttribute("aria-pressed", "true");
+  expect(await rowIds(page)).toEqual(["p2-ws-fix", "p2-ws-docs"]);
+  await chip("All").click();
+  await page.getByPlaceholder("filter tasks…").fill("frontend");
+  expect(await rowIds(page)).toEqual(["p1-fe"]);
+  await page.getByPlaceholder("filter tasks…").fill("nothing-matches");
+  await expect(page.getByText("No tasks match.")).toBeVisible();
+  await page.getByPlaceholder("filter tasks…").fill("");
+  await chip("Done").click();
+  await expect(page.locator(".board-item")).toHaveCount(4);
+});
+
+test("board: rows are keyboard-focusable buttons; Enter selects and the row is highlighted", async ({ page }) => {
+  await gotoWorkspace(page);
+  const row = page.getByTestId("row-p1-fe").getByRole("button");
+  await row.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("complementary", { name: "Inspector for p1-fe" })).toBeVisible();
+  await expect(row).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByTestId("row-p1-route53").getByRole("button")).toHaveAttribute("aria-pressed", "false");
+  await page.keyboard.press("j"); // J/K follow the board order
+  await expect(page.getByRole("complementary", { name: "Inspector for p1-validate" })).toBeVisible();
+});
+
+test("board: the elapsed time of a running task ticks and a done task stays fixed", async ({ page }) => {
+  await gotoWorkspace(page);
+  const running = page.getByTestId("row-p2-ws-fix").locator(".c-time");
+  const done = page.getByTestId("row-p1-fe").locator(".c-time");
+  const before = await running.textContent(), fixed = await done.textContent();
+  await expect.poll(() => running.textContent(), { timeout: 4000 }).not.toBe(before);
+  await expect(done).toHaveText(fixed!);
+});
+
+test("header: one-line status summary, repo badges collapse into a popover, goal clamps with the full text in the title", async ({ page }) => {
+  await gotoWorkspace(page);
+  const status = page.getByRole("group", { name: "Run status" });
+  await expect(status).toContainText("Phase 2/5");
+  await expect(status).toContainText("4 of 6 done");
+  await expect(status).toContainText("2 running");
+  await expect(status).toContainText("$0.14");
+  await expect(status).toContainText(/~\d+ min left|finishing up/);
+  await expect(page.getByTestId("phase-remaining")).toHaveText("Update r101-scheduler to call the new endpoint and add release notes");
+  const goal = page.getByRole("heading", { level: 1 }).getByRole("button");
+  await expect(goal).toHaveAttribute("title", /^Add a \/v2\/routes endpoint/);
+  await expect(page.getByLabel("Workspace repositories").locator(".repo-badge")).toHaveCount(0); // five repos: one button
+  await page.getByRole("button", { name: "5 repos" }).click();
+  await expect(page.getByRole("region", { name: "Workspace repositories list" })).toContainText("r101-ws-bc");
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("region", { name: "Workspace repositories list" })).toHaveCount(0);
+  await expect(page.getByTestId("history-badge")).toHaveCount(0);
+});
+
+test("header: a finished failed run says Failed instead of an ETA; budget shows as a thin bar only with a known limit", async ({ page }) => {
+  await gotoFailed(page);
+  await expect(page.getByRole("group", { name: "Run status" })).toContainText("2 failed 1 blocked");
+  await expect(page.getByRole("group", { name: "Run status" })).toContainText("Failed");
+  await expect(page.getByRole("group", { name: "Run status" })).not.toContainText("left");
+  await expect(page.locator("progress.budget-bar")).toHaveCount(0);
+  await expect(page.locator("body")).not.toContainText(/NaN|undefined/);
+});
+
+test("problems strip: lists failed and blocked tasks with reasons and conflicting files; Open selects the task", async ({ page }) => {
+  await gotoFailed(page);
+  const strip = page.getByRole("region", { name: "Problems" });
+  await expect(strip).toContainText("3 errors");
+  await expect(strip.getByTestId("problem-task:p1-queue")).toContainText("Timed out");
+  const conflict = strip.getByTestId("problem-task:p1-ui");
+  await expect(conflict).toContainText("Merge conflict merging dependency p1-schema");
+  await expect(conflict.locator("code").first()).toHaveText("packages/ui/test/smoke.spec.ts");
+  await expect(strip.getByTestId("problem-task:p2-docs")).toContainText("Dependency failed");
+  expect((await strip.boundingBox())!.height).toBeLessThanOrEqual(800 * 0.25 + 1);
+  await conflict.getByRole("button", { name: "Open p1-ui" }).click();
+  await expect(page.getByRole("complementary", { name: "Inspector for p1-ui" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Problems" })).toHaveAttribute("aria-expanded", "true");
+  await page.getByRole("button", { name: /Problems/ }).click();
+  await expect(strip.getByTestId("problem-task:p1-queue")).toHaveCount(0);
+});
+
+test("problems strip is absent for a healthy run", async ({ page }) => {
+  await gotoWorkspace(page);
+  await expect(page.getByRole("region", { name: "Problems" })).toHaveCount(0);
+});
+
+test("details: the default tab follows the task status and the failure reason is shown first; the chosen tab is remembered per task", async ({ page }) => {
+  await gotoWorkspace(page);
+  const tab = (n: string) => page.getByRole("tab", { name: n });
+  await page.getByTestId("row-p2-ws-fix").getByRole("button").click();
+  await expect(tab("Activity")).toHaveAttribute("aria-selected", "true");
+  await page.getByTestId("row-p1-fe").getByRole("button").click();
+  await expect(tab("Output")).toHaveAttribute("aria-selected", "true");
+  await expect(page.locator(".inspector").getByRole("tabpanel")).toContainText("p1-fe/summary");
+  await tab("Usage").click();
+  await page.getByTestId("row-p2-ws-fix").getByRole("button").click();
+  await page.getByTestId("row-p1-fe").getByRole("button").click();
+  await expect(tab("Usage")).toHaveAttribute("aria-selected", "true"); // remembered for this task
+  await gotoFailed(page);
+  await page.getByTestId("row-p1-queue").getByRole("button").click();
+  await expect(tab("Context")).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByTestId("failure-reason")).toContainText("Timed out");
+  await page.getByTestId("row-p1-ui").getByRole("button").click();
+  await expect(page.getByTestId("failure-reason")).toContainText("smoke.spec.ts");
+});
+
+test("main tabs: ARIA roles, arrow keys, Home/End and a saved choice that survives a reload", async ({ page }) => {
+  await freshTabs(page);
+  await page.goto(`${base}/?run=r1`);
+  const list = page.getByRole("tablist", { name: "Run views" });
+  await expect(list.getByRole("tab")).toHaveText(["Board", "Answer", "Graph", "Timeline", "Blackboard (1)"]);
+  const board = list.getByRole("tab", { name: "Board", exact: true });
+  await expect(board).toHaveAttribute("aria-selected", "true");
+  await expect(board).toHaveAttribute("tabindex", "0");
+  await expect(list.getByRole("tab", { name: "Graph" })).toHaveAttribute("tabindex", "-1");
+  await expect(page.locator("#main-panel-board")).toHaveAttribute("role", "tabpanel");
+  await expect(page.locator("#main-panel-board")).toHaveAttribute("aria-labelledby", "main-tab-board");
+  await board.focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(list.getByRole("tab", { name: "Answer" })).toBeFocused();
+  await expect(list.getByRole("tab", { name: "Answer" })).toHaveAttribute("aria-selected", "true");
+  await page.keyboard.press("ArrowLeft");
+  await page.keyboard.press("ArrowLeft"); // wraps to the last tab
+  await expect(list.getByRole("tab", { name: /^Blackboard/ })).toBeFocused();
+  await page.keyboard.press("Home");
+  await expect(board).toBeFocused();
+  await page.keyboard.press("End");
+  await expect(page.locator("#main-panel-blackboard")).toBeVisible();
+  await page.reload();
+  await expect(list.getByRole("tab", { name: /^Blackboard/ })).toHaveAttribute("aria-selected", "true");
+  expect(await page.evaluate(() => localStorage.getItem("mar.main.tab"))).toBe("blackboard");
+});
+
+test("main tabs work when localStorage is unavailable", async ({ browser }) => {
+  const ctx = await browser.newContext();
+  const page = await ctx.newPage();
+  await page.addInitScript(() => { Object.defineProperty(window, "localStorage", { get() { throw new Error("blocked"); } }); });
+  await page.goto(`${base}/?run=r1`);
+  await expect(page.getByRole("tab", { name: "Board", exact: true })).toHaveAttribute("aria-selected", "true");
+  await page.getByRole("tab", { name: /^Blackboard/ }).click();
+  await expect(page.getByRole("region", { name: "Blackboard" })).toBeVisible();
+  await expect(page.locator("body")).not.toContainText(/NaN|undefined/);
+  await ctx.close();
+});
+
+test("answer tab: only when reports exist; the final task's report is shown as literal text with a copy button", async ({ page }) => {
+  await freshTabs(page);
+  await page.goto(`${base}/?run=r3`); // no reports
+  await expect(page.getByRole("tab", { name: "Answer" })).toHaveCount(0);
+  await page.goto(`${base}/?run=r1`);
+  await openTab(page, "Answer");
+  await expect(page.getByRole("heading", { name: "rev", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "impl", exact: true })).toHaveCount(0); // impl is not a final task
+  await expect(page.getByTestId("answer-rev")).toHaveText(fixture.reports[1].body); // an HTML-looking report renders literally
+  await expect(page.locator(".answer img")).toHaveCount(0);
+  await expect(page.locator(".answer b")).toHaveCount(0);
+  expect(await page.evaluate(() => (window as unknown as { __pwned?: number }).__pwned)).toBeUndefined();
+  await page.getByRole("button", { name: "Copy" }).click();
+  await expect(page.locator(".copied")).toHaveText(/Copied|Copy unavailable/);
+});
+
+test("answer tab: a finished run with an answer shows a dismissible 'Answer ready' notice that opens the tab", async ({ page }) => {
+  await freshTabs(page);
+  const fx = failedRun(Date.now());
+  fx.snap.tasks = fx.snap.tasks.map((t) => ({ ...t, status: "done", detail: null }));
+  fx.snap.events = fx.snap.events.filter((e) => e.type !== "dependency_merge_conflict").map((e) => (e.type === "phase_started" ? { ...e, payload: { ...e.payload, remaining: "" } } : e));
+  await serveFixture(page, base, fx);
+  const notice = page.getByTestId("answer-ready");
+  await expect(notice).toContainText("Answer ready");
+  await expect(page.getByRole("region", { name: "Problems" })).toHaveCount(0);
+  await notice.getByRole("button", { name: "Open answer" }).click();
+  await expect(page.getByRole("tab", { name: "Answer" })).toHaveAttribute("aria-selected", "true");
+  await expect(notice).toHaveCount(0);
+  await openTab(page, "Board");
+  await expect(notice).toHaveCount(0); // opening it counts as seen
+  await page.evaluate(() => localStorage.setItem("mar.main.tab", "board"));
+  await page.reload();
+  await expect(page.getByTestId("answer-ready")).toBeVisible();
+  await page.getByTestId("answer-ready").getByRole("button", { name: "Dismiss" }).click();
+  await expect(page.getByTestId("answer-ready")).toHaveCount(0);
+});
+
+test("graph tab: 6 tasks across a 5-repo workspace stay readable at 1280x800 and no swimlane is empty", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await gotoWorkspace(page);
+  await openTab(page, "Graph");
+  const ids = ["p1-route53", "p1-validate", "p1-fe", "p1-review", "p2-ws-fix", "p2-ws-docs"];
+  await expect(page.getByTestId("node-p2-ws-docs")).toBeVisible();
+  await page.waitForTimeout(500); // the fit settles
+  const boxes = await Promise.all(ids.map((id) => page.getByTestId(`node-${id}`).boundingBox()));
+  for (const b of boxes) expect(b!.width).toBeGreaterThanOrEqual(120);
+  const lanes = page.locator('[data-testid^="band-repo-"]');
+  const laneBoxes = await lanes.evaluateAll((els) => els.map((e) => { const r = e.getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width, h: r.height }; }));
+  expect(laneBoxes).toHaveLength(3); // webservices, frontend and the cross-repo lane: never one per workspace repo
+  for (const lane of laneBoxes) {
+    expect(boxes.some((b) => b!.x >= lane.x - 1 && b!.y >= lane.y - 1 && b!.x + b!.width <= lane.x + lane.w + 1 && b!.y + b!.height <= lane.y + lane.h + 1)).toBe(true);
+  }
+  await expect(page.locator(".react-flow__minimap")).toHaveCount(0);
+  await page.screenshot({ path: "test-results/graph-workspace-1280.png" });
+});
+
+test("800px wide: the board has no horizontal overflow, with and without the details panel", async ({ page }) => {
+  await page.setViewportSize({ width: 800, height: 700 });
+  await gotoWorkspace(page);
+  expect(await overflowX(page)).toBeLessThanOrEqual(1);
+  expect(await page.locator(".board").evaluate((el) => el.scrollWidth - el.clientWidth)).toBeLessThanOrEqual(1);
+  await page.getByTestId("row-p2-ws-fix").getByRole("button").click();
+  await expect(page.getByRole("complementary", { name: "Inspector for p2-ws-fix" })).toBeVisible();
+  await page.waitForTimeout(500);
+  expect(await overflowX(page)).toBeLessThanOrEqual(1);
+  await gotoFailed(page);
+  expect(await overflowX(page)).toBeLessThanOrEqual(1);
+  expect(await page.locator(".problems").evaluate((el) => el.scrollWidth - el.clientWidth)).toBeLessThanOrEqual(1);
+});
+
+test("board in dark mode uses the dark palette and keeps text readable", async ({ browser }) => {
+  const ctx = await browser.newContext({ colorScheme: "dark", viewport: { width: 1280, height: 800 } });
+  const page = await ctx.newPage();
+  await gotoWorkspace(page);
+  const colours = await page.evaluate(() => {
+    const bg = getComputedStyle(document.body).backgroundColor, row = getComputedStyle(document.querySelector(".board-item")!).backgroundColor, ink = getComputedStyle(document.querySelector(".c-id")!).color;
+    return { bg, row, ink };
+  });
+  expect(colours.bg).not.toBe("rgb(246, 245, 241)");
+  expect(colours.row).not.toBe("rgb(255, 255, 255)");
+  expect(colours.ink).not.toBe(colours.row);
+  await ctx.close();
+});
+
+test("reduced motion: board rows and the details panel get no animation inline styles", async ({ browser }) => {
+  const ctx = await browser.newContext({ reducedMotion: "reduce", viewport: { width: 1280, height: 800 } });
+  const page = await ctx.newPage();
+  await gotoWorkspace(page);
+  await page.getByTestId("row-p2-ws-fix").getByRole("button").click();
+  await expect(page.locator(".inspector")).toBeVisible();
+  const styles = await page.locator(".board-item").evaluateAll((els) => els.map((e) => e.getAttribute("style") ?? ""));
+  expect(styles).toHaveLength(6);
+  for (const st of styles) expect(st).toBe("");
+  expect(await page.locator(".inspector").evaluate((el) => el.getAttribute("style") ?? "")).not.toMatch(/translate|opacity/);
+  expect(await page.locator(".dot-run").first().evaluate((e) => getComputedStyle(e).animationName)).toBe("none");
+  await ctx.close();
+});
+
+test("untrusted event text on the board is rendered as text only", async ({ page }) => {
+  const fx = workspaceRun(Date.now());
+  fx.snap.events.push({ id: 9999, run_id: "ws1", task_id: "p2-ws-fix", agent_id: "p2-ws-fix", ts: Date.now() - 1000, type: "assistant_text", payload: { text: '<img src=x onerror="window.__pwned=1">' } });
+  await serveFixture(page, base, fx);
+  await openTab(page, "Board");
+  await expect(page.getByTestId("row-p2-ws-fix").locator(".c-now")).toHaveText('<img src=x onerror="window.__pwned=1">');
+  await expect(page.locator('img[src="x"]')).toHaveCount(0);
+  expect(await page.evaluate(() => (window as unknown as { __pwned?: number }).__pwned)).toBeUndefined();
 });

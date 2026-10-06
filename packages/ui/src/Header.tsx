@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useId, useRef, useState } from "react";
 import { fmtDuration, fmtTokens } from "./fmt.js";
 import { countTo } from "./motion.js";
 import { type AgentView, type PhaseInfo } from "./derive.js";
@@ -79,7 +79,7 @@ export function Header({ repos = [], readOnly = false, runs, run, runId, onRun, 
   const tokensText = budget.tokens === null ? "n/a" : `${budget.partial ? "≥ " : ""}${fmtTokens(shown)}`;
   const segments = (phase ? summary.slice(1) : summary).map((text, i, all) => {
     const last = i === all.length - 1 && state.kind !== "running";
-    return <span key={i} className={last ? "seg-state" : undefined} data-state={last ? state.kind : undefined}>{text}</span>;
+    return <Fragment key={i}><span className={last ? "seg-state" : undefined} data-state={last ? state.kind : undefined}>{text}</span>{" "}</Fragment>;
   });
   const tip = `Elapsed ${fmtDuration(elapsedMs)} · Tokens ${budget.tokens === null ? "n/a" : fmtTokens(budget.tokens)}${budget.limit !== null ? ` of ${fmtTokens(budget.limit)} (${budget.pct}%)` : " (limit unknown)"}${budget.partial ? " · partial: older events were not loaded" : ""}`;
   return (

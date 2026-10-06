@@ -2,11 +2,11 @@ export type ShortcutAction = "help" | "close" | "next" | "prev" | "fit" | "minim
 
 export const SHORTCUTS: { keys: string; action: ShortcutAction; label: string }[] = [
   { keys: "?", action: "help", label: "Show or hide this help" },
-  { keys: "Esc", action: "close", label: "Close help, popover or inspector" },
-  { keys: "J", action: "next", label: "Inspect the next task" },
-  { keys: "K", action: "prev", label: "Inspect the previous task" },
-  { keys: "F", action: "fit", label: "Fit the graph to the screen" },
-  { keys: "M", action: "minimap", label: "Toggle the minimap" },
+  { keys: "Esc", action: "close", label: "Close help, a popover or the details panel" },
+  { keys: "J", action: "next", label: "Select the next task (board order on the Board tab)" },
+  { keys: "K", action: "prev", label: "Select the previous task" },
+  { keys: "F", action: "fit", label: "Fit the graph to the screen (Graph tab)" },
+  { keys: "M", action: "minimap", label: "Toggle the graph minimap (Graph tab)" },
 ];
 
 const BY_KEY: Record<string, ShortcutAction> = { "?": "help", Escape: "close", j: "next", k: "prev", f: "fit", m: "minimap" };
