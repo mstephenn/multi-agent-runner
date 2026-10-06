@@ -1,14 +1,17 @@
 .graph { position: relative; display: flex; flex-direction: column; }
 .graph-canvas { position: relative; flex: 1; min-height: 0; }
-.graph .agent { box-sizing: border-box; width: 250px; height: 140px; }
-.graph .agent-btn { height: 100%; }
+.graph .agent { box-sizing: border-box; width: 232px; height: 132px; }
+.graph .agent-btn { height: 100%; gap: 4px; padding: 7px 10px; }
 .graph .agent-id, .graph .role { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
 .graph .agent-meta { flex-wrap: nowrap; overflow: hidden; min-height: 20px; }
 .graph .agent-foot { margin-top: auto; flex-wrap: nowrap; }
 .agent-duration { color: var(--muted); font-size: 11px; }
-.graph-controls { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px 12px; border-bottom: 1px solid var(--line); background: var(--panel); font-size: 12px; }
-.graph-controls label { display: flex; align-items: center; gap: 4px; }
-.graph-controls button, .graph-controls select { color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 4px 6px; }
+.graph-options { position: absolute; z-index: 5; top: 8px; right: 8px; }
+.graph-options-toggle { min-width: 32px; padding: 2px 8px; font-size: 18px; line-height: 1.2; background: var(--panel); }
+.graph-options-toggle.active { border-color: var(--accent); color: var(--accent); }
+.graph-controls { right: 0; top: calc(100% + 6px); width: 240px; display: flex; flex-direction: column; gap: 8px; font-size: 12px; }
+.graph-controls .gc-row { display: flex; gap: 6px; }
+.graph-controls label { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
 .graph-controls select { max-width: 150px; }
 .graph-controls button[aria-pressed="true"] { border-color: var(--accent); }
 .graph-no-matches { position: absolute; top: 50%; width: 100%; text-align: center; color: var(--muted); pointer-events: none; }

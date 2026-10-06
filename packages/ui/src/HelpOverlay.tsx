@@ -15,6 +15,7 @@ export function HelpOverlay({ onClose }: { onClose: () => void }) {
         <dl>
           {SHORTCUTS.map((s) => <div key={s.action}><dt><kbd>{s.keys}</kbd></dt><dd>{s.label}</dd></div>)}
         </dl>
+        <p className="muted help-note">On a tab list (Board, Answer, Graph, Timeline, Blackboard; and the details tabs) use <kbd>←</kbd> <kbd>→</kbd>, <kbd>Home</kbd> and <kbd>End</kbd>. Enter selects a board row.</p>
         <button ref={close} type="button" onClick={onClose}>Close</button>
       </section>
     </div>

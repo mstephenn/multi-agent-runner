@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
+import { useEffect, useMemo, useRef, type KeyboardEvent, type PointerEvent } from "react";
 import type { BbEntry, Dag, StoredEvent } from "@mar/core";
-import { deriveContext, type AgentView } from "./derive.js";
+import { deriveContext, type AgentStatus, type AgentView } from "./derive.js";
+import { reasonText, type Problem } from "./taskBoard.js";
 import { budgetUsage, fmtCost, fmtTokens } from "./fmt.js";
 import type { ReportRow } from "./runClient.js";
 import { drawerIn } from "./motion.js";
@@ -8,15 +9,24 @@ import { ActivityFeed } from "./ActivityFeed.js";
 import { InspectorSummary } from "./InspectorSummary.js";
 
 const TABS = ["Context", "Activity", "Output", "Usage"] as const;
-type Tab = (typeof TABS)[number];
+export type InspectorTab = (typeof TABS)[number];
+type Tab = InspectorTab;
 
-type Props = { agent: AgentView; events: StoredEvent[]; blackboard: BbEntry[]; plan: Dag | null; reports?: ReportRow[]; width: number | null; onWidthChange: (width: number) => void; onClose: () => void };
+/** What a task's details open on: running -> Activity, done -> Output, anything else -> Context (a failure also shows its reason at the top). */
+export const defaultTab = (status: AgentStatus): Tab => (status === "running" ? "Activity" : status === "done" ? "Output" : "Context");
+
+type Props = {
+  agent: AgentView; events: StoredEvent[]; blackboard: BbEntry[]; plan: Dag | null; reports?: ReportRow[]; width: number | null; onWidthChange: (width: number) => void; onClose: () => void;
+  /** The tab the user picked for this task earlier in the session; without one the status picks the default. */
+  chosenTab?: Tab; onTab: (tab: Tab) => void; problem?: Problem;
+};
 
 const MIN_WIDTH = 280;
 const MIN_GRAPH_WIDTH = 240;
 
-export function Inspector({ agent, events, blackboard, plan, reports = [], width, onWidthChange, onClose }: Props) {
-  const [tab, setTab] = useState<Tab>("Context");
+export function Inspector({ agent, events, blackboard, plan, reports = [], width, onWidthChange, onClose, chosenTab, onTab, problem }: Props) {
+  const tab = chosenTab ?? defaultTab(agent.status);
+  const setTab = onTab;
   const spec = plan?.tasks.find((t) => t.id === agent.id);
   const onKey = (e: KeyboardEvent) => {
     const i = TABS.indexOf(tab);
@@ -65,6 +75,13 @@ export function Inspector({ agent, events, blackboard, plan, reports = [], width
         <div><h2 className="mono">{agent.id}</h2>{agent.repo && <span className="badge repo-badge" title={`Repository: ${agent.repo}`}>{agent.repo === "*" ? "All repos" : agent.repo}</span>}</div>
         <button type="button" onClick={onClose} aria-label="Close inspector">Close</button>
       </header>
+      {(agent.status === "failed" || agent.status === "blocked") && (
+        <div className="insp-fail" role="alert" data-testid="failure-reason">
+          <strong>{agent.status === "failed" ? "Failed" : "Blocked"}</strong>
+          <span className="insp-fail-text">{problem?.detail ?? reasonText(agent.detail, agent.status)}</span>
+          {!!problem?.files.length && <span className="problem-files">{problem.files.map((f) => <code key={f} title={f}>{f}</code>)}{problem.moreFiles > 0 && <span className="muted">+{problem.moreFiles} more</span>}</span>}
+        </div>
+      )}
       {!!agent.siblingWarnings?.length && <div className="sibling-warnings" role="status" aria-label="Sibling repository warnings">
         {agent.siblingWarnings.map((w) => <details key={w.id}>
           <summary>⚠ Sibling modified: <strong>{w.repo}</strong> ({w.count} {w.count === 1 ? "file" : "files"})</summary>

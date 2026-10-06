@@ -1,15 +1,17 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
-import { Background, Handle, MiniMap, Position, ReactFlow, ReactFlowProvider, useReactFlow, type Node, type NodeProps } from "@xyflow/react";
+import { Background, Handle, MiniMap, Position, ReactFlow, ReactFlowProvider, type Node, type NodeProps } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import type { Dag } from "@mar/core";
 import { matchesGraphFilter, taskDuration, phaseBadge, planPhases, type GraphFilter, type AgentView, type FlowEdge } from "./derive.js";
 import { fmtDuration, fmtTokens, STATUS_ICON } from "./fmt.js";
 import { layoutGraph, type Bounds } from "./layout.js";
 import { GraphEdge, type RoutedEdge } from "./GraphEdge.js";
-import { GraphControls, fitOptions } from "./GraphControls.js";
+import { GraphControls, useFit } from "./GraphControls.js";
 import "./graph.css";
-import { nodeIn, pulseRing, reducedMotion, statusFlash } from "./motion.js";
+import { nodeIn, pulseRing, statusFlash } from "./motion.js";
 
+// Cards keep a readable size: the fit never zooms out below 0.6 (see GraphControls), so the graph pans instead of shrinking.
+export const NODE_W = 232, NODE_H = 132;
 type NodeData = { agent: AgentView; selected: boolean; phaseCount: number };
 
 const AgentNode = memo(function AgentNode({ data }: NodeProps<Node<NodeData>>) {
@@ -65,22 +67,20 @@ const BandNode = memo(function BandNode({ data }: NodeProps<Node<BandData>>) {
 const nodeTypes = { agent: AgentNode, band: BandNode };
 const edgeTypes = { routed: GraphEdge };
 
-// Re-centres the graph whenever its pane is resized (e.g. the inspector drawer opens or closes), so no node ends up hidden.
-function RefitOnResize({ bounds }: { bounds: Bounds }) {
-  const { fitBounds } = useReactFlow();
+// Frames the graph on first paint and again whenever the graph changes or its pane is resized (e.g. the details panel opens), so no node is lost.
+function FitController({ bounds }: { bounds: Bounds }) {
+  const fit = useFit(bounds);
   const host = useRef<HTMLDivElement>(null);
-  const { x, y, width, height } = bounds;
+  const first = useRef(true);
+  useEffect(() => { fit(!first.current); first.current = false; }, [fit]);
   useEffect(() => {
     const pane = host.current?.closest(".graph");
-    if (!pane || !width || typeof ResizeObserver === "undefined") return;
+    if (!pane || typeof ResizeObserver === "undefined") return;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const ro = new ResizeObserver(() => {
-      clearTimeout(timer);
-      timer = setTimeout(() => { void fitBounds({ x, y, width, height }, fitOptions()); }, 80);
-    });
+    const ro = new ResizeObserver(() => { clearTimeout(timer); timer = setTimeout(() => fit(), 80); });
     ro.observe(pane);
     return () => { clearTimeout(timer); ro.disconnect(); };
-  }, [fitBounds, x, y, width, height]);
+  }, [fit]);
   return <div ref={host} hidden />;
 }
 
@@ -94,16 +94,18 @@ export function GraphView({ agents, plan, flow, selected, onSelect }: Props) {
   const graph = useMemo(() => {
     const known = new Set(visible.map((a) => a.id));
     const links = new Map<string, { id: string; source: string; target: string; label?: string }>();
+    // A flow edge (a blackboard read) already implies the dependency: drawing both stacks two lines on one route.
+    const flowPairs = new Set(flow.map((f) => JSON.stringify([f.from, f.to])));
     for (const t of plan?.tasks ?? []) for (const d of t.dependsOn) {
       const id = JSON.stringify(["dep", d, t.id]);
-      if (known.has(d) && known.has(t.id)) links.set(id, { id, source: d, target: t.id });
+      if (known.has(d) && known.has(t.id) && !flowPairs.has(JSON.stringify([d, t.id]))) links.set(id, { id, source: d, target: t.id });
     }
     for (const f of flow) {
       const id = JSON.stringify(["flow", f.from, f.to, f.key]);
       if (known.has(f.from) && known.has(f.to)) links.set(id, { id, source: f.from, target: f.to, label: f.key });
     }
     const layout = layoutGraph(visible, [...links.values()], {
-      nodeWidth: 250, nodeHeight: 140, columnGap: 150, rowGap: 24, edgeOffset: 28,
+      nodeWidth: NODE_W, nodeHeight: NODE_H, columnGap: 110, rowGap: 14, laneGap: 10, padding: 12, edgeOffset: 24, layers: true, labelSpace: 18,
       swimlanes: agents.some((a) => a.repo !== undefined),
     });
     return { layout, links };
@@ -117,7 +119,7 @@ export function GraphView({ agents, plan, flow, selected, onSelect }: Props) {
   })), [graph]);
   const nodes = useMemo<(Node<NodeData> | Node<BandData>)[]>(() => [...bands, ...visible.map((agent) => ({
     id: agent.id, type: "agent", position: graph.layout.positions.get(agent.id)!,
-    style: { width: 250, height: 140 },
+    style: { width: NODE_W, height: NODE_H },
     data: { agent, selected: agent.id === selected, phaseCount: planPhases(plan) },
   }))], [bands, visible, graph, selected, plan]);
   const edges = useMemo<RoutedEdge[]>(() => graph.layout.edges.map((edge) => ({
@@ -136,13 +138,13 @@ export function GraphView({ agents, plan, flow, selected, onSelect }: Props) {
       <GraphControls agents={agents} filter={filter} onFilter={setFilter} minimap={minimap} onMinimap={() => setMinimap((value) => !value)} bounds={graph.layout.bounds} />
       <div className="graph-canvas">
       <ReactFlow
-        nodes={nodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes} fitView fitViewOptions={{ ...fitOptions(), duration: 0 }}
+        nodes={nodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes} panOnScroll zoomOnScroll={false}
         nodesDraggable={false} nodesConnectable={false} elementsSelectable edgesFocusable proOptions={{ hideAttribution: true }}
         onEdgeClick={(_e, edge) => setSelectedEdge(edge.id)} onPaneClick={() => setSelectedEdge(null)}
         onNodeClick={(_e, n) => onSelect(n.id)} minZoom={0.05}
       >
         <Background gap={20} />
-        <RefitOnResize bounds={graph.layout.bounds} />
+        <FitController bounds={graph.layout.bounds} />
         {minimap && <MiniMap pannable zoomable ariaLabel="Task graph minimap" nodeColor={(node) => {
           if (node.type === "band") return "transparent";
           const status = (node.data.agent as AgentView | undefined)?.status;
