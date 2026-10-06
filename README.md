@@ -4,12 +4,29 @@ A local CLI that takes a goal, has a planner split it into a DAG of tasks (in ph
 
 ## Prerequisites
 
-- Node >= 22.7 (`bin/mar.mjs` runs the TypeScript sources with `--experimental-transform-types`; there is no build step for the CLI)
-- pnpm
+- Node >= 22 (>= 22.7 when running from a checkout: `bin/mar.mjs` runs the TypeScript sources with `--experimental-transform-types`)
+- pnpm (only to build or develop from a checkout)
 - `claude` and `codex` CLIs on `PATH` and logged in. Preflight checks that both run (`--version`); it does not check login (preflight auth check: NOT done), so an unauthenticated CLI fails on the first real call.
 - The target repo must be a git repo with at least one commit and a clean working tree.
 
 ## Install
+
+`mar` is not published to npm. Build a tarball from a checkout and install it globally:
+
+```bash
+pnpm install
+pnpm build && pnpm pack:cli                    # writes ./multi-agent-runner-0.1.0.tgz
+npm i -g ./multi-agent-runner-0.1.0.tgz
+mar --version                                  # 0.1.0
+```
+
+Then, inside any git repo, `mar run "<goal>"` (the repo defaults to `.`) and `mar resume <runId>` work from any directory.
+
+- Update: pull, rebuild (`pnpm build && pnpm pack:cli`) and reinstall the new tarball with `npm i -g`.
+- Uninstall: `npm rm -g multi-agent-runner`.
+- The package is a single bundled file plus the built UI; only `better-sqlite3` and `ws` are installed as dependencies.
+
+## Develop from a checkout
 
 ```bash
 pnpm install
@@ -25,6 +42,8 @@ pnpm mar run "<goal>" --repo .
 pnpm mar resume <runId> --repo .
 pnpm mar --help
 ```
+
+When installed globally, use `mar` instead of `pnpm mar`.
 
 | Flag | Meaning |
 | --- | --- |
