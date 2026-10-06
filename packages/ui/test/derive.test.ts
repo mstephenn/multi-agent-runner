@@ -1,5 +1,6 @@
+import { readFileSync } from "node:fs";
 import { describe, it, expect } from "vitest";
-import { deriveAgents, deriveFlow, deriveContext, deriveLanes, deriveActivity, totals, isRunActive } from "../src/derive.js";
+import { deriveAgents, deriveWorkspaceRepos, deriveFlow, deriveContext, deriveLanes, deriveActivity, totals, isRunActive } from "../src/derive.js";
 import { budgetUsage } from "../src/fmt.js";
 
 let id = 0;
@@ -289,4 +290,62 @@ describe("phases", () => {
     expect(phaseBadge(undefined, 2)).toBe("P1");
     expect(phaseBadge(3, 1)).toBe("P3");
   });
+});
+
+describe("workspace repositories", () => {
+  const started = () => e(null, "run_started", { mode: "workspace", repos: ["api", "web", "unused"] });
+  const plan = { tasks: [
+    { id: "a", repo: "api", role: "implementer", runtime: "codex", tier: "mid", phase: 2 },
+    { id: "review", role: "reviewer", runtime: "claude", tier: "high" },
+  ] } as any;
+
+  it("lists recorded repos, including repos without tasks, and tolerates malformed metadata", () => {
+    expect(deriveWorkspaceRepos([started()])).toEqual(["api", "web", "unused"]);
+    expect(deriveWorkspaceRepos([e(null, "run_started", { mode: "workspace", repos: ["api", null, 1, "", "api"] })])).toEqual(["api"]);
+    expect(deriveWorkspaceRepos([e(null, "run_started", { mode: "repo", repos: ["api"] })])).toEqual([]);
+    expect(deriveWorkspaceRepos([e(null, "run_started", { mode: "workspace", repos: null })])).toEqual([]);
+    expect(deriveWorkspaceRepos([])).toEqual([]);
+  });
+
+  it("assigns pending tasks from the plan and preserves the event's actual repo", () => {
+    const agents = deriveAgents([started(), e("a", "task_started", { repo: "web" })], [], plan);
+    expect(agents[0]).toMatchObject({ id: "a", repo: "web", phase: 2 });
+    expect(agents[1]).toMatchObject({ id: "review", repo: "*", status: "pending" });
+    expect(deriveAgents([started()], [], plan)[0]).toMatchObject({ repo: "api", status: "pending" });
+    expect(deriveAgents([e("review", "task_started", { repo: "*" })], [])[0].repo).toBe("*");
+  });
+
+  it("keeps legacy single-repo tasks unlabelled", () => {
+    expect(deriveAgents([], [], { tasks: [plan.tasks[1]] } as any)[0].repo).toBeUndefined();
+    expect(deriveAgents([e("a", "task_started", { repo: 123 })], [])[0].repo).toBeUndefined();
+  });
+
+  it("retains warnings across retries without confusing the sibling with the task repo", () => {
+    const warning = e("a", "sibling_modified", { repo: "web", files: ["src/client.ts"], count: 20 });
+    const events = [e("a", "task_started", { repo: "api" }), warning, e("a", "task_failed"), e("a", "task_started", { repo: "api" })];
+    expect(deriveAgents(events, [])[0]).toMatchObject({ repo: "api", status: "running", siblingWarnings: [{ id: warning.id, repo: "web", files: ["src/client.ts"], count: 20 }] });
+    expect(deriveAgents(events.slice(0, 1), [])[0].siblingWarnings).toBeUndefined();
+  });
+
+  it("guards malformed warnings and preserves multiple sibling reports", () => {
+    const agents = deriveAgents([
+      e("a", "sibling_modified", { repo: null }),
+      e("a", "sibling_modified", { repo: "web", files: [null, "x"], count: -1 }),
+      e("a", "sibling_modified", { repo: "api", files: null, count: Infinity }),
+    ], []);
+    expect(agents[0].siblingWarnings?.map(({ repo, files, count }) => ({ repo, files, count }))).toEqual([
+      { repo: "web", files: ["x"], count: 1 }, { repo: "api", files: [], count: 0 },
+    ]);
+    expect(agents[0].repo).toBeUndefined();
+  });
+});
+
+
+it("derives multi-repo fixture metadata and sibling warnings", () => {
+  const fixture = JSON.parse(readFileSync(new URL("./fixtures/run.json", import.meta.url), "utf8"));
+  const events = fixture.events.map((event: object, i: number) => ({ ...event, id: i + 1, ts: i + 1, run_id: "r1" }));
+  expect(deriveWorkspaceRepos(events)).toEqual(["api", "web"]);
+  const agents = deriveAgents(events, fixture.tasks, fixture.plan);
+  expect(agents.find((a) => a.id === "impl")).toMatchObject({ repo: "api", siblingWarnings: [{ repo: "web", files: ["src/client.ts"], count: 2 }] });
+  expect(agents.find((a) => a.id === "rev")).toMatchObject({ repo: "*" });
 });

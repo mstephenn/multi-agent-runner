@@ -2,9 +2,10 @@ import type { Dag, StoredEvent } from "@mar/core";
 
 export type AgentStatus = "pending" | "running" | "done" | "failed" | "blocked";
 export type AgentView = {
-  id: string; role?: string; runtime?: string; tier?: string; status: AgentStatus; detail?: string;
+  id: string; repo?: string; siblingWarnings?: SiblingWarning[]; role?: string; runtime?: string; tier?: string; status: AgentStatus; detail?: string;
   tokens: number | null; costUsd: number | null; startedAt?: number; endedAt?: number; unsafe: boolean; phase?: number;
 };
+export type SiblingWarning = { id: number; repo: string; files: string[]; count: number };
 export type FlowEdge = { from: string; to: string; key: string; version: number; tokens: number };
 // One segment per attempt (a resumed/retried task yields several); the latest attempt is the only one that can be open-ended.
 export type Lane = { id: string; start: number; end: number | null; attempt: number };
@@ -50,7 +51,15 @@ const clip = (s: string) => {
   return s.slice(0, cut) + "…";
 };
 
-export function deriveAgents(events: StoredEvent[], tasks: TaskRow[]): AgentView[] {
+// Workspace membership is run metadata; never infer it from a sibling warning's target repo.
+export function deriveWorkspaceRepos(events: StoredEvent[]): string[] {
+  const event = events.filter((e) => e.type === "run_started").at(-1);
+  const p = rec(event?.payload);
+  return p.mode === "workspace" && Array.isArray(p.repos)
+    ? [...new Set(p.repos.filter((r): r is string => typeof r === "string" && r.length > 0))] : [];
+}
+
+export function deriveAgents(events: StoredEvent[], tasks: TaskRow[], plan: Dag | null = null): AgentView[] {
   const m = new Map<string, AgentView>();
   const derived = new Map<string, AgentStatus>();
   const get = (id: string) => {
@@ -72,6 +81,15 @@ export function deriveAgents(events: StoredEvent[], tasks: TaskRow[]): AgentView
     const v = get(ev.task_id);
     const p = rec(ev.payload);
     const ts = num(ev.ts);
+    if (ev.type === "task_started") v.repo = str(p.repo) || v.repo;
+    if (ev.type === "sibling_modified") {
+      const repo = str(p.repo);
+      if (repo) {
+        const files = Array.isArray(p.files) ? p.files.filter((f): f is string => typeof f === "string") : [];
+        const count = num(p.count);
+        (v.siblingWarnings ??= []).push({ id: ev.id, repo, files, count: count !== undefined && Number.isInteger(count) ? Math.max(files.length, count) : files.length });
+      }
+    }
     if (ev.type === "task_started" && lastEnd.has(ev.task_id) && (ts === undefined || lastEnd.get(ev.task_id) === undefined || ts >= lastEnd.get(ev.task_id)!)) {
       // A start after a terminal event (retry/resume) opens a NEW attempt. (A start whose ts is older than the
       // terminal event is treated as out-of-order delivery and handled below instead.)
@@ -110,6 +128,12 @@ export function deriveAgents(events: StoredEvent[], tasks: TaskRow[]): AgentView
     v.status = reopened.has(v.id) ? "running" : fromStore.get(v.id) ?? derived.get(v.id) ?? "pending";
     // `unsafe` is only mapped for Claude; Codex tasks must never show the indicator.
     v.unsafe = flaggedUnsafe.has(v.id) && v.runtime === "claude";
+  }
+  const workspace = deriveWorkspaceRepos(events).length > 0;
+  for (const t of plan?.tasks ?? []) {
+    const v = get(t.id);
+    v.role ??= t.role; v.runtime ??= t.runtime; v.tier ??= t.tier; v.phase ??= t.phase;
+    v.repo ??= t.repo ?? (workspace ? "*" : undefined);
   }
   return [...m.values()];
 }

@@ -2,7 +2,7 @@
   "run": {
     "id": "r1",
     "goal": "Add a /health endpoint and review it",
-    "repo": "/tmp/repo"
+    "repo": "/tmp/workspace"
   },
   "plan": {
     "tasks": [
@@ -14,7 +14,8 @@
         "goal": "Implement the endpoint",
         "dependsOn": [],
         "needs": [],
-        "budgetTokens": 20000
+        "budgetTokens": 20000,
+        "repo": "api"
       },
       {
         "id": "rev",
@@ -54,12 +55,25 @@
   ],
   "events": [
     {
+      "task_id": null,
+      "type": "run_started",
+      "payload": {
+        "root": "/tmp/workspace",
+        "repos": [
+          "api",
+          "web"
+        ],
+        "mode": "workspace"
+      }
+    },
+    {
       "task_id": "impl",
       "type": "task_started",
       "payload": {
         "role": "implementer",
         "runtime": "codex",
-        "tier": "mid"
+        "tier": "mid",
+        "repo": "api"
       }
     },
     {
@@ -205,6 +219,17 @@
     },
     {
       "task_id": "impl",
+      "type": "sibling_modified",
+      "payload": {
+        "repo": "web",
+        "files": [
+          "src/client.ts"
+        ],
+        "count": 2
+      }
+    },
+    {
+      "task_id": "impl",
       "type": "task_finished",
       "payload": {}
     },
@@ -214,7 +239,8 @@
       "payload": {
         "role": "reviewer",
         "runtime": "claude",
-        "tier": "high"
+        "tier": "high",
+        "repo": "*"
       }
     },
     {

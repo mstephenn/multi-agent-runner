@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { BbEntry } from "@mar/core";
-import { deriveAgents, deriveFlow, deriveLanes, derivePhase, isRunActive, type AgentView } from "./derive.js";
+import { deriveAgents, deriveWorkspaceRepos, deriveFlow, deriveLanes, derivePhase, isRunActive, type AgentView } from "./derive.js";
 import { useRun } from "./useRun.js";
 import { Header, type RunInfo } from "./Header.js";
 import { GraphView } from "./GraphView.js";
@@ -57,15 +57,9 @@ export function App() {
   const events = useMemo(() => (cutoff === null ? snap.events : snap.events.filter((e) => e.ts <= cutoff)), [snap.events, cutoff]);
   const blackboard = useMemo<BbEntry[]>(() => (cutoff === null ? snap.blackboard : snap.blackboard.filter((b) => b.ts <= cutoff)), [snap.blackboard, cutoff]);
   const agents = useMemo<AgentView[]>(() => {
-    const derived = deriveAgents(events, cutoff === null ? snap.tasks : []);
-    const byId = new Map(derived.map((a) => [a.id, a]));
-    for (const t of snap.plan?.tasks ?? []) {
-      const a = byId.get(t.id) ?? { id: t.id, status: "pending" as const, tokens: null, costUsd: null, unsafe: false };
-      a.role ??= t.role; a.runtime ??= t.runtime; a.tier ??= t.tier; a.phase ??= t.phase;
-      byId.set(t.id, a);
-    }
-    return [...byId.values()];
+    return deriveAgents(events, cutoff === null ? snap.tasks : [], snap.plan);
   }, [events, snap.tasks, snap.plan, cutoff]);
+  const repos = useMemo(() => deriveWorkspaceRepos(snap.events), [snap.events]);
   const flow = useMemo(() => deriveFlow(events), [events]);
   const phase = useMemo(() => derivePhase(events), [events]);
   const lanes = useMemo(() => deriveLanes(events), [events]);
@@ -86,7 +80,7 @@ export function App() {
   if (notFound) return <div className="state" role="alert">Run <code>{runId}</code> was not found. It may have been created in a different repository or deleted.</div>;
   return (
     <div className="app">
-      <Header readOnly={readOnly === true} runs={runs} run={run} runId={runId} onRun={chooseRun} agents={agents} elapsedMs={endTs - startTs} conn={conn} partial={truncated} phase={phase} />
+      <Header repos={repos} readOnly={readOnly === true} runs={runs} run={run} runId={runId} onRun={chooseRun} agents={agents} elapsedMs={endTs - startTs} conn={conn} partial={truncated} phase={phase} />
       {error && <div className="banner" role="alert">{error}. {conn === "reconnecting" ? "Retrying…" : ""}</div>}
       {truncated && <div className="banner info" role="status" data-testid="truncated-banner">Showing the latest {snap.events.length.toLocaleString("en-US")} events of a longer run — token totals and early context may be incomplete.</div>}
       {cutoff !== null && <div className="banner info" role="status">Replaying: views show state as of the scrubber position.</div>}

@@ -32,7 +32,7 @@ function StopButton({ runId }: { runId: string }) {
   );
 }
 
-type Props = { readOnly?: boolean; runs: RunInfo[]; run: RunInfo | undefined; runId: string; onRun: (id: string) => void; agents: AgentView[]; elapsedMs: number; conn: Conn; partial?: boolean; phase?: PhaseInfo | null };
+type Props = { repos?: string[]; readOnly?: boolean; runs: RunInfo[]; run: RunInfo | undefined; runId: string; onRun: (id: string) => void; agents: AgentView[]; elapsedMs: number; conn: Conn; partial?: boolean; phase?: PhaseInfo | null };
 
 // Displays `value`, tweening from the previous value whenever it changes (no tween on first render).
 function useCountUp(value: number): number {
@@ -46,7 +46,7 @@ function useCountUp(value: number): number {
   return shown;
 }
 
-export function Header({ readOnly = false, runs, run, runId, onRun, agents, elapsedMs, conn, partial = false, phase = null }: Props) {
+export function Header({ repos = [], readOnly = false, runs, run, runId, onRun, agents, elapsedMs, conn, partial = false, phase = null }: Props) {
   const t = totals(agents);
   const shownTokens = useCountUp(t.tokens);
   const lead = partial ? "≥ " : "";
@@ -68,6 +68,7 @@ export function Header({ readOnly = false, runs, run, runId, onRun, agents, elap
         )}
         {agents.some((a) => a.unsafe) && <span className="badge unsafe" role="status" title="Codex tasks do not map unsafe mode">unsafe mode (Claude workers)</span>}
       </div>
+      {repos.length > 0 && <div className="workspace-repos" aria-label="Workspace repositories"><span className="muted">Repos</span>{repos.map((repo) => <span key={repo} className="badge repo-badge" title={repo}>{repo}</span>)}</div>}
       <dl className="stats">
         <div><dt>Tokens{partial ? " (partial)" : ""}</dt><dd className="mono" data-testid="total-tokens">{anyTokens ? `${lead}${fmtTokens(shownTokens)}` : "n/a"}</dd></div>
         <div><dt>Spend{partial ? " (partial)" : ""}</dt><dd className="mono" data-testid="total-cost">{t.costUsd === null ? fmtCost(t.costUsd) : `${lead}${fmtCost(t.costUsd)}`}</dd></div>
