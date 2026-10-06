@@ -139,3 +139,19 @@ export function repoMap(repo: string, maxChars = 20000, ref?: string): string {
   }
   return out;
 }
+
+/**
+ * Repo map of a workspace: one `## repo: <name>` section per repo, `maxChars` split evenly (each repo gets its own cap and
+ * its own structured fallback). `ref` (the integration branch) is used only in repos that have it; others list their checkout.
+ */
+export function workspaceRepoMap(
+  repos: readonly { name: string; path: string }[], maxChars: number,
+  mapFn: (repo: string, maxChars: number, ref?: string) => string = repoMap, ref?: string,
+): string {
+  const per = Math.max(0, Math.floor(maxChars / Math.max(1, repos.length)));
+  return repos.map((r) => {
+    let map: string;
+    try { map = mapFn(r.path, per, ref); } catch (e) { if (ref === undefined) throw e; map = mapFn(r.path, per); }
+    return `## repo: ${r.name}\n${map}`;
+  }).join("\n\n");
+}
