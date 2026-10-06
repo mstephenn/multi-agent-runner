@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { renderPhaseHeader, renderPhaseSummary, renderPlanTable, renderStop } from "../src/phaseOutput.js";
+import { ownershipRows, renderOwnershipWarnings, renderPhaseHeader, renderPhaseSummary, renderPlanTable, renderStop } from "../src/phaseOutput.js";
 
 const t = (id: string, extra: object = {}) => ({ id, role: "implementer", runtime: "codex", tier: "mid", goal: "do the thing", dependsOn: [], needs: [], paths: [], ...extra }) as never;
 
@@ -111,5 +111,32 @@ describe("workspace output", () => {
   });
   it("renderPlanTable is unchanged without the workspace option", () => {
     expect(renderPlanTable([t("a")], () => false).split("\n")[0]).toMatch(/^id +role +runtime\/tier/);
+  });
+});
+
+describe("recovery_stalled and ownership warnings", () => {
+  it("renderStop explains recovery_stalled and how to continue", () => {
+    const out = renderStop({ reason: "recovery_stalled", message: "recovery phase 2 finished no task" }, "", "r1", 5);
+    expect(out).toContain("Stopped early: recovery phase 2 finished no task");
+    expect(out).toMatch(/by hand.*mar resume r1/s);
+  });
+  const ev = (task_id: string | null, payload: Record<string, unknown>) => ({ task_id, payload });
+  it("ownershipRows keeps the latest warn-mode event per task and skips enforced ones", () => {
+    expect(ownershipRows([
+      ev("a", { files: ["x"], count: 1, enforced: false }), ev("a", { files: ["x", "y"], count: 2, enforced: false }),
+      ev("b", { files: ["z"], count: 1, enforced: true }), ev(null, { files: ["q"], enforced: false }),
+    ])).toEqual([{ task: "a", files: ["x", "y"], count: 2 }]);
+  });
+  it("renders task -> files, with +N more per task and at most 10 task lines", () => {
+    const rows = Array.from({ length: 12 }, (_, i) => ({ task: `t${i}`, files: ["a.ts", "b.ts", "c.ts", "d.ts", "e.ts", "f.ts"], count: 9 }));
+    const out = renderOwnershipWarnings(rows).split("\n");
+    expect(out[0]).toMatch(/^Ownership warnings/);
+    expect(out[1]).toBe("  t0 -> a.ts, b.ts, c.ts, d.ts, e.ts (+4 more)");
+    expect(out).toHaveLength(1 + 10 + 1);
+    expect(out.at(-1)).toBe("  ...and 2 more tasks");
+  });
+  it("is empty without warnings and strips terminal escapes", () => {
+    expect(renderOwnershipWarnings([])).toBe("");
+    expect(renderOwnershipWarnings([{ task: "a", files: ["x\x1b[2Jy"], count: 1 }])).not.toContain("\x1b");
   });
 });

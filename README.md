@@ -77,7 +77,7 @@ mar --help | --version
 
 What is printed: the UI URL (`UI: http://127.0.0.1:<port>/?run=<runId>`); for each phase a header (`== Phase N (max M) ==`) and a plan table; each task's status and branch (read-only tasks have none); the integration result with `git merge` hints; a stop reason if the run ended early; the full answer (the report of each final task, falling back to its blackboard summary); and `Saved: <path>` lines for the stored reports. Output is stripped of terminal escape sequences and control characters.
 
-Exit codes: `0` only if every task of every phase is done, the planner said the goal is done, and the integration (when it ran) is healthy; `1` for failures and early stops (including preflight failure, an unknown run id on resume, and an aborted run); `2` for usage errors; `130` when a second signal forces exit.
+Exit codes: `0` only if every task is done (or its failure was superseded by a finished recovery phase, see below), the planner said the goal is done, and the integration (when it ran) is healthy; `1` for failures and early stops (including preflight failure, an unknown run id on resume, and an aborted run); `2` for usage errors; `130` when a second signal forces exit.
 
 ### One mode, automatic phases
 
@@ -85,11 +85,27 @@ There is no separate plan command and nothing waits for approval.
 
 1. The planner sizes the goal and plans the first phase: up to `maxTasks` tasks plus `remaining`, a short text of the work left (`""` when the phase completes the goal). Small goals and exploration questions produce one phase and cost one planner call.
 2. After a phase, if `remaining` is not empty, the planner is called again with the goal, the previous `remaining` and a compact history (task statuses, blackboard summaries/decisions/open questions, failure reasons, integration result and `git diff --stat`, capped at about 8,000 characters). Tasks of phase N have ids `p<N>-...`, may read finished tasks of earlier phases through `needs` (e.g. `p1-api/summary`), and start from the integration branch tip.
-3. The loop stops when the planner returns no tasks (done), `maxPhases` is reached, `maxTotalTokens` is exceeded (checked before each phase), the run is aborted, or a phase finishes no task. On an early stop `mar` prints why, the `remaining` text and how to continue, and exits non-zero.
+3. The loop stops when the planner returns no tasks (done), `maxPhases` is reached, `maxTotalTokens` is exceeded (checked before each phase), the run is aborted, a phase finishes no task, or a recovery stalls (below). On an early stop `mar` prints why, the `remaining` text and how to continue, and exits non-zero.
 
-`mar resume <runId>` continues an interrupted run: it re-runs the unfinished tasks of the first unfinished phase (done tasks are kept) and keeps planning. To go past a phase limit: `mar resume <runId> --phases 8`. A finished run just reprints its result.
+`mar resume <runId>` continues an interrupted run: it re-runs the unfinished tasks of the first unfinished phase (done tasks are kept; a phase that already has a recovery phase after it is not re-run) and keeps planning. A stored run whose last phase had failures and `remaining: ""` resumes into a recovery phase. To go past a phase limit: `mar resume <runId> --phases 8`. A finished run just reprints its result.
 
 `maxTotalTokens` sums input and output tokens of all `usage` events of the run, workers and planner calls (planner usage counts when the planner CLI reports it). Planner file reads see your checkout, not the integration branch.
+
+#### Recovery re-planning
+
+The planner often says a phase completes the goal (`remaining: ""`) and then a task fails, is blocked, or the integration stops at a merge conflict or a failed verify. `mar` does not end the run there: after a phase with any `failed` or `blocked` task, or whose latest integration (per repo) is a conflict, a failed verify or an error, it calls the planner again even though `remaining` is empty, within the same limits (`maxPhases`, `maxTotalTokens`, abort, `no_progress`). A run whose tasks are all done, with `remaining: ""` and a healthy integration, still ends with no extra planner call.
+
+The recovery planner is told to plan only the work needed to finish the goal and gets, besides the usual history: the reason of every failed or blocked task; for failed writers the branch `mar/<runId>/<id>` (partial work is committed there; inspect it with `git diff <base>...<branch>` or `git show`); every done writer branch that is not part of the integration branch (the integration stopped at a conflict, or never ran) with the conflicting files; the files of dependency-merge conflicts; and the predicted conflicts (below). Its tasks start from the integration branch tip.
+
+Loop protection: the run stops with `recovery_stalled` when a recovery phase finishes no task, when a failed task of a recovery phase is goal-equivalent (same goal, or same repo and `paths`) to a failed task of the recovery phase before it, or when the planner returns no tasks although failures remain. It never exceeds `maxPhases`. When a recovery phase finishes every task and the integration is healthy, the failures of earlier phases count as superseded: the run is complete, exits `0`, and `mar history` shows it as `done`. `mar history` shows a stalled recovery as `failed (recovery_stalled)`.
+
+#### Conflict reporting and shared files
+
+- A task whose dependency branches cannot be merged into its worktree fails with `dependency <dep>: merge conflict in <files>` (not a generic git error), nothing is left half-merged, and a `dependency_merge_conflict` event `{task, dependency, files}` (at most 50 files, plus `repo` for a cross-repo sibling view) is recorded.
+- When two parallel writers (same repo, no dependency path between them) change the same file outside their declared `paths`, or one changes a file inside the other's `paths`, a `predicted_conflict` event `{tasks, files}` is recorded once per pair. It is informational; it feeds the recovery history.
+- With `ownership: "warn"`, the end-of-run output of `mar run` and the detail view of `mar history <runId>` print an `Ownership warnings:` block (task -> files outside its declared `paths`, at most 10 lines).
+- The planner is told that files several tasks would change (shared test files such as e2e specs, global stylesheets, app wiring such as `App.tsx` or index files, `package.json`, lockfiles, config) belong to exactly one task; parallel tasks put new tests and styles in their own new files, and whatever wires the parallel results together is a later task that depends on them. Plan validation additionally rejects two parallel writers that both list one of `package.json`, `pnpm-lock.yaml`, `package-lock.json`, `yarn.lock`, `tsconfig*.json` or `README.md` (it says "shared file; give it to one task or order them"). Only declared `paths` are checked, so a writer that strays into a shared file is caught afterwards by the ownership events above.
+- For runs with several parallel writers in one repo, set `"ownership": "enforce"` in `.mar.json`: a writer that strays outside its `paths` then fails with `failed:ownership` (retried with that feedback when `maxAttempts` allows) instead of silently creating a conflict later.
 
 ### `mar history`
 
@@ -113,7 +129,7 @@ mar history --ui                         # replay the newest run in the web UI
 | `--task <id>` | Print only that task's full report (its blackboard summary if it has none); needs a run id |
 | `--ui` | Serve the stored run in the web UI, read-only, until Ctrl-C; `--port` applies; not combinable with `--json` or `--task` |
 
-`mar history` reads a private snapshot copy of the database, so the DB, repo and worktrees are never modified. Status is derived from stored data: `done`, `failed`, `blocked`, `incomplete` (work remained or tasks never started), `planning-failed`, `running` (heuristic: newest event under 2 minutes old with a running task) and `stopped` (anything else).
+`mar history` reads a private snapshot copy of the database, so the DB, repo and worktrees are never modified. Status is derived from stored data (a run whose final recovery phase finished everything is `done`): `done`, `failed`, `blocked`, `incomplete` (work remained or tasks never started), `planning-failed`, `running` (heuristic: newest event under 2 minutes old with a running task) and `stopped` (anything else).
 
 ## How a run works
 
@@ -156,7 +172,7 @@ Optional file in the repo root. Unknown keys are rejected.
 | `verify` | list of commands | `[]` | Commands (split into arguments, no shell) each implementer/tester must pass in its worktree, re-run on the integration branch; `[]` turns the gate off |
 | `verifyTimeoutMinutes` | int 1 to 60 | `10` | Timeout per verify run |
 | `linkPaths` | list of repo-relative paths | `[]` | Paths (single-segment `*` globs such as `node_modules`, `packages/*/node_modules`) symlinked from your repo into writer worktrees so verify can run without reinstalling; secrets (`.env*`, keys), `.git` and `.mar` are refused |
-| `ownership` | `"warn"` or `"enforce"` | `"warn"` | Writer touched files outside its `paths`: record an event, or fail the task (`failed:ownership`) |
+| `ownership` | `"warn"` or `"enforce"` | `"warn"` | Writer touched files outside its `paths`: record an event (and print an `Ownership warnings:` block), or fail the task (`failed:ownership`). Recommended `"enforce"` when several writers run in parallel in one repo |
 | `integrate` | boolean | `true` | Build `mar/<runId>/integration` |
 | `tiers` | `{claude?, codex?}` each with partial `low`/`mid`/`high` (string or null) | claude: `claude-haiku-4-5-20251001` / `claude-sonnet-5-5` / `claude-sonnet-5-5`; codex: all `null` | Model per runtime and tier; `null` uses that CLI's built-in default (Codex runs with `--ignore-user-config`, so your own Codex config is not used) |
 | `repos` | list of folder names | unset | Workspace only: restrict the run to these repos; `--repos` wins |
@@ -242,6 +258,8 @@ pnpm test:live                 # opt-in, spends tokens
 - Verify gates only run when `verify` is configured; otherwise nothing checks that a task's changes build or pass tests.
 - Codex tier models default to Codex's built-in default until set in `.mar.json`; your own Codex config is ignored.
 - In workspace mode, a task's read-only view of another repo reflects the finished work of the tasks it depends on in that repo; tasks with no such dependency see that repo as it was when the run (or phase) started. Sibling repos are for reading contracts only: workers are told not to import from them, and a worker that modifies a sibling checkout has the change detected and reverted.
+- Ownership defaults to `warn`, so parallel writers that stray into the same file are only reported (events, the `Ownership warnings:` block); the conflict then surfaces when their branches are merged, and recovery re-planning has to repair it. Use `ownership: "enforce"` to prevent it. Shared-file discipline in the plan is up to the planner; `mar` only validates exact matches of a few well-known files (`package.json`, lockfiles, `tsconfig*.json`, `README.md`) and identical or overlapping declared `paths`.
+- Recovery re-planning is bounded by `maxPhases`, `maxTotalTokens` and the stall rules, and depends on the planner producing a workable repair; goal-equivalence of failed tasks is a text/`paths` comparison, not a semantic one.
 - The live path (real Claude and Codex) is not exercised in CI; `pnpm test:live` is manual and opt-in.
 - Under `/tmp` and other temp directories the Codex sandbox treats the temp dir as writable (see workspaces).
 

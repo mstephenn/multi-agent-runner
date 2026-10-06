@@ -26,8 +26,22 @@ export interface HistoryIntegration {
   /** `git diff --stat` of the integration branch vs the run's base commit. */
   diffStat?: string;
 }
+/** A DONE writer branch that is not part of the integration branch. `conflictFiles`: the integration stopped at exactly this branch. */
+export interface HistoryUnmerged { task: string; branch: string; repo?: string; conflictFiles?: string[] }
+/** A task that could not start because merging one of its dependency branches conflicted. */
+export interface HistoryDepConflict { task: string; dependency: string; repo?: string; files: string[] }
+/** Two parallel writers that both changed the same files outside their declared paths. */
+export interface HistoryPredicted { tasks: string[]; files: string[] }
 /** `integrations` (one per repo) is used by workspace runs instead of `integration`. */
-export interface HistoryPhase { phase: number; tasks: HistoryTask[]; integration?: HistoryIntegration; integrations?: HistoryIntegration[] }
+export interface HistoryPhase {
+  phase: number; tasks: HistoryTask[]; integration?: HistoryIntegration; integrations?: HistoryIntegration[];
+  /** Recovery context (the latest phase): done writer branches missing from the integration branch. */
+  unmerged?: HistoryUnmerged[];
+  depConflicts?: HistoryDepConflict[]; predicted?: HistoryPredicted[];
+}
+
+const MAX_ENTRIES = 20;
+const MAX_FILES = 20;
 
 const one = (s: string) => redact(s).replace(/\r/g, "");
 const indent = (s: string, pad: string) => one(s).split("\n").map((l) => pad + l).join("\n");
@@ -37,7 +51,7 @@ function renderTask(t: HistoryTask): string {
   if (t.summary) out.push(`  summary:\n${indent(t.summary, "    ")}`);
   if (t.decisions && t.decisions !== "(none)") out.push(`  decisions:\n${indent(t.decisions, "    ")}`);
   if (t.openQuestions && t.openQuestions !== "(none)") out.push(`  open_questions:\n${indent(t.openQuestions, "    ")}`);
-  if (t.branch) out.push(`  partial work is on that branch; a continuation task may inspect it with \`git diff\`/\`git show\`: ${t.branch}`);
+  if (t.branch) out.push(`  partial work is on that branch; a continuation task may inspect it with \`git diff\`/\`git show\` (it is committed there, for example \`git diff <base>...<branch>\`): ${t.branch}`);
   return out.join("\n");
 }
 
@@ -54,11 +68,42 @@ function renderIntegration(i: HistoryIntegration): string {
   return out.join("\n");
 }
 
+const fileList = (files: string[]) => {
+  const shown = files.slice(0, MAX_FILES).map(one).join(", ") || "(unknown files)";
+  return files.length > MAX_FILES ? `${shown} (+${files.length - MAX_FILES} more)` : shown;
+};
+const more = (n: number, shown: number) => (n > shown ? [`  ...and ${n - shown} more`] : []);
+
+function renderRecovery(p: HistoryPhase): string[] {
+  const out: string[] = [];
+  const un = p.unmerged ?? [];
+  if (un.length) {
+    out.push("Done writer branches NOT merged into the integration branch (re-apply them on top of its tip, resolving conflicts):");
+    for (const u of un.slice(0, MAX_ENTRIES))
+      out.push(`- ${one(u.branch)}${u.repo ? ` @${one(u.repo)}` : ""}${u.conflictFiles ? ` (integration stopped here: conflict in ${fileList(u.conflictFiles)})` : ""}`);
+    out.push(...more(un.length, MAX_ENTRIES));
+  }
+  const dc = p.depConflicts ?? [];
+  if (dc.length) {
+    out.push("Tasks that could not start because merging a dependency branch conflicted:");
+    for (const c of dc.slice(0, MAX_ENTRIES))
+      out.push(`- ${one(c.task)} failed: dependency ${one(c.dependency)}${c.repo ? ` (sibling repo ${one(c.repo)})` : ""} conflicted in ${fileList(c.files)}`);
+    out.push(...more(dc.length, MAX_ENTRIES));
+  }
+  const pr = p.predicted ?? [];
+  if (pr.length) {
+    out.push("Parallel tasks that both changed the same files outside their declared paths:");
+    for (const c of pr.slice(0, MAX_ENTRIES)) out.push(`- ${c.tasks.map(one).join(" and ")}: ${fileList(c.files)}`);
+    out.push(...more(pr.length, MAX_ENTRIES));
+  }
+  return out;
+}
+
 const header = (p: HistoryPhase) => {
   const n = (s: string) => p.tasks.filter((t) => t.status === s).length;
   return `## Phase ${p.phase} (${n("done")} done, ${n("failed")} failed, ${n("blocked")} blocked)`;
 };
-const full = (p: HistoryPhase) => [header(p), ...p.tasks.map(renderTask), ...(p.integrations ?? (p.integration ? [p.integration] : [])).map(renderIntegration)].join("\n");
+const full = (p: HistoryPhase) => [header(p), ...p.tasks.map(renderTask), ...(p.integrations ?? (p.integration ? [p.integration] : [])).map(renderIntegration), ...renderRecovery(p)].join("\n");
 // One line: the task ids by outcome, no details.
 const compact = (p: HistoryPhase) => `${header(p)} details omitted: ${p.tasks.map((t) => `${t.id} ${t.status}`).join(", ")}`;
 

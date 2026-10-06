@@ -8,7 +8,7 @@ import { claudeAdapter, codexAdapter, type Adapter } from "@mar/adapters";
 import { Store, startServer } from "@mar/server";
 import { createWorkspaceWorktrees, createWorktrees, ensureMarExcluded, git, integrate as realIntegrate, planGoal, redact, REPO_NAME, repoMap, resolveWorkspace, runDag as realRunDag, runPhases, usesSharedWorktree, workspaceRepoMap, type IntegrationOutcome, type PhasePlanArgs, type PhaseRec, type PhaseStop, type Plan, type Worktrees, type WorkspaceRepo } from "@mar/orchestrator";
 import { effectiveMaxTotalTokens, loadConfig, loadWorkspaceConfig, type MarConfig, type RepoConfig } from "./config.js";
-import { renderPhaseHeader, renderPhaseSummary, renderPlanTable, renderStop } from "./phaseOutput.js";
+import { ownershipRows, renderOwnershipWarnings, renderPhaseHeader, renderPhaseSummary, renderPlanTable, renderStop } from "./phaseOutput.js";
 import { renderAnswer, saveReports } from "./answer.js";
 import { nodeRunner, preflight, preflightWorkspace } from "./preflight.js";
 import { runHistory, SIGNAL_DEBOUNCE_MS, type HistoryCli, type HistoryDeps } from "./history.js";
@@ -241,7 +241,7 @@ export async function executeRun(o: ExecuteOpts): Promise<ExecuteResult> {
       }
       const common = {
         goal, repoMap: map, cwd: repo, signal: o.signal, phase: a.phase, maxTasks: a.maxTasks, previousRemaining: a.previousRemaining,
-        history: a.history, takenIds: a.takenIds, externalIds: a.externalIds, onUsage: a.onUsage,
+        history: a.history, ...(a.recovery ? { recovery: true } : {}), takenIds: a.takenIds, externalIds: a.externalIds, onUsage: a.onUsage,
         ...(ws ? { workspace: ws.repos.map((r) => r.name) } : {}),
       };
       try { return await planGoal({ ...common, adapter: adapters.claude, model: config.plannerModel }); }
@@ -543,6 +543,7 @@ export async function runMain(argv: string[], deps: MainDeps = {}): Promise<numb
     const doneBranches: { branch: string; repo?: string }[] = [];
     let anyBranch = false;
     let integ = { built: false, healthy: true };
+    const repoHealth = new Map<string, boolean>(); // workspace: the LATEST integration of each repo decides (a recovery phase can fix an earlier conflict)
     const builtRepos = new Set<string>(); // workspace: repos whose integration branch was built
     const wsPath = (n: string) => workspace?.repos.find((r) => r.name === n)?.path;
     for (const p of phases) {
@@ -562,7 +563,8 @@ export async function runMain(argv: string[], deps: MainDeps = {}): Promise<numb
         for (const i of p.integrations ?? (p.integration ? [p.integration] : [])) {
           const r = printIntegration(runId, i, wsPath);
           if (r.built && i.repo) builtRepos.add(i.repo);
-          integ = { built: integ.built || r.built, healthy: integ.healthy && r.healthy };
+          repoHealth.set(i.repo ?? "", r.healthy);
+          integ = { built: integ.built || r.built, healthy: [...repoHealth.values()].every(Boolean) };
         }
       } else if (multi && p.integration) integ = printIntegration(runId, p.integration);
     }
@@ -573,6 +575,8 @@ export async function runMain(argv: string[], deps: MainDeps = {}): Promise<numb
       for (const b of unmerged) console.log(`  git ${workspace && b.repo ? `-C ${wsPath(b.repo) ?? b.repo} ` : ""}merge ${b.branch}`);
     }
     if (!anyBranch && phases.some((p) => p.dag.tasks.length > 0)) console.log("\nNo branches were created: all tasks were read-only.");
+    const warnings = renderOwnershipWarnings(ownershipRows(store!.eventsOfType(runId, ["ownership_violation"])));
+    if (warnings) console.log(`\n${warnings}`);
     if (out.stop) console.log(`\n${renderStop(out.stop, out.remaining, runId, config.maxPhases)}`);
     if (reports.length) {
       const { saved, errors } = saveReports(repo, runId, reports);

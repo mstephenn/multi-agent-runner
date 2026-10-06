@@ -338,3 +338,154 @@ describe("runPhases integration", () => {
     expect(fn).not.toHaveBeenCalled();
   });
 });
+
+describe("runPhases recovery after failures", () => {
+  const RECOVERY = "The previous phase had failures.";
+  const conflictIntegrate = (merged: string[], conflictBranch: string, files: string[]): PhasesDeps["integrate"] => async (a) => (
+    a.phase === 1
+      ? { result: { branch: "mar/r1/integration", merged, conflict: { branch: conflictBranch, files } } }
+      : { result: { branch: "mar/r1/integration", merged: a.branches } }
+  );
+  const worker = (failing: string[]) => (i: AdapterInput): AgentEvent[] | Error => (failing.includes(i.taskId) ? new Error(`kaboom ${i.taskId}`) : workerOk(i.taskId));
+
+  it("re-plans after a failed task even though the planner said remaining '', then completes", async () => {
+    const s = mk();
+    const h = harness(s, { worker: (i, n) => (i.taskId === "p1-bad" ? new Error("kaboom") : workerOk(i.taskId)), plans: {
+      1: { tasks: [task("p1-good"), task("p1-bad")], remaining: "" }, 2: { tasks: [task("p2-fix")], remaining: "" },
+    } });
+    const r = await runPhases(h.deps);
+    expect(h.planCalls()).toHaveLength(2);
+    const prompt = h.planCalls()[1].prompt;
+    expect(prompt).toContain(RECOVERY);
+    expect(prompt).toContain("kaboom");
+    expect(prompt).toContain("mar/r1/p1-bad");
+    expect(prompt).toContain("git diff <base>...<branch>");
+    expect(h.runs.map((x) => x.phase)).toEqual([1, 2]);
+    expect(r.stop).toBeUndefined();
+    expect(r.complete).toBe(true); // the failure of phase 1 is superseded by the finished recovery phase
+    expect(r.results["p1-bad"]).toBe("failed");
+  });
+  it("re-plans for blocked tasks (failed dependency) too", async () => {
+    const s = mk();
+    const h = harness(s, { worker: worker(["p1-a"]), plans: {
+      1: { tasks: [task("p1-a"), task("p1-b", { dependsOn: ["p1-a"] }), task("p1-c")], remaining: "" }, 2: { tasks: [task("p2-x")], remaining: "" },
+    } });
+    const r = await runPhases(h.deps);
+    expect(h.planCalls()).toHaveLength(2);
+    expect(r.complete).toBe(true);
+  });
+  it("re-plans after an integration conflict with every task done, and lists the unmerged done branches with the conflict files", async () => {
+    const s = mk();
+    const h = harness(s, { integrate: conflictIntegrate(["mar/r1/p1-a"], "mar/r1/p1-b", ["shared.txt"]), plans: {
+      1: { tasks: [task("p1-a"), task("p1-b"), task("p1-c")], remaining: "" }, 2: { tasks: [task("p2-merge")], remaining: "" },
+    } });
+    const r = await runPhases(h.deps);
+    expect(h.planCalls()).toHaveLength(2);
+    const prompt = h.planCalls()[1].prompt;
+    expect(prompt).toContain("NOT merged into the integration branch");
+    expect(prompt).toContain("mar/r1/p1-b");
+    expect(prompt).toContain("mar/r1/p1-c");
+    expect(prompt).toContain("shared.txt");
+    expect(h.runs[1].baseRef).toBe("mar/r1/integration");
+    expect(r.complete).toBe(true);
+  });
+  it("re-plans after a failed integration verify with remaining ''", async () => {
+    const s = mk();
+    const h = harness(s, { integrate: async (a) => ({ result: { branch: "mar/r1/integration", merged: a.branches, ...(a.phase === 1 ? { verify: { ok: false, failed: { command: "pnpm test", code: 1, timedOut: false }, tail: "boom" } } : {}) } }), plans: {
+      1: { tasks: [task("p1-a"), task("p1-b")], remaining: "" }, 2: { tasks: [task("p2-fix")], remaining: "" },
+    } });
+    const r = await runPhases(h.deps);
+    expect(h.planCalls()).toHaveLength(2);
+    expect(r.complete).toBe(true);
+  });
+  it("includes dependency merge conflicts and predicted conflicts from the events in the recovery history", async () => {
+    const s = mk();
+    const h = harness(s, { worker: worker(["p1-d"]), plans: { 1: { tasks: [task("p1-a"), task("p1-d", { dependsOn: ["p1-a"], paths: [] })], remaining: "" }, 2: { tasks: [task("p2-x")], remaining: "" } } });
+    s.appendEvent({ run_id: "r1", task_id: "p1-d", agent_id: "p1-d", type: "dependency_merge_conflict", payload: { task: "p1-d", dependency: "p1-a", files: ["App.tsx", "styles.css"] } });
+    s.appendEvent({ run_id: "r1", task_id: "p1-a", agent_id: "p1-a", type: "predicted_conflict", payload: { tasks: ["p1-a", "p1-b"], files: ["smoke.spec.ts"] } });
+    await runPhases(h.deps);
+    const prompt = h.planCalls()[1].prompt;
+    expect(prompt).toMatch(/p1-d.*dependency p1-a.*App\.tsx, styles\.css/s);
+    expect(prompt).toMatch(/p1-a.*p1-b.*smoke\.spec\.ts/s);
+  });
+  it("all done + remaining '' + healthy integration: no extra planner call (unchanged)", async () => {
+    const s = mk();
+    const h = harness(s, { integrate: async (a) => ({ result: { branch: "mar/r1/integration", merged: a.branches } }), plans: { 1: { tasks: [task("p1-a"), task("p1-b")], remaining: "" } } });
+    const r = await runPhases(h.deps);
+    expect(h.planCalls()).toHaveLength(1);
+    expect(r.complete).toBe(true);
+  });
+  it("recovery_stalled when the recovery phase finishes no task (no third phase)", async () => {
+    const s = mk();
+    const h = harness(s, { worker: worker(["p1-bad", "p2-fix"]), plans: {
+      1: { tasks: [task("p1-good"), task("p1-bad")], remaining: "" }, 2: { tasks: [task("p2-fix")], remaining: "" }, 3: { tasks: [task("p3-fix")], remaining: "" },
+    } });
+    const r = await runPhases(h.deps);
+    expect(r.stop?.reason).toBe("recovery_stalled");
+    expect(r.complete).toBe(false);
+    expect(h.planCalls()).toHaveLength(2);
+    expect(h.runs.map((x) => x.phase)).toEqual([1, 2]);
+  });
+  it("recovery_stalled when the same work fails again in two consecutive recovery phases", async () => {
+    const s = mk();
+    const h = harness(s, { worker: worker(["p1-bad", "p2-bad", "p3-bad"]), plans: {
+      1: { tasks: [task("p1-bad")], remaining: "" },
+      2: { tasks: [task("p2-ok"), task("p2-bad", { goal: "Fix  the THING" })], remaining: "" },
+      3: { tasks: [task("p3-ok"), task("p3-bad", { goal: "fix the thing" })], remaining: "" },
+      4: { tasks: [task("p4-ok")], remaining: "" },
+    } });
+    h.deps.limits.maxPhases = 8;
+    // phase 1's failure has a different goal; phases 2 and 3 fail the same (goal-equivalent) task
+    const r = await runPhases(h.deps);
+    expect(r.stop?.reason).toBe("recovery_stalled");
+    expect(r.stop?.message).toMatch(/again/);
+    expect(h.planCalls()).toHaveLength(3);
+    expect(h.runs.map((x) => x.phase)).toEqual([1, 2, 3]);
+  });
+  it("never exceeds maxPhases while recovering", async () => {
+    const s = mk();
+    const h = harness(s, { limits: { maxPhases: 2 }, worker: worker(["p1-bad", "p2-bad"]), plans: {
+      1: { tasks: [task("p1-bad")], remaining: "" }, 2: { tasks: [task("p2-ok"), task("p2-bad", { goal: "other" })], remaining: "" }, 3: { tasks: [task("p3-x")], remaining: "" },
+    } });
+    const r = await runPhases(h.deps);
+    expect(r.stop?.reason).toBe("max_phases");
+    expect(h.runs.map((x) => x.phase)).toEqual([1, 2]);
+    expect(h.planCalls()).toHaveLength(2);
+  });
+  it("respects maxTotalTokens when recovering", async () => {
+    const s = mk();
+    const h = harness(s, { limits: { maxTotalTokens: 5 }, worker: worker(["p1-bad"]), plans: { 1: { tasks: [task("p1-good"), task("p1-bad")], remaining: "" }, 2: { tasks: [task("p2-x")], remaining: "" } } });
+    const r = await runPhases(h.deps);
+    expect(r.stop?.reason).toBe("max_tokens");
+    expect(h.planCalls()).toHaveLength(1);
+  });
+  it("an empty recovery plan is a stall, not a silent success", async () => {
+    const s = mk();
+    const h = harness(s, { worker: worker(["p1-bad"]), plans: { 1: { tasks: [task("p1-bad")], remaining: "" }, 2: { tasks: [], remaining: "" } } });
+    const r = await runPhases(h.deps);
+    expect(r.stop?.reason).toBe("recovery_stalled");
+    expect(r.complete).toBe(false);
+  });
+  it("abort: a failure with remaining '' never re-plans once the run is aborted", async () => {
+    const s = mk(); const ac = new AbortController();
+    const h = harness(s, { signal: ac.signal, worker: (i) => { if (i.taskId === "p1-bad") { ac.abort(); return new Error("aborted"); } return workerOk(i.taskId); }, plans: { 1: { tasks: [task("p1-bad")], remaining: "" }, 2: { tasks: [task("p2-x")], remaining: "" } } });
+    const r = await runPhases(h.deps);
+    expect(r.stop?.reason).toBe("aborted");
+    expect(h.planCalls()).toHaveLength(1);
+  });
+  it("resume: a stored run whose last phase failed with remaining '' resumes into a recovery phase", async () => {
+    const s = mk();
+    const first = harness(s, { limits: { maxPhases: 1 }, worker: worker(["p1-bad"]), plans: { 1: { tasks: [task("p1-good"), task("p1-bad")], remaining: "" } } });
+    expect((await runPhases(first.deps)).stop?.reason).toBe("max_phases");
+    const second = harness(s, { worker: worker(["p1-bad"]), plans: { 2: { tasks: [task("p2-fix")], remaining: "" } } });
+    const r = await runPhases(second.deps);
+    expect(second.planCalls()).toHaveLength(1);
+    expect(second.planCalls()[0].prompt).toContain(RECOVERY);
+    expect(r.complete).toBe(true);
+    // a third process on the finished run does nothing: the superseded phase 1 is not re-run
+    const third = harness(s, { worker: worker(["p1-bad"]), plans: {} });
+    const again = await runPhases(third.deps);
+    expect(third.f.calls).toEqual([]);
+    expect(again.complete).toBe(true);
+  });
+});

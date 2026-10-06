@@ -115,6 +115,32 @@ describe("runMain: phased runs", () => {
     expect(c.text()).toContain("Remaining: m2");
     expect(f.calls.filter((x) => x.taskId === "planner")).toHaveLength(2);
   });
+  it("recovers from a failed task although the planner said done: re-plans, finishes, exit 0 (no stop message)", async () => {
+    const c = capture();
+    const f = plans({ 1: { tasks: [task("p1-a"), task("p1-b")], remaining: "" }, 2: { tasks: [task("p2-fix")], remaining: "" } },
+      (i) => (i.taskId === "p1-b" ? new Error("x") : workerOk(i.taskId)));
+    expect(await go(["run", "g", "--repo", gitRepo()], f)).toBe(0);
+    expect(c.text()).toContain("== Phase 2 (max 5) ==");
+    expect(c.text()).toContain("p1-b  failed");
+    expect(c.text()).not.toContain("Stopped early");
+    expect(f.calls.filter((x) => x.taskId === "planner")[1].prompt).toContain("The previous phase had failures.");
+  });
+  it("a recovery that fails again stops with recovery_stalled and exits 1", async () => {
+    const c = capture();
+    const f = plans({ 1: { tasks: [task("p1-a"), task("p1-b")], remaining: "" }, 2: { tasks: [task("p2-fix")], remaining: "" }, 3: { tasks: [task("p3-fix")], remaining: "" } },
+      (i) => (i.taskId === "p1-b" || i.taskId === "p2-fix" ? new Error("x") : workerOk(i.taskId)));
+    expect(await go(["run", "g", "--repo", gitRepo()], f)).toBe(1);
+    expect(c.text()).toMatch(/Stopped early: recovery phase 2 finished no task/);
+    expect(c.text()).toMatch(/Recovery made no progress.*mar resume/s);
+    expect(f.calls.filter((x) => x.taskId === "planner")).toHaveLength(2);
+  });
+  it("prints an Ownership warnings block when a task changed files outside its paths", async () => {
+    const c = capture();
+    const f = plans({ 1: { tasks: [task("p1-a")], remaining: "" } });
+    const worktrees = { ...wt, head: async () => "s", changedFiles: async () => ["p1-a/x.ts", "src/App.tsx", "styles.css"] };
+    expect(await go(["run", "g", "--repo", gitRepo()], f, { worktrees })).toBe(0);
+    expect(c.text()).toMatch(/Ownership warnings.*\n {2}p1-a -> src\/App\.tsx, styles\.css/);
+  });
   it("maxTasks and repoMapChars from .mar.json reach the planner prompt and the repo map", async () => {
     capture(); const repo = gitRepo();
     writeFileSync(join(repo, ".mar.json"), JSON.stringify({ maxTasks: 3, repoMapChars: 5000 }));

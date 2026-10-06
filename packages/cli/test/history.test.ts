@@ -120,3 +120,39 @@ describe("listJson", () => {
   });
   it("empty list is []", () => { expect(JSON.parse(listJson([]))).toEqual([]); });
 });
+
+describe("summarizeRun with recovery phases", () => {
+  const g = (id: string, extra: object = {}) => ({ id, goal: `goal ${id}`, paths: [`${id}/**`], ...extra });
+  it("a recovery phase that finished everything supersedes the earlier failures: done", () => {
+    const r = summarizeRun(input({
+      phases: [{ phase: 1, taskIds: ["a", "b"], remaining: "" }, { phase: 2, taskIds: ["c"], remaining: "" }],
+      statuses: st({ a: "done", b: ["failed", "dependency p1-x: merge conflict in shared.txt"], c: "done" }),
+    }));
+    expect(r).toMatchObject({ status: "done", phases: 2, tasksDone: 2, tasksTotal: 3 });
+  });
+  it("a normal (remaining non-empty) next phase does not hide failures", () => {
+    const r = summarizeRun(input({
+      phases: [{ phase: 1, taskIds: ["a", "b"], remaining: "more" }, { phase: 2, taskIds: ["c"], remaining: "" }],
+      statuses: st({ a: "done", b: "failed", c: "done" }),
+    }));
+    expect(r.status).toBe("failed");
+  });
+  it("a recovery phase with no done task reads as failed (recovery_stalled)", () => {
+    const r = summarizeRun(input({
+      phases: [{ phase: 1, taskIds: ["a", "b"], remaining: "", tasks: [g("a"), g("b")] }, { phase: 2, taskIds: ["c"], remaining: "", tasks: [g("c")] }],
+      statuses: st({ a: "done", b: "failed", c: "failed" }),
+    }));
+    expect(r).toMatchObject({ status: "failed", stopReason: "recovery_stalled" });
+  });
+  it("the same work failing in two consecutive recovery phases reads as recovery_stalled", () => {
+    const r = summarizeRun(input({
+      phases: [
+        { phase: 1, taskIds: ["a"], remaining: "", tasks: [g("a")] },
+        { phase: 2, taskIds: ["b", "c"], remaining: "", tasks: [g("b"), g("c", { goal: "Fix  it" })] },
+        { phase: 3, taskIds: ["d", "e"], remaining: "", tasks: [g("d"), g("e", { goal: "fix it" })] },
+      ],
+      statuses: st({ a: "failed", b: "done", c: "failed", d: "done", e: "failed" }),
+    }));
+    expect(r).toMatchObject({ status: "failed", stopReason: "recovery_stalled" });
+  });
+});

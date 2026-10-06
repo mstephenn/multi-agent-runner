@@ -3,9 +3,9 @@ import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { Dag, Role, Runtime, StoredEvent, TaskSpec, Tier } from "@mar/core";
 import { Store, startServer } from "@mar/server";
-import { redact } from "@mar/orchestrator";
+import { recoveryStall, redact } from "@mar/orchestrator";
 import { renderAnswer, reportPath } from "./answer.js";
-import { renderPlanTable } from "./phaseOutput.js";
+import { ownershipRows, renderOwnershipWarnings, renderPlanTable } from "./phaseOutput.js";
 import { sanitizeForTerminal } from "./sanitize.js";
 
 /** A signal arriving this soon after the previous one is a duplicate delivery, not a second Ctrl-C. */
@@ -27,7 +27,7 @@ export interface HistoryCli {
 
 export interface SummarizeInput {
   /** Planned phases in order (empty = the run never got a plan). */
-  phases: { phase: number; taskIds: readonly string[]; remaining: string }[];
+  phases: { phase: number; taskIds: readonly string[]; remaining: string; /** Enables the recovery-stall check. */ tasks?: readonly { id: string; goal: string; repo?: string; paths: readonly string[] }[] }[];
   statuses: ReadonlyMap<string, { status: string; detail?: string | null }>;
   /** Reason of a run-level (task-less) `task_failed` event, i.e. phase 1 planning failed. */
   plannerFailure?: string;
@@ -57,7 +57,14 @@ export function summarizeRun(i: SummarizeInput): RunSummary {
   if (ids.length === 0) return i.plannerFailure ? withReason("planning-failed", i.plannerFailure) : withReason("stopped");
   const fresh = i.lastEventTs !== undefined && i.now - i.lastEventTs < RUNNING_WINDOW_MS;
   if (running > 0 && fresh) return withReason("running");
-  if (failed > 0) return withReason("failed", aborted ? "aborted" : undefined);
+  // A recovery phase (planned after one that said nothing remained) that finished everything supersedes the failures before it.
+  const lastPhase = i.phases.at(-1)!;
+  const recovered = i.phases.length > 1 && i.phases.at(-2)!.remaining.trim() === "" && lastPhase.taskIds.length > 0 && lastPhase.taskIds.every((id) => stat(id) === "done");
+  if (recovered && running === 0) return remaining ? withReason("incomplete", "limit reached with work remaining") : withReason("done");
+  if (failed > 0) {
+    const stall = i.phases.every((p) => p.tasks) ? recoveryStall(i.phases.map((p) => ({ phase: p.phase, remaining: p.remaining.trim(), tasks: p.tasks!.map((t) => ({ ...t, status: stat(t.id) })) }))) : undefined;
+    return withReason("failed", aborted ? "aborted" : stall ? "recovery_stalled" : undefined);
+  }
   if (blocked > 0) return withReason("blocked", aborted ? "aborted" : undefined);
   if (done === ids.length) return remaining ? withReason("incomplete", "limit reached with work remaining") : withReason("done");
   if (running > 0) return withReason("stopped");
@@ -182,7 +189,7 @@ function load(store: Store, run: RunRow, now: number): Loaded {
   const statuses = new Map(store.taskStatuses(run.id).map((s) => [s.task_id, { status: s.status, detail: s.detail }]));
   const failure = store.eventsOfType(run.id, ["task_failed"]).filter((e) => e.task_id === null).at(-1);
   const summary = summarizeRun({
-    phases: phases.map((p) => ({ phase: p.phase, taskIds: p.tasks.map((t) => t.id), remaining: p.remaining })), statuses,
+    phases: phases.map((p) => ({ phase: p.phase, taskIds: p.tasks.map((t) => t.id), remaining: p.remaining, tasks: p.tasks.map((t) => ({ id: t.id, goal: t.goal, ...(t.repo ? { repo: t.repo } : {}), paths: t.paths })) })), statuses,
     ...(failure ? { plannerFailure: flat(str(failure.payload.reason, "planning failed")) } : {}),
     ...(store.lastEventTs(run.id) !== undefined ? { lastEventTs: store.lastEventTs(run.id) } : {}), now,
   });
@@ -285,6 +292,9 @@ async function renderDetail(store: Store, l: Loaded, now: number, branchExists: 
     out.push(...integrationLines(integrations, p.phase));
     if (p.remaining.trim()) out.push(`  Remaining after this phase: ${flat(p.remaining)}`);
   }
+
+  const warnings = renderOwnershipWarnings(ownershipRows(store.eventsOfType(run.id, ["ownership_violation"])));
+  if (warnings) out.push("", warnings);
 
   const reports = new Map(store.listReports(run.id).map((r) => [r.task_id, r.body]));
   const states = new Map([...l.statuses]);

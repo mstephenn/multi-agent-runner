@@ -45,6 +45,34 @@ export function renderStop(stop: PhaseStop, remaining: string, runId: string, ma
     case "no_progress": out.push(`Fix the cause (see the failed tasks above), then continue with: ${resume}`); break;
     case "aborted": out.push(`Continue with: ${resume}`); break;
     case "replan_failed": out.push(`Retry planning with: ${resume}`); break;
+    case "recovery_stalled": out.push(`Recovery made no progress. Resolve the failures or conflicts by hand (see the tasks and the integration above; the work is on the mar/${runId}/... branches), then continue with: ${resume}`); break;
   }
   return out.join("\n");
+}
+
+export interface OwnershipRow { task: string; files: string[]; count: number }
+const MAX_OWNERSHIP_LINES = 10;
+const MAX_OWNERSHIP_FILES = 5;
+
+/** One row per task from `ownership_violation` events (the latest per task); enforced ones already failed the task and are skipped. */
+export function ownershipRows(events: readonly { task_id: string | null; payload: Record<string, unknown> }[]): OwnershipRow[] {
+  const byTask = new Map<string, OwnershipRow>();
+  for (const e of events) {
+    if (e.task_id === null || e.payload.enforced === true) continue;
+    const files = Array.isArray(e.payload.files) ? e.payload.files.filter((f): f is string => typeof f === "string") : [];
+    byTask.set(e.task_id, { task: e.task_id, files, count: typeof e.payload.count === "number" ? e.payload.count : files.length });
+  }
+  return [...byTask.values()];
+}
+
+/** `Ownership warnings:` block (task -> files outside its declared paths, at most 10 lines), or "" when there are none. */
+export function renderOwnershipWarnings(rows: readonly OwnershipRow[]): string {
+  if (rows.length === 0) return "";
+  const lines = rows.slice(0, MAX_OWNERSHIP_LINES).map((r) => {
+    const shown = r.files.slice(0, MAX_OWNERSHIP_FILES).map(flat).join(", ");
+    const extra = Math.max(r.count, r.files.length) - Math.min(r.files.length, MAX_OWNERSHIP_FILES);
+    return `  ${clean(r.task)} -> ${shown}${extra > 0 ? ` (+${extra} more)` : ""}`;
+  });
+  if (rows.length > MAX_OWNERSHIP_LINES) lines.push(`  ...and ${rows.length - MAX_OWNERSHIP_LINES} more tasks`);
+  return ["Ownership warnings (files changed outside the task's declared paths; parallel tasks that do this can conflict; set \"ownership\": \"enforce\" to fail them instead):", ...lines].join("\n");
 }
