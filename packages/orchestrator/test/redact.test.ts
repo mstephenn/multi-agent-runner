@@ -7,7 +7,7 @@ const expectLinear = (unit: string, redactFn: (s: string) => string): void => {
   const small = unit.repeat(10_000), big = unit.repeat(40_000);
   redactFn(small); // warm up
   const tSmall = bestMs(() => redactFn(small)), tBig = bestMs(() => redactFn(big));
-  expect(tBig).toBeLessThan(tSmall * 10 + 100); // linear ~4x, quadratic ~16x
+  expect(tBig).toBeLessThan(tSmall * 10 + 25); // linear ~4x, quadratic ~16x (25 ms absorbs timer jitter)
 };
 
 describe("redact", () => {
