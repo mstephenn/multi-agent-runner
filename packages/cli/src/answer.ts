@@ -1,6 +1,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import type { Dag } from "@mar/core";
+import { sanitizeForTerminal as clean } from "./sanitize.js";
 
 export type TaskState = { status: string; detail?: string | null };
 
@@ -13,7 +14,7 @@ export const finalTasks = (dag: Dag) => {
 /**
  * Text printed at the end of a run: the full report of each final task (or its blackboard summary when it has none).
  * If a final task did not finish, say so and also show reports of other done tasks so their work is not hidden.
- * Returns "" when there is nothing to show. Reports are printed exactly as stored.
+ * Returns "" when there is nothing to show. Reports are printed as stored, minus terminal escape sequences and control characters.
  */
 export function renderAnswer(
   dag: Dag | undefined, statuses: Map<string, TaskState>, reports: Map<string, string>, summaries: Map<string, string>,
@@ -27,13 +28,13 @@ export function renderAnswer(
     const { status, detail } = stateOf(t.id);
     if (status !== "done") {
       unfinished = true;
-      parts.push(`== ${t.id}: ${status}${detail ? ` (${detail})` : ""} ==\n`);
+      parts.push(`== ${clean(t.id)}: ${clean(status)}${detail ? ` (${clean(detail)})` : ""} ==\n`);
       continue;
     }
     const report = reports.get(t.id);
     const summary = summaries.get(t.id);
-    if (report) parts.push(`== Answer: ${t.id} ==\n${report}\n`);
-    else if (summary) parts.push(`== Answer: ${t.id} == (summary only)\n${summary}\n`);
+    if (report) parts.push(`== Answer: ${clean(t.id)} ==\n${clean(report)}\n`);
+    else if (summary) parts.push(`== Answer: ${clean(t.id)} == (summary only)\n${clean(summary)}\n`);
     else continue;
     shown.add(t.id);
   }
@@ -41,7 +42,7 @@ export function renderAnswer(
     const partial = dag.tasks.filter((t) => stateOf(t.id).status === "done" && !shown.has(t.id) && reports.get(t.id));
     if (partial.length) {
       parts.push("== Partial results ==\n");
-      for (const t of partial) parts.push(`== ${t.id} ==\n${reports.get(t.id)}\n`);
+      for (const t of partial) parts.push(`== ${clean(t.id)} ==\n${clean(reports.get(t.id) ?? "")}\n`);
     }
   }
   return parts.join("\n");

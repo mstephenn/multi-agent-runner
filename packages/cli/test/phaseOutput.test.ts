@@ -86,3 +86,12 @@ describe("renderStop", () => {
     expect(renderStop({ reason: "aborted", message: "m" }, "API_KEY=hunter2xyz", "r1", 5)).not.toContain("hunter2xyz");
   });
 });
+
+describe("terminal safety", () => {
+  const evil = "x\x1b[2Jy\x1b]0;t\x07z";
+  it("renderPhaseSummary and renderStop strip escapes", async () => {
+    const { renderPhaseSummary, renderStop } = await import("../src/phaseOutput.js");
+    expect(renderPhaseSummary(null, [{ id: "a", status: "failed", detail: evil, branch: "b" }])).toBe("  a  failed  (xyz)  b");
+    expect(renderStop({ reason: "aborted", message: evil }, evil, "r1", 3)).toContain("Stopped early: xyz.\nRemaining: xyz");
+  });
+});

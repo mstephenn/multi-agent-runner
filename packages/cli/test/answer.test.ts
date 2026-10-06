@@ -67,3 +67,15 @@ describe("report files", () => {
     expect(existsSync(join(repo, "evil.md"))).toBe(false);
   });
 });
+
+describe("terminal safety of the end-of-run output", () => {
+  const evil = "ok\x1b[2J\x1b]0;pwned\x07\u009b31m";
+  it("renderAnswer strips escapes from reports, summaries, ids and reasons", () => {
+    const dag = parseDag({ tasks: [T("a"), T("b", ["a"]), T("c", ["a"])] });
+    const out = renderAnswer(dag, st({ a: "done", b: "done", c: ["failed", evil] }), m({ b: evil }), m({ a: evil }));
+    expect(out).toContain("== Answer: b ==\nok\n");
+    expect(out).toContain("== c: failed (ok) ==");
+    expect(out).not.toMatch(/[\x00-\x08\x0b-\x1f\x7f-\u009f]/);
+    expect(renderAnswer(parseDag({ tasks: [T("a")] }), st({ a: "done" }), m(), m({ a: evil }))).toContain("(summary only)\nok\n");
+  });
+});

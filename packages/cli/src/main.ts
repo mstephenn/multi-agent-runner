@@ -11,12 +11,17 @@ import { effectiveMaxTotalTokens, loadConfig, type MarConfig } from "./config.js
 import { renderPhaseHeader, renderPhaseSummary, renderPlanTable, renderStop } from "./phaseOutput.js";
 import { renderAnswer, saveReports } from "./answer.js";
 import { nodeRunner, preflight } from "./preflight.js";
+import { runHistory, SIGNAL_DEBOUNCE_MS, type HistoryCli, type HistoryDeps } from "./history.js";
+import { sanitizeForTerminal } from "./sanitize.js";
+
+export { SIGNAL_DEBOUNCE_MS };
 
 export class UsageError extends Error {}
 
 const USAGE = `Usage:
   mar run "<goal>" [--repo <path>] [--port <n>] [--unsafe] [--budget <tokens>] [--phases <n>]
   mar resume <runId> [--repo <path>] [--port <n>] [--unsafe] [--budget <tokens>] [--phases <n>]
+  mar history [<runId>] [--repo <path>] [--limit <n>] [--json] [--task <id>] [--ui] [--port <n>]
   mar --help
   mar --version
 
@@ -26,6 +31,14 @@ Options:
   --budget <n>      default per-task token budget (overrides config)
   --phases <n>      max planning phases for this invocation, 1-10 (overrides maxPhases; use with resume to go past the limit)
   --unsafe          skip agent permission prompts (dangerous)
+
+history (read-only; never changes the repo or <repo>/.mar):
+  mar history                  list the runs of --repo, newest first
+  mar history <runId>          details and answer of one run (<runId> may be a unique prefix, 3+ characters)
+  --limit <n>       runs to list, 1-200 (default: 20)
+  --json            list as JSON (list mode only)
+  --task <id>       print only the full report of that task (needs <runId>)
+  --ui              replay the run in the web UI (read-only); <runId> defaults to the newest run
 `;
 const MAX_GOAL = 20000;
 
@@ -33,7 +46,8 @@ export type Cli =
   | { cmd: "help" }
   | { cmd: "version" }
   | { cmd: "run"; goal: string; repo: string; port: number; unsafe: boolean; budget?: number; phases?: number }
-  | { cmd: "resume"; runId: string; repo: string; port: number; unsafe: boolean; budget?: number; phases?: number };
+  | { cmd: "resume"; runId: string; repo: string; port: number; unsafe: boolean; budget?: number; phases?: number }
+  | HistoryCli;
 
 const posInt = (name: string, v: string): number => {
   if (!/^[0-9]+$/.test(v) || !Number.isSafeInteger(Number(v)) || Number(v) < 1) throw new UsageError(`--${name} must be a positive integer (got "${v}")`);
@@ -43,6 +57,13 @@ const posInt = (name: string, v: string): number => {
 const phasesOpt = (v: string): number => {
   const n = posInt("phases", v);
   if (n > 10) throw new UsageError(`--phases must be between 1 and 10 (got "${v}")`);
+  return n;
+};
+
+const MAX_HISTORY_LIMIT = 200;
+const limitOpt = (v: string): number => {
+  const n = posInt("limit", v);
+  if (n > MAX_HISTORY_LIMIT) throw new UsageError(`--limit must be between 1 and ${MAX_HISTORY_LIMIT} (got "${v}")`);
   return n;
 };
 
@@ -59,7 +80,8 @@ export function parseCli(argv: string[]): Cli {
       args: argv, allowPositionals: true, strict: true,
       options: {
         repo: { type: "string", default: "." }, port: { type: "string" }, budget: { type: "string" }, phases: { type: "string" },
-        unsafe: { type: "boolean", default: false }, help: { type: "boolean", short: "h", default: false },
+        unsafe: { type: "boolean", default: false }, limit: { type: "string" }, json: { type: "boolean", default: false },
+        task: { type: "string" }, ui: { type: "boolean", default: false }, help: { type: "boolean", short: "h", default: false },
         version: { type: "boolean", short: "v", default: false },
       },
     });
@@ -68,6 +90,24 @@ export function parseCli(argv: string[]): Cli {
   if (values.help) return { cmd: "help" };
   if (values.version) return { cmd: "version" };
   const [cmd, ...rest] = positionals;
+  if (cmd === "history") {
+    for (const f of ["unsafe", "budget", "phases"] as const) if (values[f] !== undefined && values[f] !== false) throw new UsageError(`--${f} does not apply to history`);
+    if (rest.length > 1) throw new UsageError("history takes at most one run id");
+    const runId = rest[0];
+    if (runId !== undefined && !runId.trim()) throw new UsageError("run id must not be empty");
+    if (values.task !== undefined && runId === undefined) throw new UsageError("--task requires a run id: mar history <runId> --task <id>");
+    if (values.task !== undefined && !values.task.trim()) throw new UsageError("--task must not be empty");
+    if (values.ui && values.json) throw new UsageError("--ui cannot be combined with --json");
+    if (values.ui && values.task !== undefined) throw new UsageError("--ui cannot be combined with --task");
+    if (values.json && values.task !== undefined) throw new UsageError("--json cannot be combined with --task");
+    if (values.port !== undefined && !values.ui) throw new UsageError("--port only applies to history --ui");
+    return {
+      cmd: "history", repo: values.repo as string, limit: values.limit === undefined ? 20 : limitOpt(values.limit), json: values.json as boolean,
+      ui: values.ui as boolean, port: values.port === undefined ? 4317 : port(values.port),
+      ...(runId === undefined ? {} : { runId }), ...(values.task === undefined ? {} : { task: values.task }),
+    };
+  }
+  for (const f of ["limit", "json", "task", "ui"] as const) if (values[f] !== undefined && values[f] !== false) throw new UsageError(`--${f} only applies to history`);
   const common = {
     repo: values.repo as string, unsafe: values.unsafe as boolean,
     port: values.port === undefined ? 4317 : port(values.port),
@@ -237,7 +277,7 @@ export async function executeRun(o: ExecuteOpts): Promise<ExecuteResult> {
         log(`\n${renderPhaseHeader(p.phase, p.maxPhases)}`);
         const byId = new Map(p.dag.tasks.map((t) => [t.id, t]));
         log(renderPlanTable(p.dag.tasks, (t) => sharedOn && usesSharedWorktree(t, byId, toolsFor)));
-        if (p.remaining) log(`Remaining after this phase: ${redact(p.remaining).replace(/\s+/g, " ")}`);
+        if (p.remaining) log(`Remaining after this phase: ${sanitizeForTerminal(redact(p.remaining)).replace(/\s+/g, " ")}`);
       },
     });
     return { runId, results: out.results, ...(out.integration ? { integration: out.integration } : {}), phases: out.phases, remaining: out.remaining, complete: out.complete, ...(out.stop ? { stop: out.stop } : {}) };
@@ -252,22 +292,22 @@ export async function executeRun(o: ExecuteOpts): Promise<ExecuteResult> {
 function printIntegration(runId: string, integration: IntegrationOutcome | undefined): { built: boolean; healthy: boolean } {
   if (!integration) return { built: false, healthy: true };
   const r = integration.result;
-  if (!r) { console.log(`\nIntegration failed: ${integration.error ?? "unknown error"}`); return { built: false, healthy: false }; }
+  if (!r) { console.log(`\nIntegration failed: ${sanitizeForTerminal(integration.error ?? "unknown error")}`); return { built: false, healthy: false }; }
   console.log("");
   if (r.conflict) {
-    console.log(`Integration stopped at ${r.conflict.branch}: conflict in ${r.conflict.files.join(", ") || "(unknown files)"}`);
-    console.log(`  Merged so far (kept on ${r.branch}): ${r.merged.length ? r.merged.join(", ") : "nothing"}`);
+    console.log(sanitizeForTerminal(`Integration stopped at ${r.conflict.branch}: conflict in ${r.conflict.files.join(", ") || "(unknown files)"}`));
+    console.log(sanitizeForTerminal(`  Merged so far (kept on ${r.branch}): ${r.merged.length ? r.merged.join(", ") : "nothing"}`));
     return { built: false, healthy: false };
   }
   const merged = r.merged.map((b) => b.split("/").pop()).join(", ");
   if (r.verify && !r.verify.ok) {
     const f = r.verify.failed;
-    console.log(`Integration: ${r.branch} (merged ${merged}; verify failed (${redact(f?.command ?? "unknown")}${f?.timedOut ? ", timed out" : ""}))`);
-    if (r.verify.tail) console.log(redact(r.verify.tail).split("\n").map((l) => `  | ${l}`).join("\n"));
+    console.log(sanitizeForTerminal(`Integration: ${r.branch} (merged ${merged}; verify failed (${redact(f?.command ?? "unknown")}${f?.timedOut ? ", timed out" : ""}))`));
+    if (r.verify.tail) console.log(sanitizeForTerminal(redact(r.verify.tail)).split("\n").map((l) => `  | ${l}`).join("\n"));
     return { built: false, healthy: false };
   }
-  console.log(`Integration: ${r.branch} (merged ${merged}${r.verify ? "; verify passed" : ""})`);
-  console.log(`To take it: git merge ${r.branch} (on a feature branch, never main)`);
+  console.log(sanitizeForTerminal(`Integration: ${r.branch} (merged ${merged}${r.verify ? "; verify passed" : ""})`));
+  console.log(sanitizeForTerminal(`To take it: git merge ${r.branch} (on a feature branch, never main)`));
   return { built: true, healthy: true };
 }
 
@@ -302,13 +342,12 @@ export interface MainDeps {
   forceExitTimeoutMs?: number;
   /** Clock for the signal debounce (default: Date.now). */
   now?: () => number;
+  /** Overrides for `mar history` (output sinks, terminal width, ...). */
+  history?: HistoryDeps;
 }
 
-/** A signal arriving this soon after the previous one is a duplicate delivery, not a second Ctrl-C. */
-export const SIGNAL_DEBOUNCE_MS = 1000;
-
 const defaultCloseStore = (store: Store) => { store.close(); };
-const errMessage = (e: unknown) => redact(e instanceof Error ? e.message : String(e)).slice(0, 500);
+const errMessage = (e: unknown) => sanitizeForTerminal(redact(e instanceof Error ? e.message : String(e))).slice(0, 500);
 const reportError = (e: unknown) => {
   console.error(`mar: ${errMessage(e)}`);
   if (process.env.MAR_DEBUG === "1" && e instanceof Error && e.stack) console.error(e.stack);
@@ -323,6 +362,11 @@ export async function runMain(argv: string[], deps: MainDeps = {}): Promise<numb
   }
   if (cli.cmd === "help") { console.log(USAGE); return 0; }
   if (cli.cmd === "version") { console.log(marVersion()); return 0; }
+  if (cli.cmd === "history") {
+    try {
+      return await runHistory(cli, { uiDist: cli.ui ? uiDist() : undefined, proc: deps.proc, exit: deps.exit, now: deps.now, forceExitTimeoutMs: deps.forceExitTimeoutMs, startServer: deps.startServer, ...deps.history });
+    } catch (e) { reportError(e); return 1; }
+  }
 
   const proc = deps.proc ?? process;
   const exit = deps.exit ?? ((c: number) => process.exit(c));
