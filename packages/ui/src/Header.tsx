@@ -1,10 +1,10 @@
-import { useEffect, useRef, useState } from "react";
-import { fmtCost, fmtDuration, fmtTokens } from "./fmt.js";
-import { totals, type AgentView, type PhaseInfo } from "./derive.js";
-import { countTo } from "./motion.js";
+import { useEffect, useState } from "react";
+import { fmtDuration } from "./fmt.js";
+import { type AgentView, type PhaseInfo } from "./derive.js";
+import { PhasePopover } from "./PhasePopover.js";
 import type { Conn } from "./useRun.js";
 
-export type RunInfo = { id: string; goal: string; repo: string; created: number };
+export type RunInfo = { id: string; goal: string; repo: string; created: number; maxTotalTokens?: number; stop?: { reason: string; message: string } | null };
 type Stop = "idle" | "confirm" | "sending" | "sent";
 
 function StopButton({ runId }: { runId: string }) {
@@ -32,25 +32,11 @@ function StopButton({ runId }: { runId: string }) {
   );
 }
 
-type Props = { repos?: string[]; readOnly?: boolean; runs: RunInfo[]; run: RunInfo | undefined; runId: string; onRun: (id: string) => void; agents: AgentView[]; elapsedMs: number; conn: Conn; partial?: boolean; phase?: PhaseInfo | null };
+type Props = { repos?: string[]; readOnly?: boolean; runs: RunInfo[]; run: RunInfo | undefined; runId: string; onRun: (id: string) => void; agents: AgentView[]; elapsedMs: number; conn: Conn; partial?: boolean; phase?: PhaseInfo | null; phaseHistory?: PhaseInfo[] };
 
-// Displays `value`, tweening from the previous value whenever it changes (no tween on first render).
-function useCountUp(value: number): number {
-  const [shown, setShown] = useState(value);
-  const prev = useRef(value);
-  useEffect(() => {
-    const from = prev.current;
-    prev.current = value;
-    return countTo(from, value, setShown);
-  }, [value]);
-  return shown;
-}
-
-export function Header({ repos = [], readOnly = false, runs, run, runId, onRun, agents, elapsedMs, conn, partial = false, phase = null }: Props) {
-  const t = totals(agents);
-  const shownTokens = useCountUp(t.tokens);
-  const lead = partial ? "≥ " : "";
-  const anyTokens = agents.some((a) => a.tokens !== null);
+export function Header({ repos = [], readOnly = false, runs, run, runId, onRun, agents, elapsedMs, conn, phase = null, phaseHistory = [] }: Props) {
+  const [expanded, setExpanded] = useState(false);
+  useEffect(() => setExpanded(false), [runId]);
   return (
     <header className="top">
       <div className="title">
@@ -59,19 +45,14 @@ export function Header({ repos = [], readOnly = false, runs, run, runId, onRun, 
           {runs.map((r) => <option key={r.id} value={r.id}>{r.id}</option>)}
           {!run && <option value={runId}>{runId}</option>}
         </select>
-        <h1 title={run?.goal}>{run?.goal ?? "Run"}</h1>
-        {phase && (
-          <span className="phase" data-testid="phase-indicator" title={phase.remaining ? `Remaining after this phase: ${phase.remaining}` : "This phase completes the goal"}>
-            <span className="badge phase-badge">Phase {phase.phase}{phase.maxPhases !== null ? `/${phase.maxPhases}` : ""}</span>
-            {phase.remaining && <span className="phase-remaining" data-testid="phase-remaining">{phase.remaining}</span>}
-          </span>
-        )}
+        <h1 className={expanded ? "goal expanded" : "goal"}>
+          <button type="button" aria-expanded={expanded} title={expanded ? "Collapse goal" : "Expand goal"} onClick={() => setExpanded(!expanded)}>{run?.goal ?? "Run"}</button>
+        </h1>
+        {phase && <PhasePopover key={runId} phase={phase} history={phaseHistory} />}
         {agents.some((a) => a.unsafe) && <span className="badge unsafe" role="status" title="Codex tasks do not map unsafe mode">unsafe mode (Claude workers)</span>}
       </div>
       {repos.length > 0 && <div className="workspace-repos" aria-label="Workspace repositories"><span className="muted">Repos</span>{repos.map((repo) => <span key={repo} className="badge repo-badge" title={repo}>{repo}</span>)}</div>}
       <dl className="stats">
-        <div><dt>Tokens{partial ? " (partial)" : ""}</dt><dd className="mono" data-testid="total-tokens">{anyTokens ? `${lead}${fmtTokens(shownTokens)}` : "n/a"}</dd></div>
-        <div><dt>Spend{partial ? " (partial)" : ""}</dt><dd className="mono" data-testid="total-cost">{t.costUsd === null ? fmtCost(t.costUsd) : `${lead}${fmtCost(t.costUsd)}`}</dd></div>
         <div><dt>Elapsed</dt><dd className="mono">{fmtDuration(elapsedMs)}</dd></div>
       </dl>
       <div className="actions">

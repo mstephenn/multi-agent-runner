@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { BbEntry } from "@mar/core";
-import { deriveAgents, deriveWorkspaceRepos, deriveFlow, deriveLanes, derivePhase, isRunActive, type AgentView } from "./derive.js";
+import { deriveRunOverview, deriveAgents, deriveWorkspaceRepos, deriveFlow, deriveLanes, derivePhase, isRunActive, type AgentView } from "./derive.js";
 import { useRun } from "./useRun.js";
 import { Header, type RunInfo } from "./Header.js";
+import { OverviewStrip } from "./OverviewStrip.js";
 import { GraphView } from "./GraphView.js";
 import { Inspector } from "./Inspector.js";
 import { BottomPanel } from "./BottomPanel.js";
@@ -62,6 +63,7 @@ export function App() {
   const repos = useMemo(() => deriveWorkspaceRepos(snap.events), [snap.events]);
   const flow = useMemo(() => deriveFlow(events), [events]);
   const phase = useMemo(() => derivePhase(events), [events]);
+  const phaseHistory = useMemo(() => events.filter((e) => e.type === "phase_started").flatMap((e) => { const p = derivePhase([e]); return p ? [p] : []; }), [events]);
   const lanes = useMemo(() => deriveLanes(events), [events]);
 
   const maxTs = snap.events.at(-1)?.ts ?? 0;
@@ -70,6 +72,8 @@ export function App() {
   const now = cutoff ?? (running ? clock : maxTs || clock); // a finished/stopped run freezes at its last event
   const liveEnd = running ? Math.max(clock, maxTs) : maxTs; // right edge of the timeline while live
   const run = runs?.find((r) => r.id === runId);
+  const overview = deriveRunOverview(events, agents, now, { maxTotalTokens: run?.maxTotalTokens, stop: cutoff === null ? run?.stop : null });
+  const hasUsage = events.some((e) => { const p = e.payload as { input?: unknown; output?: unknown } | null; return e.type === "usage" && [p?.input, p?.output].some((n) => typeof n === "number" && Number.isFinite(n)); });
   const startTs = snap.events[0]?.ts ?? run?.created ?? now;
   const endTs = running || cutoff !== null ? now : events.at(-1)?.ts ?? now;
   const agent = agents.find((a) => a.id === selected) ?? null;
@@ -80,7 +84,8 @@ export function App() {
   if (notFound) return <div className="state" role="alert">Run <code>{runId}</code> was not found. It may have been created in a different repository or deleted.</div>;
   return (
     <div className="app">
-      <Header repos={repos} readOnly={readOnly === true} runs={runs} run={run} runId={runId} onRun={chooseRun} agents={agents} elapsedMs={endTs - startTs} conn={conn} partial={truncated} phase={phase} />
+      <Header repos={repos} readOnly={readOnly === true} runs={runs} run={run} runId={runId} onRun={chooseRun} agents={agents} elapsedMs={endTs - startTs} conn={conn} partial={truncated} phase={phase} phaseHistory={phaseHistory} />
+      <OverviewStrip overview={overview} partial={truncated} hasUsage={hasUsage} />
       {error && <div className="banner" role="alert">{error}. {conn === "reconnecting" ? "Retrying…" : ""}</div>}
       {truncated && <div className="banner info" role="status" data-testid="truncated-banner">Showing the latest {snap.events.length.toLocaleString("en-US")} events of a longer run — token totals and early context may be incomplete.</div>}
       {cutoff !== null && <div className="banner info" role="status">Replaying: views show state as of the scrubber position.</div>}
