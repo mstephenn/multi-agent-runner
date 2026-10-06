@@ -2,7 +2,7 @@
   "name": "multi-agent-runner",
   "version": "0.1.0",
   "description": "Plan a goal into a DAG of tasks and run them on the claude and codex CLIs in isolated git worktrees, with a local web UI.",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "type": "module",
   "bin": {
     "mar": "dist/mar.mjs"

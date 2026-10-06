@@ -80,7 +80,7 @@ describe.skipIf(!canBuild)("packaged bundle", () => {
     const r = npm(["pack", "--dry-run", "--json", "--ignore-scripts"], cliDir);
     expect(r.status, r.stderr).toBe(0);
     const files = (JSON.parse(r.stdout) as { files: { path: string }[] }[])[0].files.map((f) => f.path);
-    for (const f of ["dist/mar.mjs", "dist/ui/index.html", "package.json"]) expect(files).toContain(f);
+    for (const f of ["dist/mar.mjs", "dist/ui/index.html", "package.json", "LICENSE"]) expect(files).toContain(f);
     expect(files.filter((f) => /^(src|test|scripts)\//.test(f) || f.endsWith(".map") || /\.superpowers|\.mar(\/|$)/.test(f))).toEqual([]);
   }, 240_000);
 
