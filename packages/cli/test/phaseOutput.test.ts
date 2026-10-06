@@ -95,3 +95,21 @@ describe("terminal safety", () => {
     expect(renderStop({ reason: "aborted", message: evil }, evil, "r1", 3)).toContain("Stopped early: xyz.\nRemaining: xyz");
   });
 });
+
+describe("workspace output", () => {
+  it("renderPlanTable adds a repo column (* for whole-workspace read-only tasks)", () => {
+    const out = renderPlanTable([
+      t("p1-api", { repo: "api", goal: "Build" }),
+      t("p1-web", { repo: "web", dependsOn: ["p1-api"], goal: "Client" }),
+      t("q", { role: "researcher", goal: "Look" }),
+    ], (x: { id: string }) => x.id === "q", { workspace: true });
+    const lines = out.split("\n");
+    expect(lines[0]).toMatch(/^id +role +repo +runtime\/tier +depends +paths +worktree +goal$/);
+    expect(lines[1]).toMatch(/^p1-api +implementer +api +codex\/mid/);
+    expect(lines[2]).toMatch(/^p1-web +implementer +web +/);
+    expect(lines[3]).toMatch(/^q +researcher +\* +/);
+  });
+  it("renderPlanTable is unchanged without the workspace option", () => {
+    expect(renderPlanTable([t("a")], () => false).split("\n")[0]).toMatch(/^id +role +runtime\/tier/);
+  });
+});

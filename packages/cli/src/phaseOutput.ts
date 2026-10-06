@@ -11,10 +11,11 @@ const flat = (s: string) => clean(redact(s)).replace(/\s+/g, " ").trim();
 const clip = (s: string, n: number) => (s.length <= n ? s : s.slice(0, n - 1) + "…");
 
 /** Plan of one phase as an aligned text table: id, role, runtime/tier, depends, paths, worktree (shared|own), goal (clipped). */
-export function renderPlanTable(tasks: readonly TaskSpec[], isShared: (t: TaskSpec) => boolean): string {
-  const rows: string[][] = [["id", "role", "runtime/tier", "depends", "paths", "worktree", "goal"]];
+export function renderPlanTable(tasks: readonly TaskSpec[], isShared: (t: TaskSpec) => boolean, opts: { workspace?: boolean } = {}): string {
+  const ws = opts.workspace === true;
+  const rows: string[][] = [ws ? ["id", "role", "repo", "runtime/tier", "depends", "paths", "worktree", "goal"] : ["id", "role", "runtime/tier", "depends", "paths", "worktree", "goal"]];
   for (const t of tasks) rows.push([
-    t.id, t.role, `${t.runtime}/${t.tier}`, t.dependsOn.length ? t.dependsOn.join(",") : "-", t.paths.length ? t.paths.map(flat).join(",") : "-",
+    t.id, t.role, ...(ws ? [clean(t.repo ?? "*")] : []), `${t.runtime}/${t.tier}`, t.dependsOn.length ? t.dependsOn.join(",") : "-", t.paths.length ? t.paths.map(flat).join(",") : "-",
     isShared(t) ? "shared" : "own", clip(flat(t.goal), GOAL_COLUMN_CHARS),
   ]);
   const widths = rows[0]!.map((_, c) => Math.max(...rows.map((r) => r[c]!.length)));
