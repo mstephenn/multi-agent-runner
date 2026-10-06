@@ -95,7 +95,8 @@ test("selecting rev shows the injected key with its token count", async ({ page 
   await expect(row).toContainText("42");
   await expect(page.locator("pre.prompt")).toContainText("Review the change.");
   await page.getByRole("tab", { name: "Usage" }).click();
-  await expect(page.locator(".inspector").getByRole("tabpanel")).toContainText("n/a");
+  await expect(page.locator(".inspector").getByRole("tabpanel")).toContainText("Usage is reported when the task finishes.");
+  await expect(page.locator(".inspector").getByRole("tabpanel")).not.toContainText("n/a");
 });
 
 test("keyboard: arrow keys switch inspector tabs", async ({ page }) => {

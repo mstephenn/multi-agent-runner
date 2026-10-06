@@ -5,6 +5,7 @@ import { budgetUsage, fmtCost, fmtTokens } from "./fmt.js";
 import type { ReportRow } from "./runClient.js";
 import { drawerIn } from "./motion.js";
 import { ActivityFeed } from "./ActivityFeed.js";
+import { InspectorSummary } from "./InspectorSummary.js";
 
 const TABS = ["Context", "Activity", "Output", "Usage"] as const;
 type Tab = (typeof TABS)[number];
@@ -61,7 +62,7 @@ export function Inspector({ agent, events, blackboard, plan, reports = [], width
     <aside ref={aside} className="inspector" style={width === null ? undefined : { width }} aria-label={`Inspector for ${agent.id}`}>
       <div className="inspector-resize" role="separator" aria-label="Resize inspector" aria-orientation="vertical" aria-valuemin={MIN_WIDTH} aria-valuenow={width ?? undefined} tabIndex={0} onPointerDown={onResizeStart} onPointerMove={onResizeMove} onPointerUp={onResizeEnd} onPointerCancel={onResizeEnd} onKeyDown={onResizeKey} />
       <header className="insp-head">
-        <div><h2 className="mono">{agent.id}</h2>{agent.repo && <span className="badge repo-badge" title={`Repository: ${agent.repo}`}>{agent.repo === "*" ? "All repos" : agent.repo}</span>}<span className="status-text" data-status={agent.status}>{agent.status}{agent.detail ? `: ${agent.detail}` : ""}</span></div>
+        <div><h2 className="mono">{agent.id}</h2>{agent.repo && <span className="badge repo-badge" title={`Repository: ${agent.repo}`}>{agent.repo === "*" ? "All repos" : agent.repo}</span>}</div>
         <button type="button" onClick={onClose} aria-label="Close inspector">Close</button>
       </header>
       {!!agent.siblingWarnings?.length && <div className="sibling-warnings" role="status" aria-label="Sibling repository warnings">
@@ -72,6 +73,7 @@ export function Inspector({ agent, events, blackboard, plan, reports = [], width
         </details>)}
       </div>}
       {spec && <p className="goal">{spec.goal}</p>}
+      <InspectorSummary agent={agent} events={events} hasReport={reports.some((r) => r.task_id === agent.id)} onOpenReport={() => { setTab("Output"); document.getElementById("tab-Output")?.focus(); }} />
       <div role="tablist" aria-label="Inspector sections" className="tabs" onKeyDown={onKey}>
         {TABS.map((t) => (
           <button key={t} id={`tab-${t}`} role="tab" type="button" aria-selected={tab === t} aria-controls={`panel-${t}`} tabIndex={tab === t ? 0 : -1} onClick={() => setTab(t)}>{t}</button>
@@ -116,11 +118,14 @@ function OutputTab({ id, blackboard, reports }: { id: string; blackboard: BbEntr
 function UsageTab({ agent, budget }: { agent: AgentView; budget: number | undefined }) {
   const u = budgetUsage(agent.tokens, budget);
   return (
+    <>
+    {agent.status === "running" && <p className="muted">Usage is reported when the task finishes.</p>}
     <dl className="usage">
-      <dt>Tokens</dt><dd>{fmtTokens(agent.tokens)}</dd>
+      {agent.status !== "running" && <><dt>Tokens</dt><dd>{fmtTokens(agent.tokens)}</dd></>}
       <dt>Budget</dt><dd>{budget ? fmtTokens(budget) : "no per-task budget set (default applies)"}</dd>
-      <dt>Cost</dt><dd>{fmtCost(agent.costUsd)}</dd>
-      {u && <><dt>Used</dt><dd className={u.over ? "over-budget" : undefined}><div className="bar" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.min(100, u.pct)} aria-label="Budget used"><div style={{ width: `${Math.min(100, u.pct)}%` }} /></div> {u.over ? `over budget (${u.pct}%)` : `${u.pct}%`}</dd></>}
+      {agent.status !== "running" && <><dt>Cost</dt><dd>{fmtCost(agent.costUsd)}</dd></>}
+      {agent.status !== "running" && u && <><dt>Used</dt><dd className={u.over ? "over-budget" : undefined}><div className="bar" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.min(100, u.pct)} aria-label="Budget used"><div style={{ width: `${Math.min(100, u.pct)}%` }} /></div> {u.over ? `over budget (${u.pct}%)` : `${u.pct}%`}</dd></>}
     </dl>
+    </>
   );
 }
