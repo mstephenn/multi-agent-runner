@@ -32,7 +32,7 @@ function StopButton({ runId }: { runId: string }) {
   );
 }
 
-type Props = { runs: RunInfo[]; run: RunInfo | undefined; runId: string; onRun: (id: string) => void; agents: AgentView[]; elapsedMs: number; conn: Conn; partial?: boolean; phase?: PhaseInfo | null };
+type Props = { readOnly?: boolean; runs: RunInfo[]; run: RunInfo | undefined; runId: string; onRun: (id: string) => void; agents: AgentView[]; elapsedMs: number; conn: Conn; partial?: boolean; phase?: PhaseInfo | null };
 
 // Displays `value`, tweening from the previous value whenever it changes (no tween on first render).
 function useCountUp(value: number): number {
@@ -46,7 +46,7 @@ function useCountUp(value: number): number {
   return shown;
 }
 
-export function Header({ runs, run, runId, onRun, agents, elapsedMs, conn, partial = false, phase = null }: Props) {
+export function Header({ readOnly = false, runs, run, runId, onRun, agents, elapsedMs, conn, partial = false, phase = null }: Props) {
   const t = totals(agents);
   const shownTokens = useCountUp(t.tokens);
   const lead = partial ? "≥ " : "";
@@ -74,8 +74,12 @@ export function Header({ runs, run, runId, onRun, agents, elapsedMs, conn, parti
         <div><dt>Elapsed</dt><dd className="mono">{fmtDuration(elapsedMs)}</dd></div>
       </dl>
       <div className="actions">
-        <span className={`conn conn-${conn}`} role="status">{conn === "live" ? "● live" : conn === "reconnecting" ? "reconnecting…" : "loading…"}</span>
-        <StopButton runId={runId} />
+        {readOnly
+          ? <span className="badge history-badge" role="status" data-testid="history-badge" title="Stored run replay: nothing is written and nothing updates live">History (read-only)</span>
+          : <>
+              <span className={`conn conn-${conn}`} role="status">{conn === "live" ? "● live" : conn === "reconnecting" ? "reconnecting…" : "loading…"}</span>
+              <StopButton runId={runId} />
+            </>}
       </div>
     </header>
   );

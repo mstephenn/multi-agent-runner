@@ -169,6 +169,25 @@ test("dark mode changes the page colours", async ({ browser }) => {
   expect(dark.bg).not.toBe(dark.fg);
 });
 
+test("live mode: Stop is available and there is no history badge", async ({ page }) => {
+  await expect(page.getByRole("button", { name: "Stop run" })).toBeVisible();
+  await expect(page.getByTestId("history-badge")).toHaveCount(0);
+});
+
+test("read-only history mode: badge shown, Stop absent, no websocket", async ({ page }) => {
+  await page.goto("about:blank"); // drop the live page that beforeEach opened, so only this page's sockets are counted
+  await page.route("**/api/meta", (route) => route.fulfill({ json: { readOnly: true } }));
+  const sockets: string[] = [];
+  page.on("websocket", (w) => sockets.push(w.url()));
+  await page.goto(`${base}/?run=r1`);
+  await expect(page.getByTestId("history-badge")).toHaveText("History (read-only)");
+  await expect(page.getByRole("button", { name: /stop/i })).toHaveCount(0);
+  await expect(page.getByTestId("node-impl")).toBeVisible();
+  await expect(page.getByTestId("total-tokens")).toHaveText("1,200");
+  await page.waitForTimeout(500);
+  expect(sockets).toEqual([]);
+});
+
 test("an unknown run shows a terminal 'not found' state, not an endless reconnect", async ({ page }) => {
   await page.goto(`${base}/?run=does-not-exist`);
   await expect(page.getByRole("alert")).toContainText("not found");

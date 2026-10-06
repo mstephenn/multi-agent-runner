@@ -3,7 +3,7 @@ import type { BbEntry, Dag, StoredEvent } from "@mar/core";
 export type TaskRow = { task_id: string; status: string; detail: string | null };
 export type Snapshot = { events: StoredEvent[]; blackboard: BbEntry[]; tasks: TaskRow[]; plan: Dag | null; reports: ReportRow[]; truncated?: boolean };
 export type ReportRow = { task_id: string; body: string };
-export type Conn = "loading" | "live" | "reconnecting";
+export type Conn = "loading" | "live" | "reconnecting" | "history";
 export type ClientState = { snap: Snapshot; conn: Conn; error: string | null; notFound: boolean };
 export const EMPTY: Snapshot = { events: [], blackboard: [], tasks: [], plan: null, reports: [] };
 export const INITIAL: ClientState = { snap: EMPTY, conn: "loading", error: null, notFound: false };
@@ -61,7 +61,8 @@ export type Deps = {
 type LoadResult = "ok" | "fail" | "notfound" | "stale";
 
 // Framework-free run connection: snapshot load, resume-aware websocket, rAF-batched state emission.
-export function createRunClient(runId: string, deps: Deps, onState: (s: ClientState) => void): () => void {
+// `readOnly` (history view of finished runs): one snapshot load, no websocket, never polls.
+export function createRunClient(runId: string, deps: Deps, onState: (s: ClientState) => void, opts: { readOnly?: boolean } = {}): () => void {
   let alive = true, attempt = 0, seq = 0, frame: number | undefined;
   let ws: SocketLike | undefined, retryTimer: ReturnType<typeof setTimeout> | undefined, reloadTimer: ReturnType<typeof setTimeout> | undefined;
   const log = new EventLog();
@@ -124,7 +125,8 @@ export function createRunClient(runId: string, deps: Deps, onState: (s: ClientSt
   const connect = async () => {
     const r = await load();
     if (!alive || r === "notfound") return;
-    if (r === "ok" || r === "stale") { if (!ws) open(); } else retry();
+    if (opts.readOnly && r === "ok") { state.conn = "history"; schedule(); return; }
+    if (r === "ok" || r === "stale") { if (!opts.readOnly && !ws) open(); } else retry();
   };
   void connect();
   return () => {

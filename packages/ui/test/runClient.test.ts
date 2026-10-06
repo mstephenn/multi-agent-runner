@@ -177,3 +177,23 @@ describe("createRunClient", () => {
     expect(calls.length).toBe(3);
   });
 });
+
+describe("read-only (history) mode", () => {
+  it("loads the snapshot once, opens no websocket and reports conn=history", async () => {
+    const c = createRunClient("r", deps(), (s) => states.push(s), { readOnly: true });
+    await settle(1000);
+    expect(last().snap.events.map((e) => e.id)).toEqual([1, 2]);
+    expect(last().conn).toBe("history");
+    expect(FakeSocket.all).toHaveLength(0);
+    expect(calls).toHaveLength(1);
+    await settle(30_000);
+    expect(calls).toHaveLength(1); // never polls
+    c();
+  });
+  it("live mode still opens the websocket", async () => {
+    const c = createRunClient("r", deps(), (s) => states.push(s));
+    await settle(300);
+    expect(FakeSocket.all).toHaveLength(1);
+    c();
+  });
+});

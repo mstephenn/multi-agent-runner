@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import Database from "better-sqlite3";
+import { openRaw } from "../../server/test/rawDb.js";
 import { Store } from "@mar/server";
 import type { Dag } from "@mar/core";
 
@@ -79,7 +79,7 @@ export function seedRepo(): string {
   ev("rplanfail", null, "task_failed", { reason: "planning failed: Claude: timeout; Codex: no auth" });
   s.close();
 
-  const raw = new Database(dbPath);
+  const raw = openRaw(dbPath);
   const base = Date.now();
   const age: Record<string, number> = { rsingle1: 2 * HOUR, rthree3x: 5 * HOUR, rfailed4: 26 * HOUR, rabort55: 3 * 24 * HOUR, rold00001: 10 * 24 * HOUR, rcorrupt1: 11 * 24 * HOUR, rplanfail: 12 * 24 * HOUR };
   for (const [id, ms] of Object.entries(age)) {

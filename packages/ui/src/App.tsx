@@ -28,6 +28,16 @@ export function App() {
   const [selected, setSelected] = useState<string | null>(null);
   const [inspectorWidth, setInspectorWidth] = useState<number | null>(null);
   const [cutoff, setCutoff] = useState<number | null>(null);
+  // null until /api/meta answered; an older server without it counts as a live (writable) one.
+  const [readOnly, setReadOnly] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/meta").then((r) => (r.ok ? r.json() as Promise<{ readOnly?: unknown }> : {}))
+      .then((m) => { if (alive) setReadOnly((m as { readOnly?: unknown }).readOnly === true); })
+      .catch(() => { if (alive) setReadOnly(false); });
+    return () => { alive = false; };
+  }, []);
 
   useEffect(() => {
     let alive = true;
@@ -37,7 +47,7 @@ export function App() {
     return () => { alive = false; };
   }, []);
 
-  const { snap, conn, error, notFound } = useRun(runId);
+  const { snap, conn, error, notFound } = useRun(readOnly === null ? null : runId, readOnly === true);
   const truncated = snap.truncated === true;
   const chooseRun = useCallback((id: string) => {
     setRunId(id); setSelected(null); setCutoff(null);
@@ -61,7 +71,7 @@ export function App() {
   const lanes = useMemo(() => deriveLanes(events), [events]);
 
   const maxTs = snap.events.at(-1)?.ts ?? 0;
-  const running = isRunActive(lanes, agents, { error, notFound });
+  const running = readOnly !== true && isRunActive(lanes, agents, { error, notFound }); // a stored run is frozen at its last event
   const clock = useNow(running);
   const now = cutoff ?? (running ? clock : maxTs || clock); // a finished/stopped run freezes at its last event
   const liveEnd = running ? Math.max(clock, maxTs) : maxTs; // right edge of the timeline while live
@@ -71,12 +81,12 @@ export function App() {
   const agent = agents.find((a) => a.id === selected) ?? null;
 
   if (runsError) return <div className="state" role="alert">Cannot reach the runner server: {runsError}</div>;
-  if (runs === null) return <div className="state" role="status">Loading runs…</div>;
+  if (runs === null || readOnly === null) return <div className="state" role="status">Loading runs…</div>;
   if (!runId) return <div className="state">No runs yet. Start one with <code>mar run</code>.</div>;
   if (notFound) return <div className="state" role="alert">Run <code>{runId}</code> was not found. It may have been created in a different repository or deleted.</div>;
   return (
     <div className="app">
-      <Header runs={runs} run={run} runId={runId} onRun={chooseRun} agents={agents} elapsedMs={endTs - startTs} conn={conn} partial={truncated} phase={phase} />
+      <Header readOnly={readOnly === true} runs={runs} run={run} runId={runId} onRun={chooseRun} agents={agents} elapsedMs={endTs - startTs} conn={conn} partial={truncated} phase={phase} />
       {error && <div className="banner" role="alert">{error}. {conn === "reconnecting" ? "Retrying…" : ""}</div>}
       {truncated && <div className="banner info" role="status" data-testid="truncated-banner">Showing the latest {snap.events.length.toLocaleString("en-US")} events of a longer run — token totals and early context may be incomplete.</div>}
       {cutoff !== null && <div className="banner info" role="status">Replaying: views show state as of the scrubber position.</div>}

@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import Database from "better-sqlite3";
+import { openRaw } from "../../server/test/rawDb.js";
 import { startServer } from "@mar/server";
 import { parseCli, runMain, UsageError } from "../src/main.js";
 import { seedRepo } from "./historySeed.js";
@@ -129,13 +129,13 @@ describe("mar history <runId>", () => {
     expect((await mar(["rsin"])).out).toContain("Run rsingle1");
     expect((await mar(["r"])).code).toBe(2); // too short
     const amb2: string[] = [];
-    const added = new Database(db); added.prepare("INSERT INTO runs VALUES ('rsingle2','twin',?,?)").run(repo, Date.now()); added.close();
+    const added = openRaw(db); added.prepare("INSERT INTO runs VALUES ('rsingle2','twin',?,?)").run(repo, Date.now()); added.close();
     try {
       const r = await runMain(["history", "rsing", "--repo", repo], { history: { out: () => {}, err: (l) => { amb2.push(l); } } });
       expect(r).toBe(2);
       expect(amb2.join("\n")).toContain("rsingle1");
       expect(amb2.join("\n")).toContain("rsingle2");
-    } finally { const c = new Database(db); c.prepare("DELETE FROM runs WHERE id='rsingle2'").run(); c.close(); }
+    } finally { const c = openRaw(db); c.prepare("DELETE FROM runs WHERE id='rsingle2'").run(); c.close(); }
     const unk = await mar(["zzzzz"]);
     expect(unk.code).toBe(1);
     expect(unk.err).toContain('no run "zzzzz"');

@@ -52,6 +52,7 @@ button.danger.armed { background: var(--err); color: var(--panel); }
 
 .badge { display: inline-block; padding: 0 6px; border: 1px solid currentColor; border-radius: 4px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; line-height: 16px; }
 .rt-claude { color: var(--claude); } .rt-codex { color: var(--codex); } .tier { color: var(--muted); }
+.badge.history-badge { color: var(--muted); font-weight: 600; white-space: nowrap; }
 .badge.unsafe { color: var(--panel); background: var(--err); border-color: var(--err); font-weight: 700; }
 
 .main { position: relative; display: flex; min-height: 0; overflow: hidden; } /* clips the drawer while it slides in */

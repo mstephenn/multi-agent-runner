@@ -12,12 +12,12 @@ const realDeps = (): Deps => ({
   caf: (id) => window.cancelAnimationFrame(id),
 });
 
-export function useRun(runId: string | null): ClientState {
+export function useRun(runId: string | null, readOnly = false): ClientState {
   const [state, setState] = useState<ClientState>(INITIAL);
   useEffect(() => {
     setState(INITIAL);
     if (!runId) return;
-    return createRunClient(runId, realDeps(), setState);
-  }, [runId]);
+    return createRunClient(runId, realDeps(), setState, { readOnly });
+  }, [runId, readOnly]);
   return state;
 }
