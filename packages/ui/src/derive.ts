@@ -282,3 +282,78 @@ export function phaseBadge(phase: number | undefined, phaseCount: number): strin
   const n = phase ?? 1;
   return n > 1 || phaseCount > 1 ? `P${n}` : null;
 }
+
+// Current attempt only. Missing terminal timestamps stay unknown rather than ticking forever.
+export function taskDuration(agent: AgentView, now: number): number | null {
+  const start = num(agent.startedAt);
+  const end = agent.status === "running" ? num(now) : num(agent.endedAt);
+  return start === undefined || end === undefined ? null : Math.max(0, end - start);
+}
+
+export type RunOverviewOptions = {
+  maxTotalTokens?: number;
+  stop?: { reason: string; message: string } | null;
+};
+export type RunOverview = {
+  tokens: number; costUsd: number | null; maxTotalTokens: number | null;
+  remainingTokens: number | null; etaMs: number | null;
+  limitStopReason: string | null;
+};
+// ETA is a serial-work estimate for known pending/running tasks, not a DAG/concurrency prediction.
+// Future phases are unknown. Failed/blocked tasks are terminal, and retries use their latest attempt.
+export function deriveRunOverview(events: StoredEvent[], agents: AgentView[], now: number, options: RunOverviewOptions = {}): RunOverview {
+  let tokens = 0, costUsd: number | null = null;
+  for (const e of events) {
+    if (e.type !== "usage") continue;
+    const p = rec(e.payload);
+    tokens += (nonneg(p.input) ?? 0) + (nonneg(p.output) ?? 0);
+    const cost = nonneg(p.costUsd);
+    if (cost !== undefined) costUsd = (costUsd ?? 0) + cost;
+  }
+  const budget = num(options.maxTotalTokens);
+  const maxTotalTokens = budget !== undefined && budget > 0 ? budget : null;
+  const durations = agents.filter((a) => a.status === "done").map((a) => taskDuration(a, now)).filter((d): d is number => d !== null);
+  const remaining = agents.filter((a) => a.status === "pending" || a.status === "running");
+  const mean = durations.length ? durations.reduce((a, b) => a + b, 0) / durations.length : null;
+  const etaMs = options.stop ? null : !remaining.length ? 0 : mean === null ? null
+    : remaining.reduce((sum, a) => sum + Math.max(0, mean - (a.status === "running" ? taskDuration(a, now) ?? 0 : 0)), 0);
+  return { tokens, costUsd, maxTotalTokens, remainingTokens: maxTotalTokens === null ? null : Math.max(0, maxTotalTokens - tokens), etaMs,
+    limitStopReason: options.stop && ["max_tokens", "max_phases"].includes(options.stop.reason) ? options.stop.message || options.stop.reason : null };
+}
+
+export type VerifyResult = { status: "running" | "passed" | "failed"; durationMs: number | null; command: string | null; code: number | null; timedOut: boolean; tail: string };
+export function deriveVerifyResult(events: StoredEvent[], taskId: string): VerifyResult | null {
+  let result: VerifyResult | null = null;
+  for (const e of events) {
+    if (e.task_id !== taskId) continue;
+    if (e.type === "task_started") result = null;
+    if (!["verify_started", "verify_passed", "verify_failed"].includes(e.type)) continue;
+    const p = rec(e.payload);
+    result = { status: e.type === "verify_started" ? "running" : e.type === "verify_passed" ? "passed" : "failed",
+      durationMs: nonneg(p.ms) ?? null, command: str(p.command) ?? null, code: num(p.code) ?? null, timedOut: p.timedOut === true, tail: str(p.tail) ?? "" };
+  }
+  return result;
+}
+
+export type BranchSummary = { repo: string | null; branch: string | null; merged: string[]; conflict: { branch: string | null; files: string[] } | null; verify: "passed" | "failed" | null; error: string | null };
+const strings = (v: unknown): string[] => Array.isArray(v) ? v.filter((s): s is string => typeof s === "string") : [];
+// Latest integration outcome per repository; a later failure replaces an earlier success.
+export function deriveBranchSummary(events: StoredEvent[]): BranchSummary[] {
+  const repos = new Map<string | null, BranchSummary>();
+  for (const e of events) {
+    if (e.type !== "integration") continue;
+    const p = rec(e.payload), c = rec(p.conflict), v = rec(p.verify), repo = str(p.repo) ?? null;
+    repos.set(repo, { repo, branch: str(p.branch) ?? null, merged: strings(p.merged),
+      conflict: p.conflict && typeof p.conflict === "object" ? { branch: str(c.branch) ?? null, files: strings(c.files) } : null,
+      verify: v.ok === true ? "passed" : v.ok === false ? "failed" : null, error: str(p.error) ?? null });
+  }
+  return [...repos.values()];
+}
+
+export type GraphFilter = { runningFailedOnly?: boolean; phase?: number | null; repo?: string | null };
+// Filters intersect; the workspace-wide repo "*" is an exact repo selection, not a wildcard.
+export function matchesGraphFilter(agent: AgentView, filter: GraphFilter = {}): boolean {
+  return (!filter.runningFailedOnly || agent.status === "running" || agent.status === "failed")
+    && (filter.phase == null || (agent.phase ?? 1) === filter.phase)
+    && (filter.repo == null || agent.repo === filter.repo);
+}
