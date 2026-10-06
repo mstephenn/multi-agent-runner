@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { layoutGraph, positions, depths, type Bounds, type LayoutEdge, type Point } from "../src/layout.js";
+import { fitViewport, layoutGraph, positions, depths, type Bounds, type LayoutEdge, type Point } from "../src/layout.js";
 
 const edge = (source: string, target: string): LayoutEdge => ({ id: `${source}>${target}`, source, target });
 const inside = (p: Point, b: Bounds) => p.x >= b.x && p.x <= b.x + b.width && p.y >= b.y && p.y <= b.y + b.height;
@@ -103,4 +103,76 @@ it("preserves the existing dependency-depth and position helpers", () => {
   const ids = ["a", "b"];
   const d = depths(ids, null, [{ from: "a", to: "b", key: "k", version: 1, tokens: 0 }]);
   expect(positions(ids, d)).toEqual(new Map([["a", { x: 0, y: 0 }], ["b", { x: 280, y: 0 }]]));
+});
+
+describe("layoutGraph with dependency layers", () => {
+  const nodes = [{ id: "a", phase: 1 }, { id: "b", phase: 1 }, { id: "c", phase: 1 }, { id: "d", phase: 2 }];
+  const edges = [edge("a", "b"), edge("b", "c"), edge("a", "c"), edge("c", "d")];
+  const opts = { layers: true, nodeWidth: 100, nodeHeight: 40, columnGap: 40, padding: 10, edgeOffset: 10 };
+  it("puts a task right of its same-phase dependencies and lets a phase band span its layers", () => {
+    const r = layoutGraph(nodes, edges, opts);
+    const x = (id: string) => r.positions.get(id)!.x;
+    expect(x("a")).toBeLessThan(x("b"));
+    expect(x("b")).toBeLessThan(x("c"));
+    expect(x("c")).toBeLessThan(x("d"));
+    const [p1, p2] = r.columns;
+    expect(p1!.phase).toBe(1);
+    expect(p1!.width).toBe(3 * 100 + 2 * 40);
+    expect(p1!.nodeIds.sort()).toEqual(["a", "b", "c"]);
+    expect(p2!.x).toBeGreaterThanOrEqual(p1!.x + p1!.width);
+    // a same-phase chain no longer loops over the top: only the skipped a>c edge needs a track above the nodes
+    expect(r.edges.filter((e) => e.waypoints.some((p) => p.y < 0)).map((e) => e.id)).toEqual(["a>c"]);
+  });
+  it("is the default-off: without `layers` a phase stays one column", () => {
+    const r = layoutGraph(nodes, edges, { ...opts, layers: false });
+    expect(r.positions.get("a")!.x).toBe(r.positions.get("c")!.x);
+  });
+  it("survives a dependency cycle without hanging", () => {
+    const r = layoutGraph([{ id: "x" }, { id: "y" }], [edge("x", "y"), edge("y", "x")], { layers: true });
+    expect(r.positions.size).toBe(2);
+  });
+});
+
+describe("swimlanes only for repos that have tasks", () => {
+  it("never creates a lane for an unused repo and keeps lane padding small", () => {
+    const nodes = [{ id: "a", repo: "r101-webservices" }, { id: "b", repo: "r101-frontend" }, { id: "c" }];
+    const r = layoutGraph(nodes, [], { swimlanes: true, nodeHeight: 100, padding: 12, laneGap: 10 });
+    expect(r.lanes.map((l) => l.repo)).toEqual(["*", "r101-frontend", "r101-webservices"]);
+    for (const lane of r.lanes) expect(lane.height).toBe(100 + 2 * 12);
+    expect(r.bounds.height).toBe(3 * 124 + 2 * 10);
+  });
+});
+
+describe("fitViewport", () => {
+  const bounds = { x: 0, y: 0, width: 1000, height: 500 };
+  it("centres a graph that fits and never zooms in past maxZoom", () => {
+    const v = fitViewport(bounds, { width: 2000, height: 1000 });
+    expect(v.zoom).toBe(1);
+    expect(v.x).toBe(500);
+    expect(v.y).toBe(250);
+    expect(fitViewport(bounds, { width: 1032, height: 532 }).zoom).toBe(1);
+    expect(fitViewport(bounds, { width: 800, height: 600 }).zoom).toBeCloseTo((800 - 32) / 1000);
+  });
+  it("never shrinks nodes below 0.6: a bigger graph is anchored top-left and panned instead", () => {
+    const v = fitViewport({ x: -20, y: -50, width: 3000, height: 1500 }, { width: 1000, height: 600 });
+    expect(v.zoom).toBe(0.6);
+    expect(v).toEqual({ x: 16 + 20 * 0.6, y: 16 + 50 * 0.6, zoom: 0.6 });
+    expect(fitViewport(bounds, { width: 500, height: 300 }, { minZoom: 0.3 }).zoom).toBeCloseTo(0.468, 3);
+  });
+  it("is total for empty bounds or a zero-size pane", () => {
+    expect(fitViewport({ x: 0, y: 0, width: 0, height: 0 }, { width: 100, height: 100 })).toEqual({ x: 0, y: 0, zoom: 1 });
+    expect(fitViewport(bounds, { width: 0, height: 0 })).toEqual({ x: 0, y: 0, zoom: 1 });
+  });
+});
+
+describe("labelSpace", () => {
+  it("reserves room above the first lane and below every swimlane without changing the default layout", () => {
+    const nodes = [{ id: "a", repo: "x" }, { id: "b", repo: "y" }];
+    const base = layoutGraph(nodes, [], { swimlanes: true, nodeHeight: 100, padding: 10 });
+    const spaced = layoutGraph(nodes, [], { swimlanes: true, nodeHeight: 100, padding: 10, labelSpace: 20 });
+    expect(spaced.positions.get("a")!.y).toBe(base.positions.get("a")!.y + 20);
+    expect(spaced.lanes[0]!.height).toBe(base.lanes[0]!.height + 40);
+    expect(spaced.lanes[1]!.height).toBe(base.lanes[1]!.height + 20);
+    expect(() => layoutGraph(nodes, [], { labelSpace: -1 })).toThrow(/labelSpace/);
+  });
 });

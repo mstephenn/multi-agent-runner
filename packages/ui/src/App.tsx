@@ -2,11 +2,17 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type { BbEntry } from "@mar/core";
 import { deriveRunOverview, deriveAgents, deriveWorkspaceRepos, deriveFlow, deriveLanes, derivePhase, isRunActive, type AgentView } from "./derive.js";
 import { useRun } from "./useRun.js";
-import { Header, type RunInfo } from "./Header.js";
-import { OverviewStrip } from "./OverviewStrip.js";
+import { Header, type Budget, type RunInfo } from "./Header.js";
+import { budgetUsage } from "./fmt.js";
 import { GraphView } from "./GraphView.js";
-import { Inspector } from "./Inspector.js";
-import { BottomPanel } from "./BottomPanel.js";
+import { Inspector, type InspectorTab } from "./Inspector.js";
+import { Board } from "./Board.js";
+import { AnswerPanel } from "./AnswerPanel.js";
+import { ProblemsStrip } from "./ProblemsStrip.js";
+import { MainTabs, loadMainTab, saveMainTab, type MainTabId, type TabSpec } from "./MainTabs.js";
+import { Timeline } from "./Timeline.js";
+import { BlackboardPanel } from "./BlackboardPanel.js";
+import { chipCounts, deriveAnswer, deriveNowTexts, deriveProblems, deriveRunState, groupBoard, summarizeRun, type BoardChip } from "./taskBoard.js";
 import { HelpOverlay } from "./HelpOverlay.js";
 import { shortcutAction, stepSelection } from "./shortcuts.js";
 
@@ -33,6 +39,12 @@ export function App() {
   const [cutoff, setCutoff] = useState<number | null>(null);
   // null until /api/meta answered; an older server without it counts as a live (writable) one.
   const [readOnly, setReadOnly] = useState<boolean | null>(null);
+  const [tabPref, setTabPref] = useState<MainTabId>(loadMainTab);
+  const [chip, setChip] = useState<BoardChip>("all");
+  const [query, setQuery] = useState("");
+  const [taskTabs, setTaskTabs] = useState<Record<string, InspectorTab>>({}); // the details tab chosen per task, for this session
+  const [answerDismissed, setAnswerDismissed] = useState(false);
+  const chooseTab = useCallback((t: MainTabId) => { setTabPref(t); saveMainTab(t); }, []);
 
   useEffect(() => {
     let alive = true;
@@ -53,7 +65,7 @@ export function App() {
   const { snap, conn, error, notFound } = useRun(readOnly === null ? null : runId, readOnly === true);
   const truncated = snap.truncated === true;
   const chooseRun = useCallback((id: string) => {
-    setRunId(id); setSelected(null); setCutoff(null);
+    setRunId(id); setSelected(null); setCutoff(null); setAnswerDismissed(false); setTaskTabs({});
     history.replaceState(null, "", `?run=${encodeURIComponent(id)}`);
   }, []);
 
@@ -80,7 +92,22 @@ export function App() {
   const endTs = running || cutoff !== null ? now : events.at(-1)?.ts ?? now;
   const agent = agents.find((a) => a.id === selected) ?? null;
   const [help, setHelp] = useState(false);
-  const agentIds = useMemo(() => agents.map((a) => a.id), [agents]);
+  const state = deriveRunState({ agents, phase, active: running, live: readOnly !== true, stop: cutoff === null ? run?.stop : null });
+  const summary = summarizeRun({ agents, phase, state, costUsd: overview.costUsd, etaMs: overview.etaMs, partial: truncated });
+  const usage = budgetUsage(hasUsage ? overview.tokens : null, overview.maxTotalTokens ?? undefined);
+  const budget: Budget = { tokens: hasUsage ? overview.tokens : null, partial: truncated, limit: overview.maxTotalTokens, pct: usage?.pct ?? null, over: usage?.over ?? false };
+  const problems = useMemo(() => deriveProblems(events, agents, state), [events, agents, state.kind, state.label]); // eslint-disable-line react-hooks/exhaustive-deps
+  const answers = useMemo(() => deriveAnswer(snap.plan, snap.reports), [snap.plan, snap.reports]);
+  const nowTexts = useMemo(() => deriveNowTexts({ events, blackboard, reports: snap.reports, plan: snap.plan, agents }), [events, blackboard, snap.reports, snap.plan, agents]);
+  const counts = useMemo(() => chipCounts(agents), [agents]);
+  const groups = useMemo(() => groupBoard(agents, { query, chip }), [agents, query, chip]);
+  const tabs: TabSpec[] = [
+    { id: "board", label: "Board" }, ...(answers.length > 0 ? [{ id: "answer" as const, label: "Answer" }] : []),
+    { id: "graph", label: "Graph" }, { id: "timeline", label: "Timeline" }, { id: "blackboard", label: `Blackboard (${blackboard.length})` },
+  ];
+  const tab = tabs.some((t) => t.id === tabPref) ? tabPref : "board"; // the saved choice stays saved while Answer is unavailable
+  // J/K follow what is on screen: the board's visible order on the Board tab, plan order elsewhere.
+  const agentIds = useMemo(() => (tab === "board" ? groups.flatMap((g) => g.rows.map((r) => r.id)) : agents.map((a) => a.id)), [tab, groups, agents]);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.defaultPrevented) return; // e.g. the phase popover already used this Escape
@@ -100,17 +127,30 @@ export function App() {
   const offline = conn === "reconnecting";
   return (
     <div className={`app${offline ? " offline" : ""}`} data-conn={conn}>
-      <Header repos={repos} readOnly={readOnly === true} runs={runs} run={run} runId={runId} onRun={chooseRun} agents={agents} elapsedMs={endTs - startTs} conn={conn} partial={truncated} phase={phase} phaseHistory={phaseHistory} />
-      <OverviewStrip overview={overview} partial={truncated} hasUsage={hasUsage} />
+      <Header repos={repos} readOnly={readOnly === true} runs={runs} run={run} runId={runId} onRun={chooseRun} agents={agents} elapsedMs={endTs - startTs} conn={conn} phase={phase} phaseHistory={phaseHistory} summary={summary.parts} state={state} budget={budget} />
+      <ProblemsStrip problems={problems} runId={runId} onOpen={setSelected} />
       {offline && <div className="banner offline-banner" role="alert" data-testid="offline-banner"><strong>Connection lost.</strong> Showing the last known state{error ? ` (${error})` : ""}. Retrying…</div>}
       {error && !offline && <div className="banner" role="alert">{error}.</div>}
       {truncated && <div className="banner info" role="status" data-testid="truncated-banner">Showing the latest {snap.events.length.toLocaleString("en-US")} events of a longer run — token totals and early context may be incomplete.</div>}
       {cutoff !== null && <div className="banner info" role="status">Replaying: views show state as of the scrubber position.</div>}
+      {state.kind === "done" && answers.length > 0 && !answerDismissed && tab !== "answer" && (
+        <div className="banner ready" role="status" data-testid="answer-ready">
+          <strong>Answer ready.</strong> The run finished and {answers.length === 1 ? "its final task wrote a report" : `${answers.length} final tasks wrote reports`}.
+          <button type="button" onClick={() => { chooseTab("answer"); setAnswerDismissed(true); }}>Open answer</button>
+          <button type="button" aria-label="Dismiss" onClick={() => setAnswerDismissed(true)}>Dismiss</button>
+        </div>
+      )}
       <main className="main">
-        <GraphView agents={agents} plan={snap.plan} flow={flow} selected={selected} onSelect={setSelected} />
-        {agent && <Inspector key={agent.id} agent={agent} events={events} blackboard={blackboard} plan={snap.plan} reports={snap.reports} width={inspectorWidth} onWidthChange={setInspectorWidth} onClose={() => setSelected(null)} />}
+        <MainTabs tabs={tabs} active={tab} onChange={chooseTab}>
+          {tab === "board" && <Board groups={groups} total={agents.length} counts={counts} chip={chip} onChip={setChip} query={query} onQuery={setQuery} selected={selected} onSelect={setSelected} now={now} nowTexts={nowTexts} />}
+          {tab === "answer" && <AnswerPanel reports={answers} />}
+          {tab === "graph" && <GraphView agents={agents} plan={snap.plan} flow={flow} selected={selected} onSelect={setSelected} />}
+          {tab === "timeline" && <Timeline events={events} allEvents={snap.events} agents={agents} now={now} liveEnd={liveEnd} cutoff={cutoff} onCutoff={setCutoff} onSelect={setSelected} />}
+          {tab === "blackboard" && <BlackboardPanel entries={blackboard} flow={flow} />}
+        </MainTabs>
+        {agent && <Inspector key={agent.id} agent={agent} events={events} blackboard={blackboard} plan={snap.plan} reports={snap.reports} width={inspectorWidth} onWidthChange={setInspectorWidth} onClose={() => setSelected(null)}
+          chosenTab={taskTabs[agent.id]} onTab={(t) => setTaskTabs((cur) => ({ ...cur, [agent.id]: t }))} problem={problems.find((p) => p.taskId === agent.id && p.severity === "error")} />}
       </main>
-      <BottomPanel events={events} allEvents={snap.events} agents={agents} blackboard={blackboard} flow={flow} now={now} liveEnd={liveEnd} cutoff={cutoff} onCutoff={setCutoff} onSelect={setSelected} />
       {help && <HelpOverlay onClose={() => setHelp(false)} />}
     </div>
   );

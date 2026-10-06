@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { StoredEvent } from "@mar/core";
-import { chipCounts, deriveAnswer, deriveNowText, deriveNowTexts, deriveProblems, deriveRunState, firstSentence, groupBoard, phaseSummary, reasonText, summarizeRun } from "../src/board.js";
+import { chipCounts, deriveAnswer, deriveNowText, deriveNowTexts, deriveProblems, deriveRunState, firstSentence, groupBoard, phaseSummary, reasonText, summarizeRun } from "../src/taskBoard.js";
 import { deriveAgents, derivePhase, deriveRunOverview, type AgentView } from "../src/derive.js";
 import { fmtCostShort, fmtEtaLeft } from "../src/fmt.js";
 import { failedRun, workspaceRun } from "./fixtures/board.js";

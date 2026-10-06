@@ -16,6 +16,11 @@ export type LayoutOptions = {
   padding?: number;
   /** Minimum distance from a node border to an edge's first/last bend. */
   edgeOffset?: number;
+  /** Split each phase into dependency layers (a task sits right of what it depends on within its phase), so edges run left to right
+   * instead of looping over the top. A phase band then spans several columns. Default: one column per phase. */
+  layers?: boolean;
+  /** Room (px) kept free for band labels: above the first lane (phase labels) and below each swimlane (repo labels). Default 0. */
+  labelSpace?: number;
 };
 export type GraphLayout = {
   positions: Map<string, Point>;
@@ -27,7 +32,7 @@ export type GraphLayout = {
 };
 
 /** Pure layout in top-left coordinates, with uniform node dimensions.
- * Columns represent observed phases (missing phase = 1), not dependency depth.
+ * Columns represent observed phases (missing phase = 1); with `layers` each phase is split by dependency depth.
  * Input order breaks ordering ties. Unknown edge endpoints are omitted.
  */
 export function layoutGraph(
@@ -43,6 +48,8 @@ export function layoutGraph(
   const offset = size("edgeOffset", 16), padding = size("padding", 24);
   const gap = Math.max(size("columnGap", 70), 2 * offset);
   const rowGap = size("rowGap", 30), laneGap = size("laneGap", 32);
+  const labelSpace = options.labelSpace ?? 0;
+  if (typeof labelSpace !== "number" || !Number.isFinite(labelSpace) || labelSpace < 0) throw new RangeError("labelSpace must be a non-negative finite number");
   const byId = new Map(nodes.map((n) => [n.id, n]));
   if (byId.size !== nodes.length) throw new Error("Duplicate layout node id");
   for (const n of nodes) if (n.phase !== undefined && (!Number.isSafeInteger(n.phase) || n.phase < 1))
@@ -51,9 +58,31 @@ export function layoutGraph(
   if (new Set(validEdges.map((e) => e.id)).size !== validEdges.length) throw new Error("Duplicate layout edge id");
   const phases = [...new Set(nodes.map((n) => n.phase ?? 1))].sort((a, b) => a - b);
   const repos = options.swimlanes ? [...new Set(nodes.map((n) => n.repo ?? "*"))].sort() : ["*"];
-  const columnOf = new Map(nodes.map((n) => [n.id, phases.indexOf(n.phase ?? 1)]));
-  const groups = phases.map((phase) => repos.map((repo) => nodes
-    .filter((n) => (n.phase ?? 1) === phase && (!options.swimlanes || (n.repo ?? "*") === repo))
+  // Column of every node, and the column range of each phase band.
+  const columnOf = new Map<string, number>();
+  const band = new Map<number, [number, number]>();
+  let columnCount = 0;
+  for (const phase of phases) {
+    const inPhase = nodes.filter((n) => (n.phase ?? 1) === phase);
+    const depth = new Map(inPhase.map((n) => [n.id, 0]));
+    if (options.layers) {
+      const local = validEdges.filter((e) => e.source !== e.target && depth.has(e.source) && depth.has(e.target));
+      for (let pass = 0; pass < inPhase.length; pass++) {
+        let changed = false;
+        for (const e of local) {
+          const next = Math.min(inPhase.length - 1, depth.get(e.source)! + 1);
+          if (next > depth.get(e.target)!) { depth.set(e.target, next); changed = true; }
+        }
+        if (!changed) break;
+      }
+    }
+    const span = Math.max(...depth.values()) + 1;
+    for (const n of inPhase) columnOf.set(n.id, columnCount + depth.get(n.id)!);
+    band.set(phase, [columnCount, columnCount + span - 1]);
+    columnCount += span;
+  }
+  const groups = Array.from({ length: columnCount }, (_, column) => repos.map((repo) => nodes
+    .filter((n) => columnOf.get(n.id) === column && (!options.swimlanes || (n.repo ?? "*") === repo))
     .map((n) => n.id)));
   const neighbors = new Map(nodes.map((n) => [n.id, new Set<string>()]));
   for (const e of validEdges) {
@@ -65,7 +94,7 @@ export function layoutGraph(
   const crossingCount = () => {
     const rank = ranks();
     let count = 0;
-    for (let c = 0; c < phases.length - 1; c++) {
+    for (let c = 0; c < columnCount - 1; c++) {
       const pairs = validEdges.flatMap((e) => {
         const a = columnOf.get(e.source)!, b = columnOf.get(e.target)!;
         return a === c && b === c + 1 ? [[e.source, e.target]]
@@ -96,22 +125,26 @@ export function layoutGraph(
   }
   const result: GraphLayout = { positions: new Map(), columns: [], lanes: [], edges: [], bounds: { x: 0, y: 0, width: 0, height: 0 } };
   if (!nodes.length) return result;
-  const width = 2 * padding + phases.length * w + (phases.length - 1) * gap;
+  const width = 2 * padding + columnCount * w + (columnCount - 1) * gap;
   let y = 0;
   for (let lane = 0; lane < repos.length; lane++) {
     const rows = Math.max(...best.map((c) => c[lane].length));
-    const height = 2 * padding + rows * h + Math.max(0, rows - 1) * rowGap;
+    const before = lane === 0 ? labelSpace : 0, after = options.swimlanes ? labelSpace : 0;
+    const height = before + 2 * padding + rows * h + Math.max(0, rows - 1) * rowGap + after;
     const nodeIds: string[] = [];
     best.forEach((column, c) => column[lane].forEach((id, row) => {
-      result.positions.set(id, { x: padding + c * (w + gap), y: y + padding + row * (h + rowGap) });
+      result.positions.set(id, { x: padding + c * (w + gap), y: y + before + padding + row * (h + rowGap) });
       nodeIds.push(id);
     }));
     if (options.swimlanes) result.lanes.push({ repo: repos[lane], x: 0, y, width, height, nodeIds });
     y += height + laneGap;
   }
   const height = y - laneGap;
-  result.columns = phases.map((phase, c) => ({ phase, x: padding + c * (w + gap), y: 0,
-    width: w, height, nodeIds: best[c].flat() }));
+  result.columns = phases.map((phase) => {
+    const [from, to] = band.get(phase)!;
+    return { phase, x: padding + from * (w + gap), y: 0, width: (to - from + 1) * w + (to - from) * gap, height,
+      nodeIds: best.slice(from, to + 1).flatMap((c) => c.flat()) };
+  });
   let track = 0;
   result.edges = validEdges.map((edge) => {
     const source = result.positions.get(edge.source)!, target = result.positions.get(edge.target)!;
@@ -134,6 +167,18 @@ export function layoutGraph(
   result.bounds = { x: minX, y: minY, width: Math.max(width, ...points.map((p) => p.x)) - minX,
     height: Math.max(height, ...points.map((p) => p.y)) - minY };
   return result;
+}
+
+export type Viewport = { x: number; y: number; zoom: number };
+/** Viewport that frames `bounds` in a pane of `size`. The zoom never drops below `minZoom` (default 0.6): a graph too big for the pane
+ * is anchored at its top-left corner and panned, instead of being shrunk into illegible nodes. Otherwise it is centred (zoom capped at `maxZoom`). */
+export function fitViewport(bounds: Bounds, size: { width: number; height: number }, opts: { margin?: number; minZoom?: number; maxZoom?: number } = {}): Viewport {
+  const margin = opts.margin ?? 16, minZoom = opts.minZoom ?? 0.6, maxZoom = opts.maxZoom ?? 1;
+  if (!(bounds.width > 0) || !(bounds.height > 0) || !(size.width > 0) || !(size.height > 0)) return { x: 0, y: 0, zoom: 1 };
+  const natural = Math.min((size.width - 2 * margin) / bounds.width, (size.height - 2 * margin) / bounds.height);
+  const zoom = Math.max(minZoom, Math.min(maxZoom, natural));
+  if (natural < minZoom) return { x: margin - bounds.x * zoom, y: margin - bounds.y * zoom, zoom };
+  return { x: (size.width - bounds.width * zoom) / 2 - bounds.x * zoom, y: (size.height - bounds.height * zoom) / 2 - bounds.y * zoom, zoom };
 }
 
 // Layered depth = longest dependency chain. Plan edges win; before the plan loads, flow edges stand in.
