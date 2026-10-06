@@ -14,3 +14,15 @@ export function budgetUsage(tokens: number | null, budget: number | undefined): 
   const pct = Math.round((tokens / budget) * 100);
   return { pct, over: tokens > budget };
 }
+// Header cost: two decimals ("$0.14"); a sub-cent amount reads "<$0.01" rather than a misleading "$0.00".
+export const fmtCostShort = (n: number | null | undefined) => (typeof n === "number" && Number.isFinite(n) ? (n > 0 && n < 0.01 ? "<$0.01" : `$${n.toFixed(2)}`) : "n/a");
+// "~2 min left"; unknown (null / not finite) is "ETA n/a"; nothing left is "" so callers can drop the segment.
+export function fmtEtaLeft(ms: number | null | undefined): string {
+  if (typeof ms !== "number" || !Number.isFinite(ms)) return "ETA n/a";
+  if (ms <= 0) return "";
+  if (ms < 60_000) return "<1 min left";
+  const min = Math.round(ms / 60_000);
+  if (min < 60) return `~${min} min left`;
+  const h = Math.floor(min / 60), m = min % 60;
+  return `~${h}h${m ? ` ${m}m` : ""} left`;
+}
