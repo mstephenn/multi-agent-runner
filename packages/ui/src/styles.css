@@ -32,7 +32,9 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
 .app { display: flex; flex-direction: column; height: 100%; min-height: 0; }
 .app > * { flex: none; }
 .app > .main { flex: 1 1 auto; min-height: 0; }
-.state { padding: 48px 24px; text-align: center; color: var(--muted); }
+.state { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 64px 24px; text-align: center; color: var(--muted); }
+.state strong { color: var(--ink); font-size: 15px; }
+.state-error strong { color: var(--err); }
 .banner { padding: 6px 16px; background: color-mix(in srgb, var(--err) 14%, var(--panel)); border-bottom: 1px solid var(--err); }
 .banner.info { background: color-mix(in srgb, var(--accent) 12%, var(--panel)); border-color: var(--accent); }
 
@@ -57,7 +59,7 @@ button.danger.armed { background: var(--err); color: var(--panel); }
 
 .main { position: relative; display: flex; min-height: 0; overflow: hidden; } /* clips the drawer while it slides in */
 .graph { flex: 1; min-width: 0; min-height: 260px; }
-.empty { flex: 1; display: grid; place-items: center; color: var(--muted); }
+.empty { flex: 1; display: flex; flex-direction: column; gap: 10px; align-items: center; justify-content: center; color: var(--muted); }
 .react-flow { --xy-background-color: var(--bg); --xy-edge-stroke: var(--muted); --xy-edge-label-color: var(--ink); --xy-edge-label-background-color: var(--panel); background: var(--bg); }
 .react-flow__edge.flow .react-flow__edge-path { stroke: var(--accent); stroke-width: 2; }
 .react-flow__edge-text { font: 11px var(--mono); }
@@ -87,6 +89,11 @@ button.danger.armed { background: var(--err); color: var(--panel); }
 .insp-head { display: flex; justify-content: space-between; align-items: flex-start; padding: 10px 12px 0; }
 .insp-head h2 { margin: 0; font-size: 15px; }
 .goal { margin: 6px 12px; color: var(--muted); }
+.inspector-summary { padding: 10px 12px; border-top: 1px solid var(--line); }
+.inspector-summary .usage { grid-template-columns: 70px minmax(0, 1fr); }
+.inspector-summary dd { overflow-wrap: anywhere; }
+.inspector-summary p { margin: 8px 0 0; }
+.inspector-summary > button { margin-top: 8px; }
 .tabs { display: flex; gap: 2px; padding: 0 12px; border-bottom: 1px solid var(--line); }
 .tabs [role="tab"] { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; }
 .tabs [aria-selected="true"] { border-bottom-color: var(--accent); font-weight: 700; }
@@ -221,6 +228,7 @@ pre.io { max-height: 320px; overflow: auto; white-space: pre-wrap; word-break: b
 
 .phase { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
 .phase-badge, .phase-tag { color: var(--muted); }
+.phase-badge { white-space: nowrap; }
 .phase-remaining { color: var(--muted); font-size: 12px; max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Keep repository names case-sensitive and contained, even for long folder names. */
@@ -234,3 +242,42 @@ pre.io { max-height: 320px; overflow: auto; white-space: pre-wrap; word-break: b
 .sibling-warnings ul { margin: 6px 0; padding-left: 20px; }
 .sibling-warnings p { margin: 6px 0; }
 .insp-head > div { min-width: 0; }
+
+.title h1.goal { flex: 1 1 160px; min-width: 0; }
+.goal button { display: block; width: 100%; padding: 0; border: 0; background: transparent; font: inherit; font-weight: 600; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.goal.expanded, .goal.expanded button { white-space: pre-wrap; overflow-wrap: anywhere; }
+.phase { position: relative; }
+.phase-remaining { text-align: left; }
+.phase-popover { position: absolute; top: calc(100% + 8px); right: 0; z-index: 20; width: min(420px, calc(100vw - 32px)); max-height: 60vh; overflow: auto; padding: 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 8px 24px #0003; }
+.phase-popover p { white-space: pre-wrap; overflow-wrap: anywhere; margin: 6px 0 12px; }
+.phase-popover ol { padding-left: 24px; }
+.overview-strip { flex-wrap: wrap; padding: 8px 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
+.overview-strip progress { display: block; width: 100%; height: 6px; margin-top: 4px; accent-color: var(--accent); }
+.budget-over { color: var(--err); }
+@media (max-width: 640px) {
+  .title { flex-wrap: wrap; }
+  .title .phase { flex: 1 1 100%; }
+  .phase-remaining { max-width: 65vw; }
+  .phase-popover { left: 0; right: auto; }
+}
+
+/* Loading spinner (static ring under reduced motion). */
+.spinner { width: 18px; height: 18px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.9s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
+
+/* Connection lost: keep the last state visible but clearly stale. */
+.banner.offline-banner { background: color-mix(in srgb, var(--warn) 18%, var(--panel)); border-color: var(--warn); }
+.app.offline .top { border-bottom: 2px dashed var(--warn); }
+.app.offline .main { filter: grayscale(0.85); opacity: 0.7; }
+.app.offline .conn-reconnecting { border: 1px solid var(--warn); border-radius: 10px; padding: 1px 8px; }
+
+/* Keyboard shortcut help. */
+.help-backdrop { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: 16px; background: color-mix(in srgb, var(--bg) 70%, transparent); }
+.help { width: min(420px, 100%); max-height: 100%; overflow: auto; padding: 16px 20px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); box-shadow: 0 8px 28px rgb(0 0 0 / 0.25); }
+.help h2 { margin: 0 0 10px; font-size: 15px; }
+.help dl { margin: 0 0 12px; }
+.help dl div { display: flex; align-items: baseline; gap: 12px; padding: 4px 0; }
+.help dt { flex: none; width: 48px; }
+.help dd { margin: 0; }
+kbd { display: inline-block; min-width: 24px; padding: 1px 6px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; background: var(--bg); font: 12px var(--mono); text-align: center; }

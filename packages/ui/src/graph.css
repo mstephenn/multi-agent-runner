@@ -1,0 +1,24 @@
+.graph { position: relative; display: flex; flex-direction: column; }
+.graph-canvas { position: relative; flex: 1; min-height: 0; }
+.graph .agent { box-sizing: border-box; width: 250px; height: 140px; }
+.graph .agent-btn { height: 100%; }
+.graph .agent-id, .graph .role { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.graph .agent-meta { flex-wrap: nowrap; overflow: hidden; min-height: 20px; }
+.graph .agent-foot { margin-top: auto; flex-wrap: nowrap; }
+.agent-duration { color: var(--muted); font-size: 11px; }
+.graph-controls { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px 12px; border-bottom: 1px solid var(--line); background: var(--panel); font-size: 12px; }
+.graph-controls label { display: flex; align-items: center; gap: 4px; }
+.graph-controls button, .graph-controls select { color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 4px 6px; }
+.graph-controls select { max-width: 150px; }
+.graph-controls button[aria-pressed="true"] { border-color: var(--accent); }
+.graph-no-matches { position: absolute; top: 50%; width: 100%; text-align: center; color: var(--muted); pointer-events: none; }
+.graph-edge-marker { pointer-events: all; fill: var(--accent); stroke: var(--panel); stroke-width: 2; }
+.graph-edge-label { opacity: 0; pointer-events: none; overflow: visible; }
+.graph-edge-label div { box-sizing: border-box; width: 140px; max-height: 44px; overflow: auto; padding: 5px 7px; border: 1px solid var(--line); border-radius: 4px; color: var(--ink); background: var(--panel); font: 11px var(--mono); overflow-wrap: anywhere; text-align: center; }
+.react-flow__edge:hover .graph-edge-label, .react-flow__edge:focus .graph-edge-label, .graph-edge.is-selected .graph-edge-label { opacity: 1; pointer-events: auto; }
+.react-flow__edge:hover .graph-edge-marker, .react-flow__edge:focus .graph-edge-marker, .graph-edge.is-selected .graph-edge-marker { opacity: 0; }
+.band { box-sizing: border-box; width: 100%; height: 100%; border-radius: 8px; pointer-events: none; }
+.band span { position: absolute; top: 6px; left: 10px; font: 600 11px var(--mono); letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+.band-phase { background: color-mix(in srgb, var(--accent) 5%, transparent); border: 1px dashed var(--line); }
+.band-repo { border-top: 1px solid var(--line); background: color-mix(in srgb, var(--ink) 3%, transparent); }
+.band-repo span { top: auto; bottom: 4px; }

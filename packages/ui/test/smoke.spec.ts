@@ -61,12 +61,22 @@ const openActivity = async (page: import("@playwright/test").Page, node = "impl"
 };
 const stepRow = (page: import("@playwright/test").Page, text: string | RegExp) => page.locator("li.step.tool").filter({ hasText: text });
 
-test("graph shows both agents with runtime badges and a labelled animated flow edge", async ({ page }) => {
+test("graph shows runtime badges and reveals flow labels on hover and selection", async ({ page }) => {
   await expect(page.getByRole("heading", { level: 1 })).toHaveText(fixture.run.goal);
   await expect(page.getByTestId("node-impl").locator(".rt-codex")).toHaveText("codex");
   await expect(page.getByTestId("node-rev").locator(".rt-claude")).toHaveText("claude");
   await expect(flowEdge(page)).toHaveCount(1);
-  await expect(page.locator(".react-flow__edge-text", { hasText: "impl/summary" })).toBeVisible();
+  const edge = flowEdge(page);
+  const label = edge.locator(".graph-edge-label");
+  await page.mouse.move(1, 1);
+  await expect(label).toHaveCSS("opacity", "0");
+  await expect(edge.locator(".graph-edge-marker")).toHaveCSS("opacity", "1");
+  await edge.locator(".graph-edge-marker").hover();
+  await expect(label).toHaveCSS("opacity", "1");
+  await expect(label).toContainText("impl/summary");
+  await label.click();
+  await page.mouse.move(1, 1);
+  await expect(label).toHaveCSS("opacity", "1");
 });
 
 test("a task without usage shows n/a, never NaN", async ({ page }) => {
@@ -85,7 +95,8 @@ test("selecting rev shows the injected key with its token count", async ({ page 
   await expect(row).toContainText("42");
   await expect(page.locator("pre.prompt")).toContainText("Review the change.");
   await page.getByRole("tab", { name: "Usage" }).click();
-  await expect(page.locator(".inspector").getByRole("tabpanel")).toContainText("n/a");
+  await expect(page.locator(".inspector").getByRole("tabpanel")).toContainText("Usage is reported when the task finishes.");
+  await expect(page.locator(".inspector").getByRole("tabpanel")).not.toContainText("n/a");
 });
 
 test("keyboard: arrow keys switch inspector tabs", async ({ page }) => {
@@ -213,7 +224,7 @@ test("a truncated snapshot shows the banner and marks header totals as partial",
   await expect(banner).toHaveAttribute("role", "status");
   await expect(banner).toContainText(`Showing the latest ${real.events.length} events of a longer run`);
   await expect(page.getByTestId("total-tokens")).toHaveText("≥ 1,200");
-  await expect(page.getByText("Tokens (partial)")).toBeVisible();
+  await expect(page.getByText("Token budget (partial)")).toBeVisible();
 });
 
 test("the page sends no referrer", async ({ page }) => {
@@ -664,4 +675,54 @@ test("workspace repos and sibling warnings appear in task views", async ({ page 
   await warnings.locator("summary").click();
   await expect(warnings).toContainText("src/client.ts");
   await expect(warnings).toContainText("1 more file not listed.");
+});
+
+test("graph controls filter tasks, recover from empty results, and toggle the minimap", async ({ page }) => {
+  const controls = page.getByLabel("Graph controls");
+  await controls.getByLabel("Running / failed").check();
+  await expect(page.getByTestId("node-impl")).toHaveCount(0);
+  await expect(page.getByTestId("node-rev")).toBeVisible();
+  await controls.getByLabel("Repo", { exact: true }).selectOption({ label: "api" });
+  await expect(page.getByText("No tasks match these filters.")).toBeVisible();
+  await controls.getByRole("button", { name: "Reset filters" }).click();
+  await expect(page.getByTestId("node-impl")).toBeVisible();
+  await controls.getByRole("button", { name: "Minimap" }).click();
+  await expect(page.locator(".react-flow__minimap")).toBeVisible();
+  await controls.getByRole("button", { name: "Minimap" }).click();
+  await expect(page.locator(".react-flow__minimap")).toHaveCount(0);
+  await page.goto(`${base}/?run=r3`);
+  await controls.getByLabel("Phase", { exact: true }).selectOption("2");
+  await expect(page.getByTestId("node-p1-api")).toHaveCount(0);
+  await expect(page.getByTestId("node-p2-ui")).toBeVisible();
+});
+
+test("graph cards keep completed durations fixed while running elapsed time advances", async ({ page }) => {
+  const completed = page.getByTestId("node-impl").locator(".agent-duration");
+  const running = page.getByTestId("node-rev").locator(".agent-duration");
+  await expect(completed).toContainText("Duration:");
+  await expect(running).toContainText("Elapsed:");
+  const fixed = await completed.textContent();
+  const initial = await running.textContent();
+  await expect.poll(() => running.textContent(), { timeout: 3000 }).not.toBe(initial);
+  await expect(completed).toHaveText(fixed!);
+});
+
+test("goal expands and phase remaining work opens dismissible history", async ({ page }) => {
+  await page.goto(`${base}/?run=r3`);
+  const goal = page.getByRole("heading", { level: 1 }).getByRole("button");
+  await expect(goal).toHaveAttribute("aria-expanded", "false");
+  await goal.click();
+  await expect(goal).toHaveAttribute("aria-expanded", "true");
+  const remaining = page.getByTestId("phase-remaining");
+  await remaining.click();
+  const popover = page.getByRole("region", { name: "Remaining work and phase history" });
+  await expect(popover).toBeVisible();
+  await expect(popover).toContainText("wire the UI");
+  await expect(popover).toContainText("docs and release notes");
+  await page.keyboard.press("Escape");
+  await expect(popover).toHaveCount(0);
+  await expect(remaining).toBeFocused();
+  await remaining.click();
+  await goal.click();
+  await expect(popover).toHaveCount(0);
 });

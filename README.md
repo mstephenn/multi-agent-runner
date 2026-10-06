@@ -201,8 +201,14 @@ One project can span several git repositories side by side in a parent folder (f
 
 `mar` serves the UI on the printed URL while a run is live; `mar history --ui` serves a stored run.
 
-- Graph of tasks with status, runtime and role, and a phase badge (`Phase N/M`) in the header; the tooltip shows what remains after the phase.
-- Inspector for the selected task with four tabs: Context (what the task was given), Activity, Output and Usage (tokens against budget).
+- Task graph: one column per phase, and in workspace runs one swimlane per repository (`All repos` for tasks that span them). Edges are right-angled. A flow edge (a blackboard read) carries a small marker; its key label appears on hover, focus or when the edge is selected, placed clear of the task cards. Cards show status, runtime, role, repo and a duration (`Duration`, or a live `Elapsed` for a running task).
+- Graph controls above the graph: zoom in/out, Fit, a minimap toggle, and filters (only running/failed, one phase, one repo) with a reset and a "No tasks match these filters" state.
+- Header: the goal is clamped to one line; click it to expand, hover for the full text. The phase badge (`Phase N/M`) is followed by the remaining-work text; click it for a popover with the full text and the history of earlier phases (Esc or Close dismisses it).
+- Run overview strip: cost so far, tokens against the run's `maxTotalTokens` and an ETA estimated from the finished tasks. The server does not record the limit or a stop reason yet, so the budget currently shows `limit unknown` and the limit-stop banner stays hidden; both render as soon as `/api/runs` supplies `maxTotalTokens` / `stop`.
+- Inspector for the selected task, with a summary above the tabs (status, runtime, elapsed or duration, branch, verify result, and an Open report button for finished tasks that have a report). A running task shows a live timer and "Usage is reported when the task finishes" instead of `n/a`.
+- Keyboard shortcuts (press `?` for the overlay): `?` help, `Esc` close help/popover/inspector, `J`/`K` next/previous task, `F` fit the graph, `M` toggle the minimap. They are ignored while typing in a form control.
+- If the live connection drops, the header gets a dashed warning edge, a "Connection lost" banner appears and the graph is dimmed until it reconnects. Loading and empty runs show a spinner or a short explanation.
+- The inspector has four tabs: Context (what the task was given), Activity, Output and Usage (tokens against budget).
 - Activity: one row per step, with each tool call paired to its result (a call without a result shows as running). Filters: All, Messages, Tools, Errors, with counts. Click a row for its input and the full output (up to the 2,000 characters the runner stores), with a Copy button; errors start expanded. The feed follows the latest step only while you are at the bottom, otherwise a "Jump to latest" button appears. Content is rendered as plain text.
 - Output tab: the task's report (plain text), or its blackboard summary.
 - Bottom panel with two tabs, Timeline and Blackboard (the choice is remembered). The Timeline has one shared time axis for the replay scrubber and one lane per agent, with bars per attempt, markers for start/finish/fail and blackboard writes and reads, and a tooltip with status and duration.
