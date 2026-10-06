@@ -7,6 +7,8 @@ const DIFF_STAT_CHARS = 3000;
 
 export interface HistoryTask {
   id: string; role: string; status: string;
+  /** Workspace runs: the repo the task worked in. */
+  repo?: string;
   /** Why a failed/blocked task did not finish (`failed:budget`, `failed:timeout`, `failed:verify`, ...). */
   reason?: string;
   /** Blackboard texts (already capped by the blackboard). */
@@ -15,6 +17,8 @@ export interface HistoryTask {
   branch?: string;
 }
 export interface HistoryIntegration {
+  /** Workspace runs: the repo this integration branch lives in. */
+  repo?: string;
   branch?: string; merged: string[];
   conflict?: { branch: string; files: string[] };
   verify?: { ok: boolean; command?: string; tail: string };
@@ -22,13 +26,14 @@ export interface HistoryIntegration {
   /** `git diff --stat` of the integration branch vs the run's base commit. */
   diffStat?: string;
 }
-export interface HistoryPhase { phase: number; tasks: HistoryTask[]; integration?: HistoryIntegration }
+/** `integrations` (one per repo) is used by workspace runs instead of `integration`. */
+export interface HistoryPhase { phase: number; tasks: HistoryTask[]; integration?: HistoryIntegration; integrations?: HistoryIntegration[] }
 
 const one = (s: string) => redact(s).replace(/\r/g, "");
 const indent = (s: string, pad: string) => one(s).split("\n").map((l) => pad + l).join("\n");
 
 function renderTask(t: HistoryTask): string {
-  const out = [`- ${t.id} [${t.role}] ${t.status}${t.reason ? ` (${one(t.reason)})` : ""}`];
+  const out = [`- ${t.id} [${t.role}${t.repo ? ` @${t.repo}` : ""}] ${t.status}${t.reason ? ` (${one(t.reason)})` : ""}`];
   if (t.summary) out.push(`  summary:\n${indent(t.summary, "    ")}`);
   if (t.decisions && t.decisions !== "(none)") out.push(`  decisions:\n${indent(t.decisions, "    ")}`);
   if (t.openQuestions && t.openQuestions !== "(none)") out.push(`  open_questions:\n${indent(t.openQuestions, "    ")}`);
@@ -38,9 +43,10 @@ function renderTask(t: HistoryTask): string {
 
 function renderIntegration(i: HistoryIntegration): string {
   const out: string[] = [];
-  if (i.error) out.push(`Integration: failed (${one(i.error)})`);
+  const label = i.repo ? `Integration of repo ${i.repo}` : "Integration";
+  if (i.error) out.push(`${label}: failed (${one(i.error)})`);
   else {
-    out.push(`Integration branch ${i.branch ?? "(none)"}: merged ${i.merged.length ? i.merged.join(", ") : "nothing"}`);
+    out.push(`${i.repo ? `Integration branch of repo ${i.repo}` : "Integration branch"} ${i.branch ?? "(none)"}: merged ${i.merged.length ? i.merged.join(", ") : "nothing"}`);
     if (i.conflict) out.push(`  conflict at ${i.conflict.branch}: ${i.conflict.files.join(", ") || "(unknown files)"}`);
     if (i.verify) out.push(i.verify.ok ? "  verify passed" : `  verify failed${i.verify.command ? ` (${one(i.verify.command)})` : ""}:\n${indent(redact(i.verify.tail).slice(-VERIFY_TAIL_CHARS), "    | ")}`);
   }
@@ -52,7 +58,7 @@ const header = (p: HistoryPhase) => {
   const n = (s: string) => p.tasks.filter((t) => t.status === s).length;
   return `## Phase ${p.phase} (${n("done")} done, ${n("failed")} failed, ${n("blocked")} blocked)`;
 };
-const full = (p: HistoryPhase) => [header(p), ...p.tasks.map(renderTask), ...(p.integration ? [renderIntegration(p.integration)] : [])].join("\n");
+const full = (p: HistoryPhase) => [header(p), ...p.tasks.map(renderTask), ...(p.integrations ?? (p.integration ? [p.integration] : [])).map(renderIntegration)].join("\n");
 // One line: the task ids by outcome, no details.
 const compact = (p: HistoryPhase) => `${header(p)} details omitted: ${p.tasks.map((t) => `${t.id} ${t.status}`).join(", ")}`;
 

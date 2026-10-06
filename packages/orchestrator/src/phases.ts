@@ -1,13 +1,13 @@
 import { WRITER_ROLES, type Dag, type TaskSpec } from "@mar/core";
 import type { Store } from "../../server/src/store.js";
-import { buildHistory, type HistoryPhase, type HistoryTask } from "./history.js";
+import { buildHistory, type HistoryIntegration, type HistoryPhase, type HistoryTask } from "./history.js";
 import type { IntegrateResult } from "./integrate.js";
 import type { Plan } from "./planner.js";
 import { redact } from "./redact.js";
 import type { Outcome } from "./scheduler.js";
 
 /** `result` is set when the integration branch was built (possibly stopped by a conflict / failed verify); `error` when it could not run. */
-export interface IntegrationOutcome { result?: IntegrateResult; error?: string }
+export interface IntegrationOutcome { result?: IntegrateResult; error?: string; /** Workspace runs: the repo (folder name) this integration branch lives in. */ repo?: string }
 
 export interface PhaseLimits {
   /** Tasks per phase. */
@@ -34,13 +34,16 @@ export interface PhasesDeps {
   /** Runs one phase's DAG. `baseRef` is the integration branch from phase 2 on (undefined = the repo's HEAD). */
   run(dag: Dag, ctx: { phase: number; baseRef?: string }): Promise<Record<string, Outcome>>;
   /** Merges done writer branches (topological order). Absent = integration off. `accumulate`: continue the existing integration branch. */
-  integrate?(a: { phase: number; branches: string[]; baseRef?: string; accumulate: boolean }): Promise<IntegrationOutcome>;
-  /** `git diff --stat` of the integration branch vs the run's base commit, for the re-planner. */
-  diffStat?(branch: string): Promise<string>;
+  integrate?(a: { phase: number; branches: string[]; baseRef?: string; accumulate: boolean; /** Workspace runs: integrate the writer branches of this repo. */ repo?: string }): Promise<IntegrationOutcome>;
+  /** Workspace runs: whether `repo` takes part in integration (its own `integrate` setting). Default: yes. */
+  integrates?(repo: string): boolean;
+  /** `git diff --stat` of the integration branch vs the run's base commit, for the re-planner (`repo` in workspace runs). */
+  diffStat?(branch: string, repo?: string): Promise<string>;
   onPhaseStart?(p: { phase: number; maxPhases: number; dag: Dag; remaining: string }): void;
 }
 
-export interface PhaseRec { phase: number; dag: Dag; remaining: string; integration?: IntegrationOutcome }
+/** `integration` is the (last) integration outcome of the phase; `integrations` lists every one (one per repo in a workspace run). */
+export interface PhaseRec { phase: number; dag: Dag; remaining: string; integration?: IntegrationOutcome; integrations?: IntegrationOutcome[] }
 export type StopReason = "max_phases" | "max_tokens" | "no_progress" | "aborted" | "replan_failed";
 export interface PhaseStop { reason: StopReason; message: string }
 export interface PhasesResult {
@@ -84,6 +87,7 @@ export async function runPhases(d: PhasesDeps): Promise<PhasesResult> {
   const phases: PhaseRec[] = [];
   const results: Record<string, Outcome> = {};
   let integrationBranch: string | undefined;
+  const integratedRepos = new Set<string>(); // "" = the single repo of a non-workspace run
   let lastIntegration: IntegrationOutcome | undefined;
   let stop: PhaseStop | undefined;
 
@@ -100,15 +104,16 @@ export async function runPhases(d: PhasesDeps): Promise<PhasesResult> {
     if (s.status === "done" || s.status === "failed" || s.status === "blocked") results[s.task_id] = s.status;
   const integrations = store.listEvents(runId).filter((e) => e.type === "integration");
   for (const e of integrations) {
-    const p = e.payload as { phase?: unknown; branch?: unknown; merged?: unknown; conflict?: IntegrateResult["conflict"]; verify?: IntegrateResult["verify"]; error?: unknown };
+    const p = e.payload as { phase?: unknown; repo?: unknown; branch?: unknown; merged?: unknown; conflict?: IntegrateResult["conflict"]; verify?: IntegrateResult["verify"]; error?: unknown };
     const phase = typeof p.phase === "number" ? p.phase : 1;
     const rec = phases.find((x) => x.phase === phase);
     const outcome: IntegrationOutcome = typeof p.branch === "string"
       ? { result: { branch: p.branch, merged: Array.isArray(p.merged) ? p.merged.map(String) : [], ...(p.conflict ? { conflict: p.conflict } : {}), ...(p.verify ? { verify: p.verify } : {}) } }
       : { error: typeof p.error === "string" ? p.error : "integration failed" };
-    if (rec) rec.integration = outcome;
+    if (typeof p.repo === "string") outcome.repo = p.repo;
+    if (rec) { rec.integration = outcome; (rec.integrations ??= []).push(outcome); }
     lastIntegration = outcome;
-    if (outcome.result) integrationBranch = outcome.result.branch;
+    if (outcome.result) { integrationBranch = outcome.result.branch; integratedRepos.add(outcome.repo ?? ""); }
   }
 
   const planned = () => ({ tasks: phases.flatMap((p) => p.dag.tasks) });
@@ -128,20 +133,32 @@ export async function runPhases(d: PhasesDeps): Promise<PhasesResult> {
     if (!d.integrate || aborted()) return;
     const writers = new Set(rec.dag.tasks.filter((t) => WRITER_ROLES.has(t.role) && results[t.id] === "done").map((t) => t.id));
     const multi = rec.phase > 1 || rec.remaining !== "" || phases.length > 1;
-    // A single-phase run keeps the original rule (two or more done writers); in a multi-phase run every phase with a done writer integrates.
-    if (writers.size < (multi ? 1 : 2)) return;
-    const branches = topoOrder(rec.dag).filter((id) => writers.has(id)).map((id) => `mar/${runId}/${id}`);
-    let outcome: IntegrationOutcome;
-    try {
-      outcome = await d.integrate({ phase: rec.phase, branches, accumulate: integrationBranch !== undefined, ...(integrationBranch ? { baseRef: integrationBranch } : {}) });
-    } catch (e) { outcome = { error: msg(e) }; }
-    rec.integration = outcome; lastIntegration = outcome;
-    if (outcome.result) integrationBranch = outcome.result.branch;
-    const r = outcome.result;
-    emit("integration", r ? {
-      phase: rec.phase, branch: r.branch, merged: r.merged, ...(r.conflict ? { conflict: r.conflict } : {}),
-      ...(r.verify ? { verify: { ok: r.verify.ok, ...(r.verify.failed ? { failed: { ...r.verify.failed, command: redact(r.verify.failed.command) } } : {}), tail: redact(r.verify.tail) } } : {}),
-    } : { phase: rec.phase, error: outcome.error });
+    // Writer branches per repo (workspace runs); a single repo is one group with key "".
+    const byRepo = new Map<string, string[]>();
+    for (const id of topoOrder(rec.dag)) {
+      if (!writers.has(id)) continue;
+      const repo = rec.dag.tasks.find((t) => t.id === id)?.repo ?? "";
+      (byRepo.get(repo) ?? byRepo.set(repo, []).get(repo)!).push(`mar/${runId}/${id}`);
+    }
+    for (const [repo, branches] of byRepo) {
+      if (aborted()) return;
+      // A single-phase run keeps the original rule (two or more done writers); in a multi-phase run every phase with a done writer integrates.
+      if (branches.length < (multi ? 1 : 2)) continue;
+      if (repo !== "" && d.integrates && !d.integrates(repo)) continue;
+      const accumulate = integratedRepos.has(repo);
+      let outcome: IntegrationOutcome;
+      try {
+        outcome = await d.integrate({ phase: rec.phase, branches, accumulate, ...(accumulate && integrationBranch ? { baseRef: integrationBranch } : {}), ...(repo ? { repo } : {}) });
+      } catch (e) { outcome = { error: msg(e) }; }
+      if (repo) outcome = { ...outcome, repo };
+      rec.integration = outcome; (rec.integrations ??= []).push(outcome); lastIntegration = outcome;
+      if (outcome.result) { integrationBranch = outcome.result.branch; integratedRepos.add(repo); }
+      const r = outcome.result;
+      emit("integration", r ? {
+        phase: rec.phase, ...(repo ? { repo } : {}), branch: r.branch, merged: r.merged, ...(r.conflict ? { conflict: r.conflict } : {}),
+        ...(r.verify ? { verify: { ok: r.verify.ok, ...(r.verify.failed ? { failed: { ...r.verify.failed, command: redact(r.verify.failed.command) } } : {}), tail: redact(r.verify.tail) } } : {}),
+      } : { phase: rec.phase, ...(repo ? { repo } : {}), error: outcome.error });
+    }
   }
 
   async function execute(rec: PhaseRec): Promise<void> {
@@ -170,30 +187,39 @@ export async function runPhases(d: PhasesDeps): Promise<PhasesResult> {
   async function historyFor(): Promise<string> {
     const statuses = new Map(store.taskStatuses(runId).map((s) => [s.task_id, s]));
     const bb = (id: string, suffix: string) => store.latestBb(runId, `${id}/${suffix}`)?.body;
+    const histIntegration = (i: IntegrationOutcome): HistoryIntegration => {
+      const r = i.result;
+      return {
+        ...(i.repo ? { repo: i.repo } : {}),
+        branch: r?.branch, merged: r?.merged ?? [], conflict: r?.conflict, error: i.error,
+        verify: r?.verify ? { ok: r.verify.ok, command: r.verify.failed?.command, tail: r.verify.tail } : undefined,
+      };
+    };
     const hist: HistoryPhase[] = phases.map((p) => {
       const tasks: HistoryTask[] = p.dag.tasks.map((t) => {
         const status = results[t.id] ?? statuses.get(t.id)?.status ?? "not-run";
         const detail = statuses.get(t.id)?.detail ?? undefined;
         return {
-          id: t.id, role: t.role, status,
+          id: t.id, role: t.role, status, ...(t.repo ? { repo: t.repo } : {}),
           ...(status === "failed" ? { reason: detail ?? "failed" } : status === "blocked" ? { reason: detail ?? "a dependency failed or the run was stopped" } : {}),
           ...(status === "done" ? { summary: bb(t.id, "summary"), decisions: bb(t.id, "decisions"), openQuestions: bb(t.id, "open_questions") } : {}),
           ...(status === "failed" && WRITER_ROLES.has(t.role) ? { branch: `mar/${runId}/${t.id}` } : {}),
         };
       });
-      const i = p.integration;
-      const r = i?.result;
+      const all = p.integrations ?? (p.integration ? [p.integration] : []);
+      const workspace = all.some((i) => i.repo !== undefined);
       return {
         phase: p.phase, tasks,
-        ...(i ? { integration: {
-          branch: r?.branch, merged: r?.merged ?? [], conflict: r?.conflict, error: i.error,
-          verify: r?.verify ? { ok: r.verify.ok, command: r.verify.failed?.command, tail: r.verify.tail } : undefined,
-        } } : {}),
+        ...(all.length && !workspace ? { integration: histIntegration(all[0]) } : {}),
+        ...(workspace ? { integrations: all.map(histIntegration) } : {}),
       };
     });
     const last = hist.at(-1);
-    if (last?.integration?.branch && d.diffStat) {
-      try { last.integration.diffStat = await d.diffStat(last.integration.branch); } catch { /* optional context */ }
+    if (d.diffStat) {
+      for (const i of last?.integrations ?? (last?.integration ? [last.integration] : [])) {
+        if (!i.branch) continue;
+        try { i.diffStat = await d.diffStat(i.branch, i.repo); } catch { /* optional context */ }
+      }
     }
     return buildHistory(hist);
   }
