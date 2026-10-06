@@ -99,7 +99,13 @@ export async function discardWorktree(root: string, dir: string): Promise<void> 
   await ok(["worktree", "prune"], root);
 }
 
+const BASE_REF = /^[A-Za-z0-9_][A-Za-z0-9_./-]*$/;
+/** Whether `ref` is acceptable as a worktree base (branch name or sha): no leading dash, no `..`, no odd characters. */
+export const validBaseRef = (ref: string) => BASE_REF.test(ref) && !ref.includes("..") && !ref.endsWith("/") && !ref.endsWith(".lock");
+
 export interface WorktreeOpts {
+  /** Commit-ish every NEW worktree (task and shared) is cut from; default `HEAD`. Phase N >= 2 passes the integration branch. */
+  baseRef?: string;
   /** Repo-relative paths (single-segment `*` globs allowed) symlinked from the main repo into writer worktrees by `link`. */
   linkPaths?: string[];
 }
@@ -115,7 +121,7 @@ export interface Worktrees {
   changedFiles(taskId: string, sinceSha: string): Promise<string[]>;
   /** Symlinks the configured `linkPaths` into the task's worktree; returns the linked repo-relative paths. */
   link(taskId: string): Promise<string[]>;
-  // One detached (branchless) worktree at HEAD shared by all read-only tasks of the run.
+  // One detached (branchless) worktree at the base ref (HEAD by default) shared by all read-only tasks of the run.
   shared: { acquire(): Promise<string>; release(): Promise<void> };
 }
 
@@ -134,6 +140,8 @@ export async function ensureMarExcluded(repo: string): Promise<void> {
 export function createWorktrees(repoPath: string, runId: string, opts: WorktreeOpts = {}): Worktrees {
   if (!SAFE.test(runId)) throw new Error(`invalid run id: ${runId}`);
   const links = opts.linkPaths ?? [];
+  const baseRef = opts.baseRef ?? "HEAD";
+  if (baseRef !== "HEAD" && !validBaseRef(baseRef)) throw new Error(`invalid baseRef: ${JSON.stringify(baseRef)}`);
   for (const p of links) { const why = linkPathProblem(p); if (why) throw new Error(`invalid link path ${JSON.stringify(p)}: ${why}`); }
   const root = resolve(repoPath); // absolute once: git runs with cwd=root, so relative paths must never reach it
   const dirFor = (t: string) => join(root, ".mar", "worktrees", runId, t);
@@ -156,7 +164,7 @@ export function createWorktrees(repoPath: string, runId: string, opts: WorktreeO
     let preMerge: string | null = null; // HEAD of a resumed branch before any dependency merge
     try {
       if (existed) await git(["worktree", "add", "--", dir, branch], root);
-      else { await git(["worktree", "add", "-b", branch, "--", dir, "HEAD"], root); createdBranch = true; }
+      else { await git(["worktree", "add", "-b", branch, "--", dir, baseRef], root); createdBranch = true; }
       if (existed) preMerge = (await git(["rev-parse", "HEAD"], dir)).trim();
       for (const dep of dependsOn) {
         const depBranch = branchFor(dep);
@@ -187,7 +195,7 @@ export function createWorktrees(repoPath: string, runId: string, opts: WorktreeO
     await ensureExcluded();
     await ok(["worktree", "prune"], root);
     await discard(sharedDir); // stale leftover from a crashed run
-    try { await git(["worktree", "add", "--detach", "--", sharedDir, "HEAD"], root); }
+    try { await git(["worktree", "add", "--detach", "--", sharedDir, baseRef], root); }
     catch (e) { await discard(sharedDir); throw e; }
     return sharedDir;
   }

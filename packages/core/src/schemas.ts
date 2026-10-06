@@ -17,6 +17,8 @@ export const TaskSpec = z.object({
   // Repo-relative globs this task will modify (see globs.ts). Validated in parseDag so errors name the task.
   paths: z.array(z.string()).default([]),
   budgetTokens: z.number().int().positive().optional(),
+  // Planning phase this task belongs to (stamped by the orchestrator; undefined = phase 1).
+  phase: z.number().int().positive().optional(),
 });
 export type TaskSpec = z.infer<typeof TaskSpec>;
 export type Runtime = z.infer<typeof Runtime>;
@@ -36,6 +38,7 @@ export const EventTypes = [
   "task_started", "task_finished", "task_failed", "prompt_sent", "tool_call",
   "tool_result", "assistant_text", "blackboard_write", "blackboard_read", "usage", "runtime_fallback",
   "verify_started", "verify_passed", "verify_failed", "ownership_violation", "integration",
+  "phase_started", "phase_finished",
 ] as const;
 export type EventType = (typeof EventTypes)[number];
 

@@ -68,3 +68,33 @@ describe("parseDag path ownership", () => {
       expect(() => parseDag({ tasks: [w("a", [bad])] }), bad).toThrow(/task a.*path/s);
   });
 });
+
+describe("parseDag external (earlier-phase) needs", () => {
+  const ext = new Set(["p1-api"]);
+  it("allows needs owned by an external id without dependsOn", () => {
+    const dag = parseDag({ tasks: [t("p2-ui", { needs: ["p1-api/summary"] })] }, { external: ext });
+    expect(dag.tasks[0].needs).toEqual(["p1-api/summary"]);
+  });
+  it("without external the same needs is a non-ancestor error", () => {
+    expect(() => parseDag({ tasks: [t("p2-ui", { needs: ["p1-api/summary"] })] })).toThrow(/non-ancestor/);
+  });
+  it("still validates the suffix of an external needs key", () => {
+    expect(() => parseDag({ tasks: [t("p2-ui", { needs: ["p1-api/diff"] })] }, { external: ext })).toThrow(/suffix/);
+  });
+  it("rejects dependsOn on an external id with a pointed message", () => {
+    expect(() => parseDag({ tasks: [t("p2-ui", { dependsOn: ["p1-api"] })] }, { external: ext })).toThrow(/earlier phase.*needs/);
+  });
+  it("still rejects same-phase non-ancestor needs, cycles and unknown deps", () => {
+    expect(() => parseDag({ tasks: [t("a"), t("b", { needs: ["a/summary"] })] }, { external: ext })).toThrow(/non-ancestor/);
+    expect(() => parseDag({ tasks: [t("a", { dependsOn: ["b"] }), t("b", { dependsOn: ["a"] })] }, { external: ext })).toThrow(/cycle/);
+    expect(() => parseDag({ tasks: [t("a", { dependsOn: ["zzz"] })] }, { external: ext })).toThrow(/zzz/);
+  });
+  it("keeps path-ownership validation among the new tasks", () => {
+    expect(() => parseDag({ tasks: [t("a", { paths: ["src/**"] }), t("b", { paths: ["src/x.ts"] })] }, { external: ext })).toThrow(/overlap/);
+  });
+  it("accepts an optional integer phase on tasks", () => {
+    expect(parseDag({ tasks: [t("a", { phase: 2 })] }).tasks[0].phase).toBe(2);
+    expect(parseDag({ tasks: [t("a")] }).tasks[0].phase).toBeUndefined();
+    expect(() => parseDag({ tasks: [t("a", { phase: 0 })] })).toThrow();
+  });
+});

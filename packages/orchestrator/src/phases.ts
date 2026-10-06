@@ -1,0 +1,259 @@
+import { WRITER_ROLES, type Dag, type TaskSpec } from "@mar/core";
+import type { Store } from "../../server/src/store.js";
+import { buildHistory, type HistoryPhase, type HistoryTask } from "./history.js";
+import type { IntegrateResult } from "./integrate.js";
+import type { Plan } from "./planner.js";
+import { redact } from "./redact.js";
+import type { Outcome } from "./scheduler.js";
+
+/** `result` is set when the integration branch was built (possibly stopped by a conflict / failed verify); `error` when it could not run. */
+export interface IntegrationOutcome { result?: IntegrateResult; error?: string }
+
+export interface PhaseLimits {
+  /** Tasks per phase. */
+  maxTasks: number;
+  /** Phases per run (per invocation: `mar resume --phases n` raises it). */
+  maxPhases: number;
+  /** Cap on input+output tokens of all `usage` events of the run, checked before each phase starts. */
+  maxTotalTokens: number;
+}
+
+export interface PhasePlanArgs {
+  phase: number; maxTasks: number;
+  previousRemaining: string; history: string;
+  takenIds: ReadonlySet<string>; externalIds: ReadonlySet<string>;
+  /** Existing integration branch (phase >= 2), if any: what the repo map should describe. */
+  integrationBranch?: string;
+  onUsage: (u: { input: number | null; output: number | null }) => void;
+}
+
+export interface PhasesDeps {
+  store: Store; runId: string; limits: PhaseLimits; signal?: AbortSignal;
+  /** Plans phase `a.phase`. Phase 1 failures propagate; a failing re-plan stops the loop (`replan_failed`). */
+  plan(a: PhasePlanArgs): Promise<Plan>;
+  /** Runs one phase's DAG. `baseRef` is the integration branch from phase 2 on (undefined = the repo's HEAD). */
+  run(dag: Dag, ctx: { phase: number; baseRef?: string }): Promise<Record<string, Outcome>>;
+  /** Merges done writer branches (topological order). Absent = integration off. `accumulate`: continue the existing integration branch. */
+  integrate?(a: { phase: number; branches: string[]; baseRef?: string; accumulate: boolean }): Promise<IntegrationOutcome>;
+  /** `git diff --stat` of the integration branch vs the run's base commit, for the re-planner. */
+  diffStat?(branch: string): Promise<string>;
+  onPhaseStart?(p: { phase: number; maxPhases: number; dag: Dag; remaining: string }): void;
+}
+
+export interface PhaseRec { phase: number; dag: Dag; remaining: string; integration?: IntegrationOutcome }
+export type StopReason = "max_phases" | "max_tokens" | "no_progress" | "aborted" | "replan_failed";
+export interface PhaseStop { reason: StopReason; message: string }
+export interface PhasesResult {
+  phases: PhaseRec[];
+  /** Outcome of every task of every phase (tasks that never started are absent). */
+  results: Record<string, Outcome>;
+  /** Work left after the last phase ("" = the planner considers the goal done). */
+  remaining: string;
+  /** Every task of every phase is done AND the last planner call said done (no stop, nothing remaining). */
+  complete: boolean;
+  stop?: PhaseStop;
+  /** The most recent integration attempt, if any. */
+  integration?: IntegrationOutcome;
+}
+
+/** Tasks in dependency order (dependencies first, plan order otherwise). Cycle-safe. */
+export function topoOrder(dag: Dag): string[] {
+  const byId = new Map(dag.tasks.map((t) => [t.id, t]));
+  const seen = new Set<string>(); const out: string[] = [];
+  const visit = (id: string) => {
+    if (seen.has(id)) return;
+    seen.add(id);
+    for (const d of byId.get(id)?.dependsOn ?? []) visit(d);
+    out.push(id);
+  };
+  for (const t of dag.tasks) visit(t.id);
+  return out;
+}
+
+const bestEffort = (f: () => void) => { try { f(); } catch { /* bookkeeping must never take the run down */ } };
+const msg = (e: unknown) => redact(e instanceof Error ? e.message : String(e)).slice(0, 300);
+const stamp = (dag: Dag, phase: number): Dag => ({ ...dag, tasks: dag.tasks.map((t): TaskSpec => ({ ...t, phase })) });
+
+/**
+ * The phased loop: plan a phase, run it, integrate, re-plan from the results, until the planner says done or a limit
+ * stops it. Resumable: stored phases are replayed (finished ones skipped, `runDag` skips done tasks), then the loop
+ * continues. Never loops forever: `maxPhases`, `maxTotalTokens` and "a phase with zero done tasks" all stop it.
+ */
+export async function runPhases(d: PhasesDeps): Promise<PhasesResult> {
+  const { store, runId, limits } = d;
+  const phases: PhaseRec[] = [];
+  const results: Record<string, Outcome> = {};
+  let integrationBranch: string | undefined;
+  let lastIntegration: IntegrationOutcome | undefined;
+  let stop: PhaseStop | undefined;
+
+  const emit = (type: "phase_started" | "phase_finished" | "integration" | "usage", payload: Record<string, unknown>, agent: string | null = null) =>
+    bestEffort(() => { store.appendEvent({ run_id: runId, task_id: null, agent_id: agent, type, payload }); });
+  const aborted = () => d.signal?.aborted === true;
+
+  // --- load stored state (resume) -----------------------------------------------------------------------------
+  const storedPhases = store.listPhases(runId);
+  const legacy = storedPhases.length === 0 ? store.loadPlan(runId) : undefined;
+  if (legacy) phases.push({ phase: 1, dag: stamp(legacy, 1), remaining: "" }); // pre-phases run: one plan, nothing remaining
+  for (const p of storedPhases) phases.push({ phase: p.phase, dag: stamp(p.dag, p.phase), remaining: p.remaining });
+  for (const s of store.taskStatuses(runId))
+    if (s.status === "done" || s.status === "failed" || s.status === "blocked") results[s.task_id] = s.status;
+  const integrations = store.listEvents(runId).filter((e) => e.type === "integration");
+  for (const e of integrations) {
+    const p = e.payload as { phase?: unknown; branch?: unknown; merged?: unknown; conflict?: IntegrateResult["conflict"]; verify?: IntegrateResult["verify"]; error?: unknown };
+    const phase = typeof p.phase === "number" ? p.phase : 1;
+    const rec = phases.find((x) => x.phase === phase);
+    const outcome: IntegrationOutcome = typeof p.branch === "string"
+      ? { result: { branch: p.branch, merged: Array.isArray(p.merged) ? p.merged.map(String) : [], ...(p.conflict ? { conflict: p.conflict } : {}), ...(p.verify ? { verify: p.verify } : {}) } }
+      : { error: typeof p.error === "string" ? p.error : "integration failed" };
+    if (rec) rec.integration = outcome;
+    lastIntegration = outcome;
+    if (outcome.result) integrationBranch = outcome.result.branch;
+  }
+
+  const planned = () => ({ tasks: phases.flatMap((p) => p.dag.tasks) });
+  const doneCount = (r: PhaseRec) => r.dag.tasks.filter((t) => results[t.id] === "done").length;
+  const allDone = (r: PhaseRec) => doneCount(r) === r.dag.tasks.length;
+  const tokens = () => { try { return store.usageTokens(runId); } catch { return 0; } };
+
+  const guard = (phase: number): PhaseStop | undefined => {
+    if (phase > limits.maxPhases) return { reason: "max_phases", message: `reached the limit of ${limits.maxPhases} phase${limits.maxPhases === 1 ? "" : "s"}` };
+    const used = tokens();
+    if (used > limits.maxTotalTokens) return { reason: "max_tokens", message: `used ${used.toLocaleString("en-US")} tokens, over the limit of ${limits.maxTotalTokens.toLocaleString("en-US")} (maxTotalTokens)` };
+    return undefined;
+  };
+
+  // --- one phase ------------------------------------------------------------------------------------------------
+  async function maybeIntegrate(rec: PhaseRec): Promise<void> {
+    if (!d.integrate || aborted()) return;
+    const writers = new Set(rec.dag.tasks.filter((t) => WRITER_ROLES.has(t.role) && results[t.id] === "done").map((t) => t.id));
+    const multi = rec.phase > 1 || rec.remaining !== "" || phases.length > 1;
+    // A single-phase run keeps the original rule (two or more done writers); in a multi-phase run every phase with a done writer integrates.
+    if (writers.size < (multi ? 1 : 2)) return;
+    const branches = topoOrder(rec.dag).filter((id) => writers.has(id)).map((id) => `mar/${runId}/${id}`);
+    let outcome: IntegrationOutcome;
+    try {
+      outcome = await d.integrate({ phase: rec.phase, branches, accumulate: integrationBranch !== undefined, ...(integrationBranch ? { baseRef: integrationBranch } : {}) });
+    } catch (e) { outcome = { error: msg(e) }; }
+    rec.integration = outcome; lastIntegration = outcome;
+    if (outcome.result) integrationBranch = outcome.result.branch;
+    const r = outcome.result;
+    emit("integration", r ? {
+      phase: rec.phase, branch: r.branch, merged: r.merged, ...(r.conflict ? { conflict: r.conflict } : {}),
+      ...(r.verify ? { verify: { ok: r.verify.ok, ...(r.verify.failed ? { failed: { ...r.verify.failed, command: redact(r.verify.failed.command) } } : {}), tail: redact(r.verify.tail) } } : {}),
+    } : { phase: rec.phase, error: outcome.error });
+  }
+
+  async function execute(rec: PhaseRec): Promise<void> {
+    emit("phase_started", { phase: rec.phase, maxPhases: limits.maxPhases, tasks: rec.dag.tasks.map((t) => t.id), remaining: rec.remaining });
+    bestEffort(() => d.onPhaseStart?.({ phase: rec.phase, maxPhases: limits.maxPhases, dag: rec.dag, remaining: rec.remaining }));
+    const before = tokens();
+    bestEffort(() => store.setPhaseStatus(runId, rec.phase, "running"));
+    let out: Record<string, Outcome>;
+    try { out = await d.run(rec.dag, { phase: rec.phase, ...(integrationBranch ? { baseRef: integrationBranch } : {}) }); }
+    catch (e) { bestEffort(() => store.setPhaseStatus(runId, rec.phase, "incomplete")); throw e; }
+    Object.assign(results, out);
+    await maybeIntegrate(rec);
+    const count = (o: Outcome) => rec.dag.tasks.filter((t) => results[t.id] === o).length;
+    emit("phase_finished", { phase: rec.phase, done: count("done"), failed: count("failed"), blocked: count("blocked"), tokens: Math.max(0, tokens() - before) });
+    bestEffort(() => store.setPhaseStatus(runId, rec.phase, allDone(rec) ? "done" : "incomplete"));
+  }
+
+  // What to stop on after a phase ran: abort, or no task finished while work remains (re-planning would just repeat).
+  const afterPhase = (rec: PhaseRec): PhaseStop | undefined => {
+    if (aborted()) return { reason: "aborted", message: "the run was stopped" };
+    if (doneCount(rec) === 0 && rec.remaining !== "") return { reason: "no_progress", message: `phase ${rec.phase} finished no task, so re-planning would repeat it` };
+    return undefined;
+  };
+
+  // --- history for the re-planner -----------------------------------------------------------------------------
+  async function historyFor(): Promise<string> {
+    const statuses = new Map(store.taskStatuses(runId).map((s) => [s.task_id, s]));
+    const bb = (id: string, suffix: string) => store.latestBb(runId, `${id}/${suffix}`)?.body;
+    const hist: HistoryPhase[] = phases.map((p) => {
+      const tasks: HistoryTask[] = p.dag.tasks.map((t) => {
+        const status = results[t.id] ?? statuses.get(t.id)?.status ?? "not-run";
+        const detail = statuses.get(t.id)?.detail ?? undefined;
+        return {
+          id: t.id, role: t.role, status,
+          ...(status === "failed" ? { reason: detail ?? "failed" } : status === "blocked" ? { reason: detail ?? "a dependency failed or the run was stopped" } : {}),
+          ...(status === "done" ? { summary: bb(t.id, "summary"), decisions: bb(t.id, "decisions"), openQuestions: bb(t.id, "open_questions") } : {}),
+          ...(status === "failed" && WRITER_ROLES.has(t.role) ? { branch: `mar/${runId}/${t.id}` } : {}),
+        };
+      });
+      const i = p.integration;
+      const r = i?.result;
+      return {
+        phase: p.phase, tasks,
+        ...(i ? { integration: {
+          branch: r?.branch, merged: r?.merged ?? [], conflict: r?.conflict, error: i.error,
+          verify: r?.verify ? { ok: r.verify.ok, command: r.verify.failed?.command, tail: r.verify.tail } : undefined,
+        } } : {}),
+      };
+    });
+    const last = hist.at(-1);
+    if (last?.integration?.branch && d.diffStat) {
+      try { last.integration.diffStat = await d.diffStat(last.integration.branch); } catch { /* optional context */ }
+    }
+    return buildHistory(hist);
+  }
+
+  // --- 1. replay stored phases that are not finished (resume) -------------------------------------------------------
+  for (const rec of phases.slice()) {
+    if (allDone(rec) && rec.dag.tasks.length > 0) continue;
+    stop = guard(rec.phase);
+    if (stop) break;
+    await execute(rec);
+    stop = afterPhase(rec);
+    if (stop) break;
+  }
+
+  // --- 2. plan and run further phases --------------------------------------------------------------------------------
+  while (!stop) {
+    const last = phases.at(-1);
+    if (last && last.remaining === "") break; // the planner already said this phase completes the goal
+    const phase = (last?.phase ?? 0) + 1;
+    if (last) {
+      if (aborted()) { stop = { reason: "aborted", message: "the run was stopped" }; break; }
+      stop = guard(phase);
+      if (stop) break;
+    } else {
+      stop = guard(phase);
+      if (stop) break;
+    }
+    const args: PhasePlanArgs = {
+      phase, maxTasks: limits.maxTasks, previousRemaining: last?.remaining ?? "",
+      history: last ? await historyFor() : "",
+      takenIds: new Set(phases.flatMap((p) => p.dag.tasks.map((t) => t.id))),
+      externalIds: new Set(phases.flatMap((p) => p.dag.tasks.filter((t) => results[t.id] === "done").map((t) => t.id))),
+      ...(integrationBranch ? { integrationBranch } : {}),
+      onUsage: (u) => emit("usage", { input: u.input, output: u.output, cached: null, costUsd: null, planner: true }, "planner"),
+    };
+    let plan: Plan;
+    if (!last) plan = await d.plan(args); // phase 1: the caller records and rethrows planning failures
+    else {
+      try { plan = await d.plan(args); }
+      catch (e) {
+        stop = aborted() ? { reason: "aborted", message: "the run was stopped while re-planning" } : { reason: "replan_failed", message: `re-planning failed: ${msg(e)}` };
+        break;
+      }
+      if (plan.tasks.length === 0) { // the planner says the goal is done
+        last.remaining = "";
+        bestEffort(() => store.savePhase(runId, last.phase, last.dag, "", allDone(last) ? "done" : "incomplete"));
+        break;
+      }
+    }
+    const rec: PhaseRec = { phase, dag: stamp({ tasks: plan.tasks }, phase), remaining: plan.remaining };
+    phases.push(rec);
+    store.savePhase(runId, phase, rec.dag, rec.remaining, "planned");
+    store.savePlan(runId, planned());
+    await execute(rec);
+    stop = afterPhase(rec);
+  }
+
+  const lastPhase = phases.at(-1);
+  const remaining = lastPhase?.remaining ?? "";
+  const tasks = phases.flatMap((p) => p.dag.tasks);
+  const complete = !stop && remaining === "" && tasks.length > 0 && tasks.every((t) => results[t.id] === "done");
+  return { phases, results, remaining, complete, ...(stop ? { stop } : {}), ...(lastIntegration ? { integration: lastIntegration } : {}) };
+}

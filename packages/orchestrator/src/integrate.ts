@@ -1,6 +1,6 @@
 import { rmdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { IDENT, SAFE, branchExists, discardWorktree, ensureMarExcluded, git, linkInto, ok } from "./worktree.js";
+import { IDENT, SAFE, branchExists, discardWorktree, ensureMarExcluded, git, linkInto, ok, validBaseRef } from "./worktree.js";
 import { runVerify as realRunVerify, type VerifyResult } from "./verify.js";
 
 export interface IntegrateOpts {
@@ -11,6 +11,13 @@ export interface IntegrateOpts {
   verify?: { commands: string[]; timeoutMs: number };
   /** Same single-segment-glob paths as `createWorktrees({ linkPaths })`; linked only when verify commands exist. */
   linkPaths?: string[];
+  /** Commit-ish a NEW integration branch is cut from (default: the repo's current HEAD). */
+  baseRef?: string;
+  /**
+   * Default true: (re)create the integration branch from `baseRef`/HEAD. `false` continues from the existing integration
+   * tip (phase N >= 2 accumulates); if the branch does not exist yet it is created from `baseRef`/HEAD.
+   */
+  reset?: boolean;
   signal?: AbortSignal;
   runVerify?: typeof realRunVerify;
 }
@@ -25,10 +32,11 @@ const BRANCH = /^[A-Za-z0-9_][A-Za-z0-9_./-]*$/;
 const validBranch = (b: string) => BRANCH.test(b) && !b.includes("..") && !b.endsWith("/") && !b.endsWith(".lock");
 
 /**
- * Merges `branches` (in order) into a fresh `mar/<runId>/integration` branch cut from the repo's CURRENT HEAD, in a
+ * Merges `branches` (in order) into `mar/<runId>/integration` (by default a fresh branch cut from the repo's CURRENT HEAD; with `reset: false` the
+ * existing branch is continued, so later phases accumulate on top of earlier ones), in a
  * temporary worktree. The repo's own branch, HEAD and working tree are never touched. Stops at the first conflict
  * (that merge is aborted; earlier merges stay), then verifies the result when no conflict occurred. The temporary
- * worktree is always removed; the branch is kept. Re-running recreates the branch (`-B`), so it is safe for resume.
+ * worktree is always removed; the branch is kept. By default re-running recreates the branch (`-B`).
  */
 export async function integrate(o: IntegrateOpts): Promise<IntegrateResult> {
   if (!SAFE.test(o.runId)) throw new Error(`invalid run id: ${o.runId}`);
@@ -42,13 +50,16 @@ export async function integrate(o: IntegrateOpts): Promise<IntegrateResult> {
   const current = (await git(["symbolic-ref", "--short", "-q", "HEAD"], root).catch(() => "")).trim();
   if (current === branch) throw new Error(`refusing to integrate: ${branch} is the current branch`);
   for (const b of o.branches) if (!(await branchExists(b, root))) throw new Error(`branch ${b} not found`);
-  const base = (await git(["rev-parse", "HEAD"], root)).trim();
+  if (o.baseRef !== undefined && o.baseRef !== "HEAD" && !validBaseRef(o.baseRef)) throw new Error(`invalid baseRef: ${JSON.stringify(o.baseRef)}`);
+  const base = (await git(["rev-parse", "--verify", `${o.baseRef ?? "HEAD"}^{commit}`], root)).trim();
+  const continueTip = o.reset === false && (await branchExists(branch, root));
 
   await ensureMarExcluded(root);
   await ok(["worktree", "prune"], root);
   await discardWorktree(root, dir); // stale leftover from a crashed run
   try {
-    await git(["worktree", "add", "-B", branch, "--", dir, base], root);
+    if (continueTip) await git(["worktree", "add", "--", dir, branch], root);
+    else await git(["worktree", "add", "-B", branch, "--", dir, base], root);
     const merged: string[] = [];
     for (const b of o.branches) {
       if (o.signal?.aborted) throw new Error("integration aborted");

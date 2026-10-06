@@ -19,7 +19,13 @@ const badPath = (p: string): string | null => {
   return null;
 };
 
-export function parseDag(input: unknown): Dag {
+export interface ParseDagOpts {
+  /** Ids of tasks finished in EARLIER phases: their blackboard keys may be listed in `needs` without a `dependsOn`. */
+  external?: ReadonlySet<string>;
+}
+
+export function parseDag(input: unknown, opts: ParseDagOpts = {}): Dag {
+  const external = opts.external ?? new Set<string>();
   const dag = z.object({ tasks: z.array(TaskSpec).min(1) }).parse(input);
   const byId = new Map<string, TaskSpec>();
   for (const t of dag.tasks) {
@@ -28,7 +34,10 @@ export function parseDag(input: unknown): Dag {
   }
   for (const t of dag.tasks)
     for (const d of t.dependsOn)
-      if (!byId.has(d)) throw new DagError(`task ${t.id} depends on unknown task ${d}`);
+      if (!byId.has(d)) {
+        if (external.has(d)) throw new DagError(`task ${t.id} depends on ${d}, a task of an earlier phase: dependsOn may only reference tasks of this phase; use needs ("${d}/summary") instead`);
+        throw new DagError(`task ${t.id} depends on unknown task ${d}`);
+      }
 
   const ancestors = new Map<string, Set<string>>();
   const visiting = new Set<string>();
@@ -49,6 +58,7 @@ export function parseDag(input: unknown): Dag {
       const [owner, suffix, ...rest] = key.split("/");
       if (suffix === undefined || rest.length || !NEEDS_SUFFIXES.has(suffix))
         throw new DagError(`task ${t.id} needs "${key}": suffix must be one of ${[...NEEDS_SUFFIXES].join("|")}`);
+      if (!byId.has(owner) && external.has(owner)) continue;
       if (!ancestors.get(t.id)!.has(owner))
         throw new DagError(`task ${t.id} needs ${key} but ${owner} is a non-ancestor`);
     }

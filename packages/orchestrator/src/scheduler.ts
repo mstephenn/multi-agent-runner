@@ -39,7 +39,7 @@ export interface RunDeps {
   // What to do when a writer changed files outside its declared `paths`: "warn" (default) only emits an event.
   ownership?: "warn" | "enforce";
 }
-type Outcome = "done" | "failed" | "blocked";
+export type Outcome = "done" | "failed" | "blocked";
 // `note` replaces the generic "Previous attempt failed" text in the retry prompt.
 class TaskFailure extends Error { constructor(m: string, public retryable = true, public note?: string) { super(m); } }
 const VERIFY_TAIL_CHARS = 1500;
@@ -97,8 +97,9 @@ async function runDagInner(d: RunDeps): Promise<Record<string, Outcome>> {
   const { store, runId } = d;
   const outcome = new Map<string, Outcome>();
   // Resume: only tasks already `done` are seeded; failed/running/blocked ones run again.
-  bestEffort(() => { for (const s of store.taskStatuses(runId)) if (s.status === "done") outcome.set(s.task_id, "done"); });
+  // Only tasks of THIS dag count: the store also holds the tasks of other phases.
   const byId = new Map(d.dag.tasks.map((t) => [t.id, t]));
+  bestEffort(() => { for (const s of store.taskStatuses(runId)) if (s.status === "done" && byId.has(s.task_id)) outcome.set(s.task_id, "done"); });
   const running = new Map<string, Promise<void>>();
   const emit = (task: TaskSpec, type: EventType, payload: Record<string, unknown> = {}) =>
     store.appendEvent({ run_id: runId, task_id: task.id, agent_id: task.id, type, payload });

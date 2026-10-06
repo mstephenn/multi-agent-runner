@@ -20,3 +20,11 @@ describe("core", () => {
     expect(() => TaskResultSchema.parse({ summary: "s", report: "x".repeat(100_001) })).toThrow();
   });
 });
+
+describe("phase events", () => {
+  it("EventTypes includes phase_started and phase_finished", async () => {
+    const { EventTypes } = await import("../src/index.js");
+    expect(EventTypes).toContain("phase_started");
+    expect(EventTypes).toContain("phase_finished");
+  });
+});

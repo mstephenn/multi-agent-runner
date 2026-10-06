@@ -169,7 +169,7 @@ describe("repoMap", () => {
       for (const cap of [60, 100, 200, 500]) {
         const out = repoMap(d, cap);
         expect(out.length).toBeLessThanOrEqual(cap);
-        expect(out).toMatch(/… \(\+\d+ more files\)$/);
+        expect(out).toMatch(/… \(\+\d+ more files in \d+ dirs\)$/); // structured map (was: flat list + "more files")
       }
       const all = repoMap(d, 100000);
       expect(all).not.toContain("more files");
