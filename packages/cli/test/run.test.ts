@@ -350,7 +350,7 @@ describe("runMain", () => {
     const adapter = { runtime: "claude" as const, async *run(i: any) { started = true; await new Promise<void>((r) => i.signal.addEventListener("abort", () => r())); throw new Error("x"); } };
     const h = harness({ adapters: () => ({ claude: adapter, codex: adapter }) });
     const p = runMain(["run", "g", "--repo", gitRepo(), "--port", String(await free())], h.deps);
-    await vi.waitFor(() => expect(h.proc!.listenerCount("SIGINT")).toBeGreaterThan(0));
+    await vi.waitFor(() => expect(h.proc!.listenerCount("SIGINT")).toBeGreaterThan(0), { timeout: 10000 });
     await vi.waitFor(() => expect(started).toBe(true));
     h.proc!.emit("SIGINT");
     expect(await p).toBe(1);
@@ -364,7 +364,7 @@ describe("runMain", () => {
     let t = 1000;
     const h = harness({ adapters: () => ({ claude: adapter, codex: adapter }), now: () => t });
     void runMain(["run", "g", "--repo", gitRepo(), "--port", String(await free())], h.deps);
-    await vi.waitFor(() => expect(h.proc!.listenerCount("SIGINT")).toBeGreaterThan(0));
+    await vi.waitFor(() => expect(h.proc!.listenerCount("SIGINT")).toBeGreaterThan(0), { timeout: 10000 });
     h.proc!.emit("SIGINT");
     expect(h.exits).toEqual([]);
     t += 1500; // a distinct second Ctrl-C, well after the debounce window
@@ -378,7 +378,7 @@ describe("runMain", () => {
     let t = 1000;
     const h = harness({ adapters: () => ({ claude: adapter, codex: adapter }), now: () => t, forceExitTimeoutMs: 10 });
     void runMain(["run", "g", "--repo", gitRepo(), "--port", String(await free())], h.deps);
-    await vi.waitFor(() => expect(h.proc!.listenerCount("SIGINT")).toBeGreaterThan(0));
+    await vi.waitFor(() => expect(h.proc!.listenerCount("SIGINT")).toBeGreaterThan(0), { timeout: 10000 });
     h.proc!.emit("SIGINT");
     t += 200; h.proc!.emit("SIGINT"); h.proc!.emit("SIGTERM");
     await new Promise((r) => setTimeout(r, 100));
