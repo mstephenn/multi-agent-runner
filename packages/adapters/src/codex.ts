@@ -57,7 +57,9 @@ export function buildCodexArgs(i: AdapterInput): string[] {
 
 export function codexAdapter(bin = "codex"): Adapter {
   return {
-    runtime: "codex",
+    // Siblings need no flag: the workspace-write sandbox already lets `../<repo>` be READ, and writes outside the cwd are denied.
+    // `extraDirs` is deliberately ignored: codex's --add-dir would make the siblings WRITABLE.
+    runtime: "codex", siblingRead: true,
     async *run(i: AdapterInput) {
       let turnFailure: string | null = null;
       let lastError: string | null = null;

@@ -94,6 +94,8 @@ export function buildClaudeArgs(i: AdapterInput): string[] {
   if (i.allowedTools.length > 0) args.push("--allowedTools", i.allowedTools.join(","));
   args.push("--disallowedTools", CLAUDE_DENIED_TOOLS.join(","));
   args.push("--strict-mcp-config", "--setting-sources", "");
+  // Sibling repos (read-only checkouts): --add-dir grants tool access; Edit/Write there is not blocked, so the orchestrator checks them afterwards.
+  for (const d of i.extraDirs ?? []) args.push("--add-dir", d);
   if (i.model) args.push("--model", i.model);
   if (i.maxBudgetUsd != null) args.push("--max-budget-usd", String(i.maxBudgetUsd));
   args.push(...(i.unsafe === true ? ["--dangerously-skip-permissions"] : ["--permission-mode", "acceptEdits"]));
@@ -102,7 +104,7 @@ export function buildClaudeArgs(i: AdapterInput): string[] {
 
 export function claudeAdapter(bin = "claude"): Adapter {
   return {
-    runtime: "claude",
+    runtime: "claude", siblingRead: true,
     async *run(i: AdapterInput) {
       let gotResult = false;
       const normalize = createClaudeNormalizer();
