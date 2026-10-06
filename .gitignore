@@ -9,3 +9,4 @@ playwright-report/
 packages/cli/dist
 packages/cli/README.md
 *.tgz
+packages/cli/LICENSE

@@ -245,4 +245,4 @@ pnpm test:live                 # opt-in, spends tokens
 
 ## License
 
-No license has been chosen yet; all rights reserved.
+MIT. See [LICENSE](LICENSE). The dependencies this project ships (better-sqlite3, ws, React, React Flow, anime.js, zod) are MIT licensed too.

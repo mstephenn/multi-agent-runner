@@ -1,5 +1,5 @@
 // Builds the publishable bundle: dist/mar.mjs (all workspace code + zod inlined; better-sqlite3 and ws stay
-// external runtime dependencies) plus dist/ui (the built web UI) and a README copy for the npm page.
+// external runtime dependencies) plus dist/ui (the built web UI) a README copy for the npm page, and the LICENSE.
 import { build } from "esbuild";
 import { spawnSync } from "node:child_process";
 import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, copyFileSync } from "node:fs";
@@ -51,4 +51,5 @@ chmodSync(out, 0o755);
 cpSync(join(uiDir, "dist"), join(cliDir, "dist/ui"), { recursive: true });
 mkdirSync(cliDir, { recursive: true });
 copyFileSync(join(root, "README.md"), join(cliDir, "README.md"));
+copyFileSync(join(root, "LICENSE"), join(cliDir, "LICENSE"));
 console.log(`built ${out} (v${version})`);
