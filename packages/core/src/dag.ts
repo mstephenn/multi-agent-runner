@@ -22,11 +22,18 @@ const badPath = (p: string): string | null => {
 export interface ParseDagOpts {
   /** Ids of tasks finished in EARLIER phases: their blackboard keys may be listed in `needs` without a `dependsOn`. */
   external?: ReadonlySet<string>;
+  /**
+   * Workspace repos (folder names). With 2+ repos every task that writes (or depends on a writer) must name one of them;
+   * purely read-only tasks may omit `repo` (= the whole workspace, read-only). With exactly 1 repo writers default to it.
+   */
+  repos?: readonly string[];
 }
 
 export function parseDag(input: unknown, opts: ParseDagOpts = {}): Dag {
   const external = opts.external ?? new Set<string>();
   const dag = z.object({ tasks: z.array(TaskSpec).min(1) }).parse(input);
+  const repos = opts.repos;
+  if (repos?.length === 1) for (const t of dag.tasks) if (WRITER_ROLES.has(t.role) && t.repo === undefined) t.repo = repos[0];
   const byId = new Map<string, TaskSpec>();
   for (const t of dag.tasks) {
     if (byId.has(t.id)) throw new DagError(`duplicate task id: ${t.id}`);
@@ -68,11 +75,23 @@ export function parseDag(input: unknown, opts: ParseDagOpts = {}): Dag {
       if (why) throw new DagError(`task ${t.id}: invalid path ${JSON.stringify(p)} (${why}); paths must be repo-relative globs`);
     }
 
+  if (repos && repos.length > 0) {
+    for (const t of dag.tasks) {
+      if (t.repo !== undefined && !repos.includes(t.repo))
+        throw new DagError(`task ${t.id}: unknown repo "${t.repo}" (workspace repos: ${repos.join(", ")})`);
+      // Writers, and tasks that depend on a writer (they get their own worktree), need a concrete repo.
+      const writes = WRITER_ROLES.has(t.role) || [...ancestors.get(t.id)!].some((a) => WRITER_ROLES.has(byId.get(a)!.role));
+      if (writes && t.repo === undefined)
+        throw new DagError(`task ${t.id}: set "repo" to one of ${repos.join(", ")} (every task that writes code, or depends on a writer, works in exactly one repo)`);
+    }
+  }
+
   // Writers with no dependency path between them run in parallel: they must declare disjoint paths.
   const writers = dag.tasks.filter((t) => WRITER_ROLES.has(t.role));
   for (let i = 0; i < writers.length; i++)
     for (let j = i + 1; j < writers.length; j++) {
       const a = writers[i], b = writers[j];
+      if (a.repo !== b.repo) continue; // different repos never conflict
       if (ancestors.get(a.id)!.has(b.id) || ancestors.get(b.id)!.has(a.id)) continue;
       const missing = [a, b].filter((t) => t.paths.length === 0).map((t) => t.id);
       if (missing.length)

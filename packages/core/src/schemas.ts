@@ -17,6 +17,8 @@ export const TaskSpec = z.object({
   // Repo-relative globs this task will modify (see globs.ts). Validated in parseDag so errors name the task.
   paths: z.array(z.string()).default([]),
   budgetTokens: z.number().int().positive().optional(),
+  // Workspace runs (a parent folder of several git repos): the repo (folder name) this task works in; `paths` are relative to it.
+  repo: z.string().regex(/^[A-Za-z0-9._-]+$/, "repo must match [A-Za-z0-9._-]+").optional(),
   // Planning phase this task belongs to (stamped by the orchestrator; undefined = phase 1).
   phase: z.number().int().positive().optional(),
 });
@@ -38,7 +40,7 @@ export const EventTypes = [
   "task_started", "task_finished", "task_failed", "prompt_sent", "tool_call",
   "tool_result", "assistant_text", "blackboard_write", "blackboard_read", "usage", "runtime_fallback",
   "verify_started", "verify_passed", "verify_failed", "ownership_violation", "integration",
-  "phase_started", "phase_finished",
+  "phase_started", "phase_finished", "run_started", "sibling_modified",
 ] as const;
 export type EventType = (typeof EventTypes)[number];
 
