@@ -544,7 +544,7 @@ test("bar tooltip shows status and duration on focus and on hover", async ({ pag
   const bar = page.getByRole("button", { name: /^investigate_sow_sprint_plan, done/ });
   await bar.focus();
   const tip = page.getByRole("tooltip");
-  await expect(tip).toHaveText("investigate_sow_sprint_plan · done · started +10s · ended +1m 22s · took 1m 12s · 1 write · 1 read");
+  await expect(tip).toHaveText("investigate_sow_sprint_plan · done · started +3s · ended +1m 15s · took 1m 12s · 1 write · 1 read");
   await expect(bar).toHaveAttribute("aria-describedby", "tl-tip");
   await page.keyboard.press("Escape");
   await expect(tip).toHaveCount(0);
