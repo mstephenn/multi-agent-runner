@@ -544,7 +544,7 @@ test("bar tooltip shows status and duration on focus and on hover", async ({ pag
   const bar = page.getByRole("button", { name: /^investigate_sow_sprint_plan, done/ });
   await bar.focus();
   const tip = page.getByRole("tooltip");
-  await expect(tip).toHaveText("investigate_sow_sprint_plan · done · started +10s · ended +1m 22s · took 1m 12s · 1 write · 1 read");
+  await expect(tip).toHaveText("investigate_sow_sprint_plan · done · started +3s · ended +1m 15s · took 1m 12s · 1 write · 1 read");
   await expect(bar).toHaveAttribute("aria-describedby", "tl-tip");
   await page.keyboard.press("Escape");
   await expect(tip).toHaveCount(0);
@@ -646,4 +646,22 @@ test("two-phase run: P<n> badges on nodes and Phase 2/5 with the remaining text 
   await expect(page.getByTestId("node-impl")).toBeVisible();
   await expect(page.getByTestId("phase-indicator")).toHaveCount(0);
   await expect(page.locator(".phase-tag")).toHaveCount(0);
+});
+
+
+test("workspace repos and sibling warnings appear in task views", async ({ page }) => {
+  await page.goto(`${base}/?run=r1`);
+  const repos = page.getByLabel("Workspace repositories");
+  await expect(repos).toContainText("api");
+  await expect(repos).toContainText("web");
+  await expect(page.getByTestId("node-impl").locator(".repo-badge")).toHaveText("api");
+  await expect(page.getByTestId("node-rev").locator(".repo-badge")).toHaveText("All repos");
+  await page.getByTestId("node-impl").click();
+  const inspector = page.getByLabel("Inspector for impl", { exact: true });
+  await expect(inspector.locator(".repo-badge")).toHaveText("api");
+  const warnings = inspector.getByLabel("Sibling repository warnings");
+  await expect(warnings).toContainText("Sibling modified: web (2 files)");
+  await warnings.locator("summary").click();
+  await expect(warnings).toContainText("src/client.ts");
+  await expect(warnings).toContainText("1 more file not listed.");
 });

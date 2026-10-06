@@ -33,6 +33,10 @@ const AgentNode = memo(function AgentNode({ data }: NodeProps<Node<NodeData>>) {
           {a.role && <span className="role">{a.role}</span>}
           {phaseBadge(a.phase, data.phaseCount) && <span className="badge phase-tag" data-testid={`phase-${a.id}`}>{phaseBadge(a.phase, data.phaseCount)}</span>}
         </span>
+        {(a.repo || a.siblingWarnings?.length) && <span className="agent-repo">
+          {a.repo && <span className="badge repo-badge" title={a.repo === "*" ? "All workspace repositories" : `Repository: ${a.repo}`}>{a.repo === "*" ? "All repos" : a.repo}</span>}
+          {!!a.siblingWarnings?.length && <span className="sibling-indicator" title="Sibling repository modified; inspect task for details" aria-label="Sibling repository modified">⚠ sibling modified</span>}
+        </span>}
         <span className="agent-foot">
           <span className="status-text" data-status={a.status}><span aria-hidden="true">{STATUS_ICON[a.status]}</span> {a.status}</span>
           <span className="mono tok">{fmtTokens(a.tokens)} tok</span>

@@ -61,9 +61,16 @@ export function Inspector({ agent, events, blackboard, plan, reports = [], width
     <aside ref={aside} className="inspector" style={width === null ? undefined : { width }} aria-label={`Inspector for ${agent.id}`}>
       <div className="inspector-resize" role="separator" aria-label="Resize inspector" aria-orientation="vertical" aria-valuemin={MIN_WIDTH} aria-valuenow={width ?? undefined} tabIndex={0} onPointerDown={onResizeStart} onPointerMove={onResizeMove} onPointerUp={onResizeEnd} onPointerCancel={onResizeEnd} onKeyDown={onResizeKey} />
       <header className="insp-head">
-        <div><h2 className="mono">{agent.id}</h2><span className="status-text" data-status={agent.status}>{agent.status}{agent.detail ? `: ${agent.detail}` : ""}</span></div>
+        <div><h2 className="mono">{agent.id}</h2>{agent.repo && <span className="badge repo-badge" title={`Repository: ${agent.repo}`}>{agent.repo === "*" ? "All repos" : agent.repo}</span>}<span className="status-text" data-status={agent.status}>{agent.status}{agent.detail ? `: ${agent.detail}` : ""}</span></div>
         <button type="button" onClick={onClose} aria-label="Close inspector">Close</button>
       </header>
+      {!!agent.siblingWarnings?.length && <div className="sibling-warnings" role="status" aria-label="Sibling repository warnings">
+        {agent.siblingWarnings.map((w) => <details key={w.id}>
+          <summary>⚠ Sibling modified: <strong>{w.repo}</strong> ({w.count} {w.count === 1 ? "file" : "files"})</summary>
+          <ul>{w.files.map((file, i) => <li key={i}><code>{file}</code></li>)}</ul>
+          {w.count > w.files.length && <p>{w.count - w.files.length} more {w.count - w.files.length === 1 ? "file" : "files"} not listed.</p>}
+        </details>)}
+      </div>}
       {spec && <p className="goal">{spec.goal}</p>}
       <div role="tablist" aria-label="Inspector sections" className="tabs" onKeyDown={onKey}>
         {TABS.map((t) => (
