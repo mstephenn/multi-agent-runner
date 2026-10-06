@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -18,6 +18,7 @@ const USAGE = `Usage:
   mar run "<goal>" [--repo <path>] [--port <n>] [--unsafe] [--budget <tokens>] [--phases <n>]
   mar resume <runId> [--repo <path>] [--port <n>] [--unsafe] [--budget <tokens>] [--phases <n>]
   mar --help
+  mar --version
 
 Options:
   --repo <path>     repository to work on (default: .)
@@ -30,6 +31,7 @@ const MAX_GOAL = 20000;
 
 export type Cli =
   | { cmd: "help" }
+  | { cmd: "version" }
   | { cmd: "run"; goal: string; repo: string; port: number; unsafe: boolean; budget?: number; phases?: number }
   | { cmd: "resume"; runId: string; repo: string; port: number; unsafe: boolean; budget?: number; phases?: number };
 
@@ -58,11 +60,13 @@ export function parseCli(argv: string[]): Cli {
       options: {
         repo: { type: "string", default: "." }, port: { type: "string" }, budget: { type: "string" }, phases: { type: "string" },
         unsafe: { type: "boolean", default: false }, help: { type: "boolean", short: "h", default: false },
+        version: { type: "boolean", short: "v", default: false },
       },
     });
   } catch (e) { throw new UsageError((e as Error).message); }
   const { values, positionals } = parsed;
   if (values.help) return { cmd: "help" };
+  if (values.version) return { cmd: "version" };
   const [cmd, ...rest] = positionals;
   const common = {
     repo: values.repo as string, unsafe: values.unsafe as boolean,
@@ -267,7 +271,19 @@ function printIntegration(runId: string, integration: IntegrationOutcome | undef
   return { built: true, healthy: true };
 }
 
-const uiDist = () => resolve(dirname(fileURLToPath(import.meta.url)), "../../ui/dist");
+/** Replaced at build time by scripts/build.mjs; undefined when running from the TypeScript sources. */
+declare const __MAR_VERSION__: string | undefined;
+export const marVersion = (): string => {
+  if (typeof __MAR_VERSION__ === "string") return __MAR_VERSION__;
+  try { return (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version; }
+  catch { return "0.0.0-dev"; }
+};
+
+/** UI assets: `dist/ui` next to the running bundle (installed package), else the monorepo `packages/ui/dist` (dev). */
+export function resolveUiDist(here: string, has: (indexHtml: string) => boolean = existsSync): string | undefined {
+  return [resolve(here, "ui"), resolve(here, "../../ui/dist")].find((d) => has(join(d, "index.html")));
+}
+const uiDist = () => resolveUiDist(dirname(fileURLToPath(import.meta.url)));
 
 type Server = Awaited<ReturnType<typeof startServer>>;
 export interface MainDeps {
@@ -306,6 +322,7 @@ export async function runMain(argv: string[], deps: MainDeps = {}): Promise<numb
     return 2;
   }
   if (cli.cmd === "help") { console.log(USAGE); return 0; }
+  if (cli.cmd === "version") { console.log(marVersion()); return 0; }
 
   const proc = deps.proc ?? process;
   const exit = deps.exit ?? ((c: number) => process.exit(c));
@@ -359,14 +376,14 @@ export async function runMain(argv: string[], deps: MainDeps = {}): Promise<numb
     proc.on("SIGINT", onSignal); proc.on("SIGTERM", onSignal); proc.on("SIGHUP", onSignal); handlersOn = true;
     const dist = uiDist();
     try {
-      server = await (deps.startServer ?? startServer)(store, { port: cli.port, staticDir: existsSync(dist) ? dist : undefined, onStop: (id) => { if (id === runId) ac.abort(); } });
+      server = await (deps.startServer ?? startServer)(store, { port: cli.port, staticDir: dist, onStop: (id) => { if (id === runId) ac.abort(); } });
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code === "EADDRINUSE") console.error(`mar: port ${cli.port} is already in use; pick another with --port`);
       else console.error(`mar: could not start server: ${errMessage(e)}`);
       return 1;
     }
     console.log(`UI: http://127.0.0.1:${server.port}/?run=${runId}`);
-    if (!existsSync(dist)) console.log("Note: UI is not built (packages/ui/dist missing); running without the UI.");
+    if (!dist) console.log("Note: UI is not built (packages/ui/dist missing); running without the UI.");
     if (cli.unsafe) console.log("WARNING: --unsafe is on. Agents run with permission prompts DISABLED and can run arbitrary commands.");
 
     const out = await executeRun({

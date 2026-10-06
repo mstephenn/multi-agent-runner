@@ -1,10 +1,12 @@
 {
-  "name": "multi-agent-runner",
+  "name": "mar-workspace",
   "private": true,
   "type": "module",
   "scripts": {
     "test": "vitest run",
     "mar": "node packages/cli/bin/mar.mjs",
+    "build": "pnpm --filter multi-agent-runner build",
+    "pack:cli": "pnpm --filter multi-agent-runner build && cd packages/cli && npm pack --pack-destination ../..",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p packages/ui/tsconfig.json",
     "typecheck:ui": "tsc --noEmit -p packages/ui/tsconfig.json",
     "test:e2e": "pnpm --filter @mar/ui build && pnpm --filter @mar/ui exec playwright test",

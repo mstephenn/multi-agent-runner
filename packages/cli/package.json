@@ -1,14 +1,33 @@
 {
-  "name": "@mar/cli",
-  "version": "0.0.0",
-  "private": true,
+  "name": "multi-agent-runner",
+  "version": "0.1.0",
+  "description": "Plan a goal into a DAG of tasks and run them on the claude and codex CLIs in isolated git worktrees, with a local web UI.",
+  "license": "UNLICENSED",
   "type": "module",
-  "main": "src/config.ts",
+  "bin": {
+    "mar": "dist/mar.mjs"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "prepack": "node scripts/build.mjs"
+  },
   "dependencies": {
+    "better-sqlite3": "^13.0.3",
+    "ws": "^8.22.0"
+  },
+  "devDependencies": {
+    "@mar/adapters": "workspace:*",
     "@mar/core": "workspace:*",
     "@mar/orchestrator": "workspace:*",
-    "@mar/adapters": "workspace:*",
     "@mar/server": "workspace:*",
+    "esbuild": "^0.21.5",
     "zod": "^3.23.0"
   }
 }

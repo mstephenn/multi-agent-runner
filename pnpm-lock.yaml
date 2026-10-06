@@ -26,6 +26,13 @@ importers:
 
   packages/cli:
     dependencies:
+      better-sqlite3:
+        specifier: ^13.0.3
+        version: 13.0.3
+      ws:
+        specifier: ^8.22.0
+        version: 8.22.0
+    devDependencies:
       '@mar/adapters':
         specifier: workspace:*
         version: link:../adapters
@@ -38,6 +45,9 @@ importers:
       '@mar/server':
         specifier: workspace:*
         version: link:../server
+      esbuild:
+        specifier: ^0.21.5
+        version: 0.21.5
       zod:
         specifier: ^3.23.0
         version: 3.25.76
