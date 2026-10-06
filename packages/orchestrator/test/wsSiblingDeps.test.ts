@@ -78,6 +78,18 @@ describe("sibling views with cross-repo dependencies", () => {
     expect(existsSync(taskDir(root, "t"))).toBe(false);
     expect(branches(api)).toEqual(["main", "mar/r1/a1", "mar/r1/a2"]);
   });
+  it("a conflicting sibling-view merge throws the typed error with repo, dependency and files", async () => {
+    const { DependencyMergeConflict } = await import("../src/worktree.js");
+    const { root, repos, api } = setup(["api", "web"]);
+    const w = createWorkspaceWorktrees(root, "r1", repos);
+    await finish(w, "a1", "api", "same.txt", "one\n");
+    await finish(w, "a2", "api", "same.txt", "two\n");
+    const e = await w.create("t", [], { repo: "web", siblings: true, siblingDeps: { api: ["a1", "a2"] } }).then(() => undefined, (x: unknown) => x);
+    expect(e).toBeInstanceOf(DependencyMergeConflict);
+    expect(e).toMatchObject({ task: "t", dependency: "a2", repo: "api", files: ["same.txt"] });
+    await w.shared.release();
+    expect(worktreeCount(api)).toBe(1);
+  });
   it("a missing dependency branch fails clearly", async () => {
     const { root, repos, api, web } = setup(["api", "web"]);
     const w = createWorkspaceWorktrees(root, "r1", repos);

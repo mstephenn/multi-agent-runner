@@ -15,6 +15,16 @@ export function git(args: string[], cwd: string): Promise<string> {
     });
   });
 }
+/** A dependency branch could not be merged into a new worktree: `files` are the conflicted paths (read before the merge was aborted). */
+export class DependencyMergeConflict extends Error {
+  constructor(public task: string, public dependency: string, public files: string[], public repo?: string) {
+    super(`${repo ? `sibling repo ${repo}: ` : ""}dependency ${dependency}: merge conflict in ${files.join(", ")}`);
+    this.name = "DependencyMergeConflict";
+  }
+}
+/** Conflicted files of the merge in progress in `dir` (empty when the merge failed for another reason). */
+export const conflictedFiles = async (dir: string): Promise<string[]> =>
+  (await git(["diff", "--name-only", "--diff-filter=U"], dir).catch(() => "")).split("\n").filter(Boolean);
 export const ok = (args: string[], cwd: string) => git(args, cwd).then(() => true, () => false);
 
 // Exit code of a git call: 0 / 1 are answers, anything else (128, spawn failure, ...) is an error.
@@ -196,7 +206,9 @@ export function createWorktrees(repoPath: string, runId: string, opts: WorktreeO
         try {
           await git([...IDENT, "merge", "--no-edit", depBranch], dir);
         } catch (e) {
+          const files = await conflictedFiles(dir); // before the abort: it clears the index
           await ok(["merge", "--abort"], dir);
+          if (files.length > 0) throw new DependencyMergeConflict(taskId, dep, files);
           throw new Error(`dependency ${dep}: merge into ${taskId} failed: ${(e as Error).message}`);
         }
       }

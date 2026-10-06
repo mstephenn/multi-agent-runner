@@ -134,7 +134,7 @@ describe("worktrees", () => {
     await commitFile(w, "b", "a.txt", "BBB");          // b edits a.txt
     await commitFile(w, "c", "a.txt", "CCC");          // c (resumed below) also edits a.txt -> conflicts with b
     const before = rev(repo, "mar/run1/c");
-    await expect(w.create("c", ["a", "b"])).rejects.toThrow(/\bb\b.*failed/);
+    await expect(w.create("c", ["a", "b"])).rejects.toThrow(/dependency b: merge conflict in a\.txt/);
     expect(rev(repo, "mar/run1/c")).toBe(before);       // a's merge was rolled back
     expect(execFileSync("git", ["ls-tree", "-r", "--name-only", "mar/run1/c"], { cwd: repo }).toString()).not.toContain("a.new");
     expect(existsSync(join(repo, ".mar", "worktrees", "run1", "c"))).toBe(false);
@@ -391,5 +391,32 @@ describe("linked dependency paths", () => {
   });
   it("link validates the task id", async () => {
     await expect(createWorktrees(repo, "lk").link("../x")).rejects.toThrow(/invalid/i);
+  });
+});
+
+describe("dependency merge conflicts", () => {
+  const g = (dir: string, ...a: string[]) => execFileSync("git", a, { cwd: dir }).toString().trim();
+  async function branchWith(w: ReturnType<typeof createWorktrees>, id: string, file: string, body: string) {
+    const d = await w.create(id);
+    writeFileSync(join(d, file), body);
+    await w.commit(id, `work ${id}`);
+    await w.remove(id);
+  }
+  it("throws a typed error listing the conflicted files, leaves nothing half-merged and removes the worktree and new branch", async () => {
+    const { DependencyMergeConflict } = await import("../src/worktree.js");
+    const w = createWorktrees(repo, "run1");
+    await branchWith(w, "a", "shared.txt", "from a\n");
+    await branchWith(w, "b", "shared.txt", "from b\n");
+    const err = await w.create("c", ["a", "b"]).then(() => undefined, (e: unknown) => e);
+    expect(err).toBeInstanceOf(DependencyMergeConflict);
+    const e = err as InstanceType<typeof DependencyMergeConflict>;
+    expect(e.task).toBe("c");
+    expect(e.dependency).toBe("b");
+    expect(e.files).toEqual(["shared.txt"]);
+    expect(e.message).toBe("dependency b: merge conflict in shared.txt");
+    expect(existsSync(join(repo, ".mar", "worktrees", "run1", "c"))).toBe(false);
+    expect(g(repo, "branch", "--list", "mar/run1/c")).toBe("");
+    expect(g(repo, "worktree", "list", "--porcelain").split("\n").filter((l) => l.startsWith("worktree "))).toHaveLength(1);
+    expect(g(repo, "status", "--porcelain")).toBe("");
   });
 });
