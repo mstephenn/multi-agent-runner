@@ -24,4 +24,13 @@ describe("buildPrompt", () => {
     const g = 'Fix "naïve" bug\nin `x y/z`';
     expect(buildPrompt({ ...t, goal: g }, [])).toContain(g);
   });
+  it("workspace writer note keeps the read-only text and adds the sibling contract-only rule; the shared view does not", () => {
+    const w = buildPrompt(t, [], { repo: "web", siblings: ["api"] });
+    expect(w).toContain("READ-ONLY at `../api` \u2014 read them for contracts; do not modify them.");
+    expect(w).toContain("Sibling repos reflect the finished work of the tasks you depend on.");
+    expect(w).toContain("do NOT import or require files from a sibling repo");
+    expect(buildPrompt(t, [], { all: ["api", "web"] })).not.toContain("Sibling repos reflect");
+    expect(buildPrompt(t, [], { repo: "web", siblings: [] })).not.toContain("Sibling repos reflect");
+    expect(buildPrompt(t, [])).not.toContain("Sibling repos reflect");
+  });
 });
