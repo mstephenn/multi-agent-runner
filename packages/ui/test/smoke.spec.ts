@@ -678,7 +678,6 @@ test("workspace repos and sibling warnings appear in task views", async ({ page 
 });
 
 
-<<<<<<< HEAD
 test("graph controls filter tasks, recover from empty results, and toggle the minimap", async ({ page }) => {
   const controls = page.getByLabel("Graph controls");
   await controls.getByLabel("Running / failed").check();
@@ -707,7 +706,7 @@ test("graph cards keep completed durations fixed while running elapsed time adva
   const initial = await running.textContent();
   await expect.poll(() => running.textContent(), { timeout: 3000 }).not.toBe(initial);
   await expect(completed).toHaveText(fixed!);
-=======
+
 test("goal expands and phase remaining work opens dismissible history", async ({ page }) => {
   await page.goto("/?run=r3");
   const goal = page.getByRole("heading", { level: 1 }).getByRole("button");
@@ -726,5 +725,4 @@ test("goal expands and phase remaining work opens dismissible history", async ({
   await remaining.click();
   await goal.click();
   await expect(popover).toHaveCount(0);
->>>>>>> local/mar/rmuwcqki6/p1-header
 });
