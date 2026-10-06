@@ -118,6 +118,22 @@ async function runDagInner(d: RunDeps): Promise<Record<string, Outcome>> {
   const useShared = (task: TaskSpec) => d.worktrees.shared !== undefined && usesSharedWorktree(task, byId, d.toolsFor);
   // Workspace: only same-repo writer branches are merged into a task's worktree; cross-repo dependencies are ordering only.
   const sameRepoDeps = (task: TaskSpec) => task.dependsOn.filter((id) => { const dep = byId.get(id); return dep !== undefined && dep.repo === task.repo && !useShared(dep); });
+  // Workspace: per OTHER repo, the writer tasks of that repo this task depends on (transitively), dependencies first.
+  // The task's sibling view of that repo must include their work (their branches are merged into a per-task checkout).
+  const siblingDepsOf = (task: TaskSpec): Record<string, string[]> => {
+    const out: Record<string, string[]> = {};
+    const seen = new Set<string>();
+    const visit = (id: string) => {
+      if (seen.has(id)) return;
+      seen.add(id);
+      const dep = byId.get(id);
+      if (!dep) return;
+      dep.dependsOn.forEach(visit);
+      if (dep.repo !== undefined && dep.repo !== task.repo && WRITER_ROLES.has(dep.role) && !useShared(dep)) (out[dep.repo] ??= []).push(id);
+    };
+    task.dependsOn.forEach(visit);
+    return out;
+  };
   let sharedP: Promise<string> | undefined;
   const acquireShared = () => {
     sharedUsedOf.set(d, true);
@@ -181,7 +197,7 @@ async function runDagInner(d: RunDeps): Promise<Record<string, Outcome>> {
     if (ws && !shared && task.repo === undefined) throw new TaskFailure("failed:no-repo", false);
     if (siblingNames.length > 0) sharedUsedOf.set(d, true); // the sibling symlinks point into the shared view: release it at the end of the run
     const cwd = shared ? await acquireShared()
-      : ws ? await d.worktrees.create(task.id, sameRepoDeps(task), { repo: task.repo, siblings: siblingNames.length > 0 })
+      : ws ? await d.worktrees.create(task.id, sameRepoDeps(task), { repo: task.repo, siblings: siblingNames.length > 0, ...(siblingNames.length > 0 ? { siblingDeps: siblingDepsOf(task) } : {}) })
       : await d.worktrees.create(task.id, task.dependsOn);
     const extraDirs = siblingNames.length > 0 ? d.worktrees.siblingDirs?.(task.id) ?? [] : [];
     const ac = new AbortController();
