@@ -647,3 +647,21 @@ test("two-phase run: P<n> badges on nodes and Phase 2/5 with the remaining text 
   await expect(page.getByTestId("phase-indicator")).toHaveCount(0);
   await expect(page.locator(".phase-tag")).toHaveCount(0);
 });
+
+
+test("workspace repos and sibling warnings appear in task views", async ({ page }) => {
+  await page.goto(`${base}/?run=r1`);
+  const repos = page.getByLabel("Workspace repositories");
+  await expect(repos).toContainText("api");
+  await expect(repos).toContainText("web");
+  await expect(page.getByTestId("node-impl").locator(".repo-badge")).toHaveText("api");
+  await expect(page.getByTestId("node-rev").locator(".repo-badge")).toHaveText("All repos");
+  await page.getByTestId("node-impl").click();
+  const inspector = page.getByLabel("Inspector for impl", { exact: true });
+  await expect(inspector.locator(".repo-badge")).toHaveText("api");
+  const warnings = inspector.getByLabel("Sibling repository warnings");
+  await expect(warnings).toContainText("Sibling modified: web (2 files)");
+  await warnings.locator("summary").click();
+  await expect(warnings).toContainText("src/client.ts");
+  await expect(warnings).toContainText("1 more file not listed.");
+});

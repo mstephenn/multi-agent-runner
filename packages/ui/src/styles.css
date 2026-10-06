@@ -222,3 +222,15 @@ pre.io { max-height: 320px; overflow: auto; white-space: pre-wrap; word-break: b
 .phase { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
 .phase-badge, .phase-tag { color: var(--muted); }
 .phase-remaining { color: var(--muted); font-size: 12px; max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Keep repository names case-sensitive and contained, even for long folder names. */
+.workspace-repos { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; max-width: 100%; }
+.badge.repo-badge { color: var(--accent); text-transform: none; letter-spacing: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: middle; }
+.agent-repo { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.agent-repo .repo-badge { min-width: 0; }
+.sibling-indicator { color: var(--warn); font-size: 10px; white-space: nowrap; }
+.sibling-warnings { margin: 8px 12px; padding: 6px 8px; border: 1px solid var(--warn); border-radius: 6px; color: var(--warn); max-height: 160px; overflow: auto; overflow-wrap: anywhere; }
+.sibling-warnings summary { cursor: pointer; }
+.sibling-warnings ul { margin: 6px 0; padding-left: 20px; }
+.sibling-warnings p { margin: 6px 0; }
+.insp-head > div { min-width: 0; }
