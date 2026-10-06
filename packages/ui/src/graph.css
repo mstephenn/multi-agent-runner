@@ -1,0 +1,18 @@
+.graph { position: relative; }
+.graph .agent { box-sizing: border-box; width: 250px; height: 160px; }
+.graph .agent-btn { height: 100%; }
+.graph .agent-id, .graph .role { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.graph .agent-meta { flex-wrap: nowrap; overflow: hidden; min-height: 20px; }
+.graph .agent-foot { margin-top: auto; flex-wrap: nowrap; }
+.agent-duration { color: var(--muted); font-size: 11px; }
+.graph-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; max-width: calc(100% - 32px); padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); font-size: 12px; }
+.graph-controls label { display: flex; align-items: center; gap: 4px; }
+.graph-controls button, .graph-controls select { color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 4px 6px; }
+.graph-controls select { max-width: 150px; }
+.graph-controls button[aria-pressed="true"] { border-color: var(--accent); }
+.graph-no-matches { position: absolute; top: 50%; width: 100%; text-align: center; color: var(--muted); pointer-events: none; }
+.graph-edge-marker { fill: var(--accent); stroke: var(--panel); stroke-width: 2; }
+.graph-edge-label { opacity: 0; pointer-events: none; overflow: visible; }
+.graph-edge-label div { box-sizing: border-box; width: 140px; max-height: 44px; overflow: auto; padding: 5px 7px; border: 1px solid var(--line); border-radius: 4px; color: var(--ink); background: var(--panel); font: 11px var(--mono); overflow-wrap: anywhere; text-align: center; }
+.react-flow__edge:hover .graph-edge-label, .react-flow__edge:focus .graph-edge-label, .graph-edge.is-selected .graph-edge-label { opacity: 1; pointer-events: auto; }
+.react-flow__edge:hover .graph-edge-marker, .react-flow__edge:focus .graph-edge-marker, .graph-edge.is-selected .graph-edge-marker { opacity: 0; }
