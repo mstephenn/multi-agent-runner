@@ -2,7 +2,8 @@ import { TaskResultSchema, WRITER_ROLES, estimateTokens, matchesAnyGlob, type Da
 import type { Adapter } from "@mar/adapters";
 import type { Store } from "../../server/src/store.js";
 import { BudgetTracker } from "./budget.js";
-import { buildPrompt } from "./prompt.js";
+import { buildPrompt, type WorkspacePrompt } from "./prompt.js";
+import type { CreateCtx } from "./worktree.js";
 import { injectSlices, publishResult } from "./blackboard.js";
 import { redact } from "./redact.js";
 import { usesSharedWorktree } from "./readonly.js";
@@ -11,13 +12,21 @@ import { runVerify } from "./verify.js";
 export interface RunDeps {
   store: Store; runId: string; dag: Dag; repo: string;
   adapters: Record<Runtime, Adapter>;
-  worktrees: { create(taskId: string, dependsOn?: string[]): Promise<string>; commit(taskId: string, message: string): Promise<void>; remove(taskId: string): Promise<void>;
+  worktrees: { create(taskId: string, dependsOn?: string[], ctx?: CreateCtx): Promise<string>; commit(taskId: string, message: string): Promise<void>; remove(taskId: string): Promise<void>;
     // Optional: writer-task helpers. Absent = no dependency links / no ownership enforcement.
     link?(taskId: string): Promise<string[]>;                              // symlink configured dependency paths (node_modules...)
     head?(taskId: string): Promise<string>;                                // HEAD sha of the task's worktree
     changedFiles?(taskId: string, sinceSha: string): Promise<string[]>;    // files changed on the task branch since a sha
     // Optional: one detached worktree for read-only tasks (no branch, no commits). Absent = a worktree per task.
-    shared?: { acquire(): Promise<string>; release(): Promise<void> } };
+    shared?: { acquire(): Promise<string>; release(): Promise<void> };
+    // Optional (workspace runs): sibling symlinks of a writer, and the post-hoc check that they were left untouched (dirty ones are reverted).
+    siblingDirs?(taskId: string): string[];
+    checkSiblings?(taskId: string): Promise<{ repo: string; files: string[] }[]> };
+  /** Workspace run (parent folder of several git repos): the repo folder names. Absent = a single repo. */
+  workspace?: { repos: readonly string[] };
+  /** Per-repo overrides of `verify` / `ownership` (workspace runs; `repo` is the task's repo, undefined for none). */
+  verifyFor?: (repo: string | undefined) => { commands: string[]; timeoutMs: number } | undefined;
+  ownershipFor?: (repo: string | undefined) => "warn" | "enforce";
   modelFor(runtime: Runtime, tier: Tier): string | null;
   /** Try the other CLI when the selected runtime fails, unless a USD cap is configured. Defaults to false for library callers. */
   fallbackRuntime?: boolean;
@@ -107,6 +116,8 @@ async function runDagInner(d: RunDeps): Promise<Record<string, Outcome>> {
   // Read-only tasks (see usesSharedWorktree: no writer role, no writer ancestor, no Edit/Write/Bash tools) run
   // concurrently in ONE directory, which is safe only because they cannot write. Without `shared`: legacy per-task.
   const useShared = (task: TaskSpec) => d.worktrees.shared !== undefined && usesSharedWorktree(task, byId, d.toolsFor);
+  // Workspace: only same-repo writer branches are merged into a task's worktree; cross-repo dependencies are ordering only.
+  const sameRepoDeps = (task: TaskSpec) => task.dependsOn.filter((id) => { const dep = byId.get(id); return dep !== undefined && dep.repo === task.repo && !useShared(dep); });
   let sharedP: Promise<string> | undefined;
   const acquireShared = () => {
     sharedUsedOf.set(d, true);
@@ -118,7 +129,7 @@ async function runDagInner(d: RunDeps): Promise<Record<string, Outcome>> {
   // Post-hoc path ownership: files this writer changed (committed) outside every declared glob.
   async function checkOwnership(task: TaskSpec, startSha: string | undefined) {
     if (task.paths.length === 0 || startSha === undefined || !d.worktrees.changedFiles) return;
-    const enforce = d.ownership === "enforce";
+    const enforce = (d.ownershipFor ? d.ownershipFor(task.repo) : d.ownership) === "enforce";
     let outside: string[];
     try { outside = (await d.worktrees.changedFiles(task.id, startSha)).filter((f) => !matchesAnyGlob(f, task.paths)); }
     catch (e) { if (enforce) throw e; return; } // advisory mode never fails a task over bookkeeping
@@ -129,8 +140,20 @@ async function runDagInner(d: RunDeps): Promise<Record<string, Outcome>> {
         `\n\nYou changed files outside your declared paths (${task.paths.join(", ")}): ${outside.slice(0, 20).map(redact).join(", ")}. Only change files matching your paths.`);
   }
 
+  // Siblings are read-only checkouts shared by all tasks; a worker that wrote to one is reported and the checkout reverted.
+  async function checkSiblings(task: TaskSpec, mayFail: boolean) {
+    if (!d.worktrees.checkSiblings) return;
+    const found = await d.worktrees.checkSiblings(task.id).catch(() => []);
+    if (found.length === 0) return;
+    for (const c of found) emit(task, "sibling_modified", { repo: c.repo, files: c.files.slice(0, MAX_VIOLATION_FILES).map(redact), count: c.files.length });
+    const enforce = (d.ownershipFor ? d.ownershipFor(task.repo) : d.ownership) === "enforce";
+    if (mayFail && enforce)
+      throw new TaskFailure("failed:sibling", true,
+        `\n\nYou modified read-only sibling repos (${found.map((c) => c.repo).join(", ")}); those changes were discarded. Only change files in your own repo.`);
+  }
+
   async function runGate(task: TaskSpec, cwd: string, signal: AbortSignal) {
-    const v = d.verify;
+    const v = d.verifyFor ? d.verifyFor(task.repo) : d.verify;
     if (!v || v.commands.length === 0) return;
     emit(task, "verify_started", { commands: v.commands.map(redact) });
     let r: Awaited<ReturnType<typeof runVerify>>;
@@ -148,16 +171,26 @@ async function runDagInner(d: RunDeps): Promise<Record<string, Outcome>> {
   async function attemptOnce(task: TaskSpec, extra: string, budget: BudgetTracker): Promise<TaskResult> {
     const { slices, missing } = injectSlices(store, runId, task);
     if (missing.length) throw new TaskFailure(`missing:${missing[0]}`, false);
-    const prompt = buildPrompt(task, slices) + extra;
-    emit(task, "prompt_sent", { prompt: redact(prompt), keys: slices.map((s) => s.key), tokens: estimateTokens(prompt), runtime: task.runtime });
+    const ws = d.workspace;
     const shared = useShared(task);
-    const cwd = shared ? await acquireShared() : await d.worktrees.create(task.id, task.dependsOn);
+    // Workspace: a writer sees the other repos read-only at ../<name> (only for runtimes where that was verified).
+    const siblingNames = ws && !shared && task.repo !== undefined && d.adapters[task.runtime].siblingRead !== false ? ws.repos.filter((n) => n !== task.repo).sort() : [];
+    const wsPrompt: WorkspacePrompt | undefined = !ws ? undefined : shared ? { all: [...ws.repos].sort() } : { repo: task.repo, siblings: siblingNames };
+    const prompt = buildPrompt(task, slices, wsPrompt) + extra;
+    emit(task, "prompt_sent", { prompt: redact(prompt), keys: slices.map((s) => s.key), tokens: estimateTokens(prompt), runtime: task.runtime });
+    if (ws && !shared && task.repo === undefined) throw new TaskFailure("failed:no-repo", false);
+    if (siblingNames.length > 0) sharedUsedOf.set(d, true); // the sibling symlinks point into the shared view: release it at the end of the run
+    const cwd = shared ? await acquireShared()
+      : ws ? await d.worktrees.create(task.id, sameRepoDeps(task), { repo: task.repo, siblings: siblingNames.length > 0 })
+      : await d.worktrees.create(task.id, task.dependsOn);
+    const extraDirs = siblingNames.length > 0 ? d.worktrees.siblingDirs?.(task.id) ?? [] : [];
     const ac = new AbortController();
     const onAbort = () => ac.abort();
     d.signal?.addEventListener("abort", onAbort);
     if (d.signal?.aborted) ac.abort();
     let timer: ReturnType<typeof setTimeout> | undefined;
     let committed = false;
+    let siblingsChecked = false;
     const gated = !shared && WRITER_ROLES.has(task.role);
     try {
       // Writers get the configured dependency links, and remember where their branch started (for ownership checks).
@@ -174,7 +207,7 @@ async function runDagInner(d: RunDeps): Promise<Record<string, Outcome>> {
         for await (const ev of d.adapters[runtime].run({
           taskId: task.id, prompt, cwd, model: d.modelFor(runtime, task.tier),
           allowedTools: d.toolsFor(task.role), signal: ac.signal, unsafe: d.unsafe,
-          maxBudgetUsd: d.maxBudgetUsdPerTask,
+          maxBudgetUsd: d.maxBudgetUsdPerTask, ...(extraDirs.length ? { extraDirs } : {}),
         })) {
           // A final usage event can arrive adjacent to a completed result. Keep that result, but stop
           // if the agent tries to do any further work after the cap was crossed.
@@ -214,6 +247,8 @@ async function runDagInner(d: RunDeps): Promise<Record<string, Outcome>> {
       if (!shared) await d.worktrees.commit(task.id, `mar(${task.id}): ${task.goal.split("\n")[0].slice(0, 60)}`);
       committed = true;
       if (gated) {
+        siblingsChecked = true;
+        await checkSiblings(task, true);
         await checkOwnership(task, startSha);
         await runGate(task, cwd, ac.signal); // before publishResult: dependents never see unverified output
       }
@@ -222,6 +257,7 @@ async function runDagInner(d: RunDeps): Promise<Record<string, Outcome>> {
       // Keep partial work on the per-task branch: the worktree is removed below. Best effort: a failing commit
       // (e.g. nothing to add, git error) must not mask the original failure.
       if (!committed && !shared) await d.worktrees.commit(task.id, `mar(${task.id}): wip (failed attempt)`).catch(() => {});
+      if (gated && !siblingsChecked) await checkSiblings(task, false).catch(() => {});
       throw e;
     } finally {
       if (timer !== undefined) clearTimeout(timer);
@@ -234,7 +270,7 @@ async function runDagInner(d: RunDeps): Promise<Record<string, Outcome>> {
   // `budget` is created once per task and shared by all of its attempts (retries do not get a fresh allowance).
   async function runTaskInner(task: TaskSpec) {
     store.setTaskStatus(runId, task.id, "running");
-    emit(task, "task_started", { runtime: task.runtime, tier: task.tier, role: task.role, worktree: useShared(task) ? "shared" : "own", unsafe: d.unsafe === true });
+    emit(task, "task_started", { runtime: task.runtime, tier: task.tier, role: task.role, worktree: useShared(task) ? "shared" : "own", unsafe: d.unsafe === true, ...(d.workspace ? { repo: task.repo ?? "*" } : {}) });
     const budget = new BudgetTracker(task.budgetTokens ?? d.defaultBudgetTokens);
     let extra = "";
     const max = d.maxAttempts ?? 1;
