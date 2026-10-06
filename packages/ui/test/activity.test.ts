@@ -8,7 +8,7 @@ const ev = (task: string | null, type: string, payload: unknown, ts = 1000 + n *
 const call = (name: string, input: unknown, ts?: number, task = "t") => ev(task, "tool_call", { name, input }, ts);
 const result = (name: string, output: unknown, isError = false, ts?: number, task = "t") => ev(task, "tool_result", { name, output, isError }, ts);
 
-const WT = "/Users/stephenm/workspace/ibeam/squad-lead-agent/.mar/worktrees/rmuuw5f9x/.shared/src/schema/conversion_signal.py";
+const WT = "/home/dev/project/.mar/worktrees/rmuuw5f9x/.shared/src/schema/conversion_signal.py";
 
 describe("deriveSteps pairing", () => {
   it("pairs a result with its call and computes ms", () => {

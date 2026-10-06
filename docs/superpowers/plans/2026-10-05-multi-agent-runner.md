@@ -69,7 +69,7 @@ tests live beside each package in `test/`; fixtures in `packages/adapters/test/f
 - [ ] **Step 1: Scaffold workspace**
 
 ```bash
-cd /Users/stephenm/workspace/personal/claude-agent-setup
+cd <repo>
 git init && git checkout -b feat/multi-agent-runner
 ```
 
@@ -933,7 +933,7 @@ export async function runDag(d: RunDeps): Promise<Record<string, Outcome>> {
 ```bash
 cd /tmp && mkdir -p mar-fixture && cd mar-fixture && git init -q 2>/dev/null
 claude -p 'Reply with ONLY {"summary":"ok"}' --output-format stream-json --verbose --no-session-persistence --model claude-haiku-4-5-20251001 \
-  > /Users/stephenm/workspace/personal/claude-agent-setup/packages/adapters/test/fixtures/claude-basic.jsonl
+  > <repo>/packages/adapters/test/fixtures/claude-basic.jsonl
 ```
 Open the file and confirm: an `assistant` line with `message.content[].type == "text"` and `message.usage`, and a final `{"type":"result", "result": "...", "usage": {...}, "total_cost_usd": ...}` line. If field names differ, adjust `normalizeClaudeLine` below to match the fixture before continuing. Redact anything sensitive from the fixture (session ids are fine).
 
@@ -1093,7 +1093,7 @@ Export both from `adapters/src/index.ts`.
 
 ```bash
 cd /tmp/mar-fixture && codex exec --json --skip-git-repo-check --sandbox read-only 'Reply with ONLY {"summary":"ok"}' \
-  > /Users/stephenm/workspace/personal/claude-agent-setup/packages/adapters/test/fixtures/codex-basic.jsonl
+  > <repo>/packages/adapters/test/fixtures/codex-basic.jsonl
 ```
 Inspect: expect an `item.completed` line with `item.type == "agent_message"` and `item.text`, and a `turn.completed` line with `usage.{input_tokens,cached_input_tokens,output_tokens}`. If names differ, adapt the normalizer to the fixture.
 

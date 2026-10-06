@@ -84,7 +84,7 @@
       "payload": {
         "name": "Read",
         "input": {
-          "file_path": "/Users/stephenm/workspace/ibeam/squad-lead-agent/.mar/worktrees/r1/.shared/src/a.py",
+          "file_path": "/home/dev/project/.mar/worktrees/r1/.shared/src/a.py",
           "offset": 20,
           "limit": 90
         }
@@ -106,7 +106,7 @@
         "name": "Grep",
         "input": {
           "pattern": "missing_symbol",
-          "path": "/Users/stephenm/workspace/ibeam/squad-lead-agent/.mar/worktrees/r1/.shared/src/a.py"
+          "path": "/home/dev/project/.mar/worktrees/r1/.shared/src/a.py"
         }
       }
     },
