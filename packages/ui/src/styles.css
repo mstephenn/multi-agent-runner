@@ -87,6 +87,11 @@ button.danger.armed { background: var(--err); color: var(--panel); }
 .insp-head { display: flex; justify-content: space-between; align-items: flex-start; padding: 10px 12px 0; }
 .insp-head h2 { margin: 0; font-size: 15px; }
 .goal { margin: 6px 12px; color: var(--muted); }
+.inspector-summary { padding: 10px 12px; border-top: 1px solid var(--line); }
+.inspector-summary .usage { grid-template-columns: 70px minmax(0, 1fr); }
+.inspector-summary dd { overflow-wrap: anywhere; }
+.inspector-summary p { margin: 8px 0 0; }
+.inspector-summary > button { margin-top: 8px; }
 .tabs { display: flex; gap: 2px; padding: 0 12px; border-bottom: 1px solid var(--line); }
 .tabs [role="tab"] { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; }
 .tabs [aria-selected="true"] { border-bottom-color: var(--accent); font-weight: 700; }
