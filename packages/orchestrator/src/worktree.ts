@@ -108,10 +108,27 @@ export interface WorktreeOpts {
   baseRef?: string;
   /** Repo-relative paths (single-segment `*` globs allowed) symlinked from the main repo into writer worktrees by `link`. */
   linkPaths?: string[];
+  /**
+   * Workspace mode: the PARENT folder that holds the run state. Worktrees then live under `<stateRoot>/.mar/worktrees/<runId>`
+   * (outside every child repo, so `.git/info/exclude` is never edited) instead of `<repo>/.mar/worktrees/<runId>`.
+   */
+  stateRoot?: string;
+  /** Workspace mode: a task's worktree is `<run dir>/<taskId>/<taskSubdir>` (the task dir also holds sibling symlinks). */
+  taskSubdir?: string;
+  /** Workspace mode: the detached shared worktree is `<run dir>/.shared/<sharedSubdir>`. */
+  sharedSubdir?: string;
+}
+
+/** Per-task context of `Worktrees.create` (workspace mode only). */
+export interface CreateCtx {
+  /** Workspace repo (folder name) the task's branch lives in. */
+  repo?: string;
+  /** Also expose the other repos as read-only symlinks next to the task's repo worktree. */
+  siblings?: boolean;
 }
 
 export interface Worktrees {
-  create(taskId: string, dependsOn?: string[]): Promise<string>;
+  create(taskId: string, dependsOn?: string[], ctx?: CreateCtx): Promise<string>;
   commit(taskId: string, message: string): Promise<void>;
   remove(taskId: string): Promise<void>;
   branchFor(taskId: string): string;
@@ -144,11 +161,12 @@ export function createWorktrees(repoPath: string, runId: string, opts: WorktreeO
   if (baseRef !== "HEAD" && !validBaseRef(baseRef)) throw new Error(`invalid baseRef: ${JSON.stringify(baseRef)}`);
   for (const p of links) { const why = linkPathProblem(p); if (why) throw new Error(`invalid link path ${JSON.stringify(p)}: ${why}`); }
   const root = resolve(repoPath); // absolute once: git runs with cwd=root, so relative paths must never reach it
-  const dirFor = (t: string) => join(root, ".mar", "worktrees", runId, t);
+  const runDir = join(resolve(opts.stateRoot ?? repoPath), ".mar", "worktrees", runId);
+  const dirFor = (t: string) => (opts.taskSubdir ? join(runDir, t, opts.taskSubdir) : join(runDir, t));
   const branchFor = (t: string) => `mar/${runId}/${t}`;
   const check = (t: string, what = "task") => { if (!SAFE.test(t)) throw new Error(`invalid ${what} id: ${t}`); };
 
-  const ensureExcluded = () => ensureMarExcluded(root);
+  const ensureExcluded = () => (opts.stateRoot ? Promise.resolve() : ensureMarExcluded(root));
 
   const discard = (dir: string) => discardWorktree(root, dir);
 
@@ -187,10 +205,10 @@ export function createWorktrees(repoPath: string, runId: string, opts: WorktreeO
   }
 
   // Dot-prefixed: can never match a task id (SAFE has no "."), so it cannot collide with a task worktree.
-  const sharedDir = join(root, ".mar", "worktrees", runId, ".shared");
+  const sharedDir = opts.sharedSubdir ? join(runDir, ".shared", opts.sharedSubdir) : join(runDir, ".shared");
   // rmdir only succeeds on an empty directory, so this tidies the run folder once its last worktree is gone and is a
   // harmless no-op (ENOTEMPTY/ENOENT) while others are still in use.
-  const pruneRunDir = () => rmdir(join(root, ".mar", "worktrees", runId)).catch(() => {});
+  const pruneRunDir = () => rmdir(runDir).catch(() => {});
   async function createShared(): Promise<string> {
     await ensureExcluded();
     await ok(["worktree", "prune"], root);
@@ -237,7 +255,7 @@ export function createWorktrees(repoPath: string, runId: string, opts: WorktreeO
         await pruneRunDir();
       },
     },
-    create(taskId: string, dependsOn: string[] = []) {
+    create(taskId: string, dependsOn: string[] = [], _ctx?: CreateCtx) {
       const p = queue.then(() => createOne(taskId, dependsOn));
       queue = p.catch(() => {});
       return p;

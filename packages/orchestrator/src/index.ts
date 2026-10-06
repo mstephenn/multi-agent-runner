@@ -11,3 +11,4 @@ export * from "./integrate.js";
 export * from "./history.js";
 export * from "./phases.js";
 export * from "./workspace.js";
+export * from "./wsWorktrees.js";

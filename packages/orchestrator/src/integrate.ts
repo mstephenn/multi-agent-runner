@@ -20,6 +20,10 @@ export interface IntegrateOpts {
   reset?: boolean;
   signal?: AbortSignal;
   runVerify?: typeof realRunVerify;
+  /** Workspace mode: the parent folder that holds `.mar/` (no `.git/info/exclude` edit in `repo`); the temp worktree is named after the repo. */
+  stateRoot?: string;
+  /** Workspace mode: folder name of the repo (used for the temporary worktree dir). */
+  repoName?: string;
 }
 export interface IntegrateResult {
   branch: string;
@@ -43,8 +47,8 @@ export async function integrate(o: IntegrateOpts): Promise<IntegrateResult> {
   for (const b of o.branches) if (!validBranch(b)) throw new Error(`invalid branch name: ${b}`);
   const root = resolve(o.repo);
   const branch = `mar/${o.runId}/integration`;
-  const runDir = join(root, ".mar", "worktrees", o.runId);
-  const dir = join(runDir, ".integration");
+  const runDir = join(resolve(o.stateRoot ?? o.repo), ".mar", "worktrees", o.runId);
+  const dir = join(runDir, o.repoName ? `.integration-${o.repoName}` : ".integration");
   const verifyFn = o.runVerify ?? realRunVerify;
 
   const current = (await git(["symbolic-ref", "--short", "-q", "HEAD"], root).catch(() => "")).trim();
@@ -54,7 +58,7 @@ export async function integrate(o: IntegrateOpts): Promise<IntegrateResult> {
   const base = (await git(["rev-parse", "--verify", `${o.baseRef ?? "HEAD"}^{commit}`], root)).trim();
   const continueTip = o.reset === false && (await branchExists(branch, root));
 
-  await ensureMarExcluded(root);
+  if (o.stateRoot === undefined) await ensureMarExcluded(root);
   await ok(["worktree", "prune"], root);
   await discardWorktree(root, dir); // stale leftover from a crashed run
   try {
