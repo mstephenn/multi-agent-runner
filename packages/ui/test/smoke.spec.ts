@@ -61,12 +61,22 @@ const openActivity = async (page: import("@playwright/test").Page, node = "impl"
 };
 const stepRow = (page: import("@playwright/test").Page, text: string | RegExp) => page.locator("li.step.tool").filter({ hasText: text });
 
-test("graph shows both agents with runtime badges and a labelled animated flow edge", async ({ page }) => {
+test("graph shows runtime badges and reveals flow labels on hover and selection", async ({ page }) => {
   await expect(page.getByRole("heading", { level: 1 })).toHaveText(fixture.run.goal);
   await expect(page.getByTestId("node-impl").locator(".rt-codex")).toHaveText("codex");
   await expect(page.getByTestId("node-rev").locator(".rt-claude")).toHaveText("claude");
   await expect(flowEdge(page)).toHaveCount(1);
-  await expect(page.locator(".react-flow__edge-text", { hasText: "impl/summary" })).toBeVisible();
+  const edge = flowEdge(page);
+  const label = edge.locator(".graph-edge-label");
+  await page.mouse.move(1, 1);
+  await expect(label).toHaveCSS("opacity", "0");
+  await expect(edge.locator(".graph-edge-marker")).toHaveCSS("opacity", "1");
+  await edge.locator(".graph-edge-marker").hover();
+  await expect(label).toHaveCSS("opacity", "1");
+  await expect(label).toContainText("impl/summary");
+  await label.click();
+  await page.mouse.move(1, 1);
+  await expect(label).toHaveCSS("opacity", "1");
 });
 
 test("a task without usage shows n/a, never NaN", async ({ page }) => {
@@ -664,4 +674,35 @@ test("workspace repos and sibling warnings appear in task views", async ({ page 
   await warnings.locator("summary").click();
   await expect(warnings).toContainText("src/client.ts");
   await expect(warnings).toContainText("1 more file not listed.");
+});
+
+
+test("graph controls filter tasks, recover from empty results, and toggle the minimap", async ({ page }) => {
+  const controls = page.getByLabel("Graph controls");
+  await controls.getByLabel("Running / failed").check();
+  await expect(page.getByTestId("node-impl")).toHaveCount(0);
+  await expect(page.getByTestId("node-rev")).toBeVisible();
+  await controls.getByLabel("Repo", { exact: true }).selectOption({ label: "api" });
+  await expect(page.getByText("No tasks match these filters.")).toBeVisible();
+  await controls.getByRole("button", { name: "Reset filters" }).click();
+  await expect(page.getByTestId("node-impl")).toBeVisible();
+  await controls.getByRole("button", { name: "Minimap" }).click();
+  await expect(page.locator(".react-flow__minimap")).toBeVisible();
+  await controls.getByRole("button", { name: "Minimap" }).click();
+  await expect(page.locator(".react-flow__minimap")).toHaveCount(0);
+  await page.goto(`${base}/?run=r3`);
+  await controls.getByLabel("Phase", { exact: true }).selectOption("2");
+  await expect(page.getByTestId("node-p1-api")).toHaveCount(0);
+  await expect(page.getByTestId("node-p2-ui")).toBeVisible();
+});
+
+test("graph cards keep completed durations fixed while running elapsed time advances", async ({ page }) => {
+  const completed = page.getByTestId("node-impl").locator(".agent-duration");
+  const running = page.getByTestId("node-rev").locator(".agent-duration");
+  await expect(completed).toContainText("Duration:");
+  await expect(running).toContainText("Elapsed:");
+  const fixed = await completed.textContent();
+  const initial = await running.textContent();
+  await expect.poll(() => running.textContent(), { timeout: 3000 }).not.toBe(initial);
+  await expect(completed).toHaveText(fixed!);
 });
