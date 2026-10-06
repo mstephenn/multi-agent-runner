@@ -665,3 +665,24 @@ test("workspace repos and sibling warnings appear in task views", async ({ page 
   await expect(warnings).toContainText("src/client.ts");
   await expect(warnings).toContainText("1 more file not listed.");
 });
+
+
+test("goal expands and phase remaining work opens dismissible history", async ({ page }) => {
+  await page.goto("/?run=r3");
+  const goal = page.getByRole("heading", { level: 1 }).getByRole("button");
+  await expect(goal).toHaveAttribute("aria-expanded", "false");
+  await goal.click();
+  await expect(goal).toHaveAttribute("aria-expanded", "true");
+  const remaining = page.getByTestId("phase-remaining");
+  await remaining.click();
+  const popover = page.getByRole("region", { name: "Remaining work and phase history" });
+  await expect(popover).toBeVisible();
+  await expect(popover).toContainText("wire the UI");
+  await expect(popover).toContainText("docs and release notes");
+  await page.keyboard.press("Escape");
+  await expect(popover).toHaveCount(0);
+  await expect(remaining).toBeFocused();
+  await remaining.click();
+  await goal.click();
+  await expect(popover).toHaveCount(0);
+});
