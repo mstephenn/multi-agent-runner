@@ -4,6 +4,8 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createHash } from "node:crypto";
+import { seedRepo } from "./historySeed.js";
 
 const cliDir = fileURLToPath(new URL("..", import.meta.url));
 const root = join(cliDir, "../..");
@@ -48,6 +50,29 @@ describe.skipIf(!canBuild)("packaged bundle", () => {
     expect(r.status).not.toBe(0);
     expect(r.stderr).toContain("preflight failed");
     expect(r.stderr).toContain("not a git repository");
+  });
+
+  it("history works from the bundle against a seeded repo and does not touch it", () => {
+    const repo = seedRepo(); tmps.push(repo);
+    const db = join(repo, ".mar", "mar.db");
+    const sha = () => createHash("sha256").update(readFileSync(db)).digest("hex");
+    const before = sha();
+    const list = mar(bundle, ["history", "--repo", repo]);
+    expect(list.status, list.stderr).toBe(0);
+    expect(list.stdout).toMatch(/^ID\s+DATE\s+STATUS\s+PHASES\s+TASKS\s+TOKENS\s+GOAL/);
+    expect(list.stdout).toContain("rsingle1");
+    expect(list.stdout).toContain("7 runs shown (7 total). Details: mar history <id>");
+    const detail = mar(bundle, ["history", "rthree", "--repo", repo]);
+    expect(detail.status, detail.stderr).toBe(0);
+    expect(detail.stdout).toContain("== Phase 3 ==");
+    expect(detail.stdout).not.toMatch(/\x1b|\x07/);
+    const task = mar(bundle, ["history", "rsingle1", "--task", "impl", "--repo", repo]);
+    expect(task.stdout).toContain("Added `GET /health`.");
+    expect(JSON.parse(mar(bundle, ["history", "--json", "--repo", repo]).stdout)).toHaveLength(7);
+    expect(mar(bundle, ["history", "--task", "x"]).status).toBe(2);
+    expect(mar(bundle, ["history", "--help"]).stdout).toContain("mar history");
+    expect(sha()).toBe(before);
+    expect(existsSync(`${db}-wal`) || existsSync(`${db}-shm`)).toBe(false);
   });
 
   const npm = (args: string[], cwd: string) => spawnSync("npm", args, { cwd, encoding: "utf8", timeout: 240_000 });

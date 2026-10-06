@@ -40,6 +40,7 @@ Without `packages/ui/dist` the run still works; `mar` prints a note and serves n
 ```bash
 pnpm mar run "<goal>" --repo .
 pnpm mar resume <runId> --repo .
+pnpm mar history
 pnpm mar --help
 ```
 
@@ -70,6 +71,48 @@ The loop stops when the planner says done, when `maxPhases` is reached, when `ma
 `mar resume <runId>` continues an interrupted run, including the phase loop: it re-runs unfinished tasks of the first unfinished phase (done tasks are kept), then keeps planning. Past a phase limit: `mar resume <runId> --phases 8`. A finished run just reprints its result. Runs created before phases existed resume as a single phase.
 
 Token accounting: `maxTotalTokens` sums input+output of all `usage` events of the run, worker tasks and planner calls (planner usage is recorded when the planner CLI reports it). Planner file reads see your checkout, not the integration branch; the repo map and the history describe the later phases.
+
+## History (`mar history`)
+
+Every run is kept in the repository it ran in. `mar history` reads that back; it never writes.
+
+```bash
+mar history                          # the 20 newest runs of this repo
+mar history --limit 50 --repo ~/src/app
+mar history r1abc                    # details and the full answer of one run (unique prefix, 3+ characters)
+mar history r1abc --task impl > impl.md   # only that task's full report, ready to pipe
+mar history --json | jq '.[] | select(.status != "done")'
+mar history --ui                     # replay the newest run in the web UI (or: mar history --ui r1abc)
+```
+
+| Flag | Meaning |
+| --- | --- |
+| `<runId>` | Show one run. A unique prefix of at least 3 characters works; an ambiguous prefix lists the matches and exits 2, an unknown id exits 1 |
+| `--repo <path>` | Repository whose `.mar/mar.db` to read (default `.`) |
+| `--limit <n>` | Runs to list, 1 to 200 (default 20) |
+| `--json` | List as a JSON array (`id`, `goal`, `created`, `status`, `phases`, `tasksDone`, `tasksTotal`, `tokens`, `remaining`, `stopReason`); no table, no footer |
+| `--task <id>` | Print only the full report of that task (its blackboard summary if it has none); needs a run id |
+| `--ui` | Serve the stored run in the web UI, read-only, until Ctrl-C; not combinable with `--json` or `--task`; `--port` applies |
+
+The list shows `ID  DATE  STATUS  PHASES  TASKS  TOKENS  GOAL` (local time with a relative suffix, `done/total` tasks, input+output tokens of all usage events or `n/a`, the goal clipped to the terminal width). The detail view shows the goal, repo, start, duration, status, tokens and, per phase, the plan table, each task with its status, reason and branch (only if the branch still exists), the integration result and what remained, then the answer exactly as `mar run` printed it and the saved report files.
+
+**Scope.** History is per repository: only the runs in `<repo>/.mar/mar.db` are listed, and it lasts only while `<repo>/.mar/` exists (delete the folder and the history is gone).
+
+**STATUS** is derived from what is stored, because nothing records that a run ended:
+
+| Status | Meaning |
+| --- | --- |
+| `done` | every task of every phase is done and nothing remained after the last phase |
+| `failed` | at least one task failed (a task failing with "aborted" means you stopped the run) |
+| `blocked` | some task was blocked and none failed |
+| `incomplete` | all tasks done but work remained (the phase or token limit was reached), or tasks never started because the run stopped |
+| `planning-failed` | the run has no plan and the planner failed |
+| `running` | heuristic: the newest event is under 2 minutes old and a task is still `running`; a run killed hard looks `running` for its last 2 minutes |
+| `stopped` | anything else (no plan, or a task left `running` long ago) |
+
+**Read-only guarantee.** `mar history` opens a private snapshot copy of the database (including committed rows still in its `-wal`), so the DB file, the repo, `.mar/` and the worktrees are never modified and no `-wal`/`-shm` files appear. A run that is being written while you look is shown as of the moment you started. `--ui` serves that snapshot with the Stop button hidden, a `History (read-only)` badge and `POST /api/runs/:id/stop` answering 405; the UI does not poll for changes.
+
+**Terminal safety.** Everything printed from stored text (goals, reports, summaries, reasons, verify output), by `mar history` and by `mar run`, has ANSI/OSC escape sequences and other control characters removed (newlines and tabs are kept), so a hostile report cannot rewrite your terminal.
 
 ## `.mar.json`
 

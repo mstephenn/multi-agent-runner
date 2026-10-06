@@ -83,7 +83,7 @@ export function seedRepo(): string {
   const base = Date.now();
   const age: Record<string, number> = { rsingle1: 2 * HOUR, rthree3x: 5 * HOUR, rfailed4: 26 * HOUR, rabort55: 3 * 24 * HOUR, rold00001: 10 * 24 * HOUR, rcorrupt1: 11 * 24 * HOUR, rplanfail: 12 * 24 * HOUR };
   for (const [id, ms] of Object.entries(age)) {
-    raw.prepare("UPDATE runs SET created=? WHERE id=?").run(base - ms, id);
+    raw.prepare("UPDATE runs SET created = created - ? WHERE id=?").run(ms, id);
     // shift events into the past too, so nothing looks like it is running now
     raw.prepare("UPDATE events SET ts = ts - ? WHERE run_id=?").run(ms, id);
   }
