@@ -12,6 +12,11 @@ describe("extraDirs", () => {
     expect(pairs).toEqual(["/run/t/web", "/run/t/docs"]);
     expect(a.indexOf("--add-dir")).toBeGreaterThan(a.indexOf("--strict-mcp-config"));
   });
+  it("two siblings yield two separate --add-dir flags, in order, each followed by exactly its path", () => {
+    const a = buildClaudeArgs({ ...base, extraDirs: ["/run/t/b", "/run/t/c"] });
+    const i = a.indexOf("--add-dir");
+    expect(a.slice(i, i + 4)).toEqual(["--add-dir", "/run/t/b", "--add-dir", "/run/t/c"]);
+  });
   it("claude adds nothing without extraDirs", () => {
     expect(buildClaudeArgs(base)).not.toContain("--add-dir");
     expect(buildClaudeArgs({ ...base, extraDirs: [] })).not.toContain("--add-dir");

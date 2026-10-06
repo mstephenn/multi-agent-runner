@@ -120,3 +120,23 @@ Requirement: the runner is mainly for coding; parallel execution and fast develo
 - **Conflict-aware planning.** The planner must give each parallel task a disjoint `paths` ownership list (globs); the DAG validator rejects two tasks without a dependency path between them whose `paths` overlap. Tasks that must touch the same files are serialized by `dependsOn`.
 - **Integration step.** After all tasks pass, the orchestrator merges the per-task branches in dependency order into an `mar/<runId>/integration` branch (never main/master/beta), runs the verify gate on the merged result, and reports conflicts or failures in the UI. Landing the integration branch stays a user-confirmed step.
 - **Speed.** Default concurrency raised to the number of independent ready tasks up to a configurable cap (default 4); cheap tiers for gate-fix retries; no extra model calls for gating.
+
+## Multi-repo workspaces
+
+One project can span several git repositories that sit side by side in a parent folder (for example `shop/api`, `shop/web`). Run `mar` from the parent (or pass `--repo shop`); there is no extra command or mode.
+
+**Detection.** If `--repo` (default `.`) is inside a git work tree, nothing changes (single-repo mode, including when you run from a child repo). Otherwise the IMMEDIATE child folders that contain `.git` form the workspace. Dot-folders, `node_modules`, symlinks and files are skipped; folder names must match `[A-Za-z0-9._-]+` (others are skipped with a note). No child repo at all is an error. A single child repo is a workspace of one.
+
+**Scoping.** `--repos api,web` (on `run` and `resume`) or `"repos": ["api","web"]` in the parent `.mar.json` restricts the run; the flag wins. An unknown name is an error that lists the discovered repos. Repos outside the scope are never touched and may be dirty.
+
+**Config.** The parent `.mar.json` is the run-level config (all keys, plus `repos`). A child repo's own `.mar.json` may set only `verify`, `verifyTimeoutMinutes`, `linkPaths`, `ownership` and `integrate`; precedence is built-in defaults < parent file < child file. Run-level keys in a child file are ignored with one note per file; errors name the file (`api/.mar.json: ...`).
+
+**Planning.** The planner sees one repo map per repo (`repoMapChars` split evenly) and must give every writer task a `repo`. A cross-repo feature becomes one writer task per repo ordered with `dependsOn`; contracts travel through `decisions`/`summary` and `needs`. `paths` are relative to the task's repo, and the parallel-writer overlap rule applies only between writers of the same repo. Read-only tasks may omit `repo` (they see every repo, read-only).
+
+**Branches and integration.** A writer works in `<parent>/.mar/worktrees/<run>/<task>/<repo>` on branch `mar/<run>/<task>`, which exists only in that repo. Same-repo dependencies are merged into the worktree; cross-repo dependencies only order tasks. After each phase every repo with done writers gets its own `mar/<run>/integration` (verified with that repo's `verify`). Your branches and working trees are never touched; `mar` prints `git -C <repo> merge mar/<run>/integration` hints. State (`.mar/mar.db`, worktrees, reports) lives in the parent folder, outside every repo, so no repo's `.git/info/exclude` is edited. `mar history` shows the repo of each task, per-repo integration results, and `--json` lists `repos`.
+
+**Sibling read access.** A writer in repo `api` also sees the other repos read-only at `../web` (disposable shared checkouts). After the task, `mar` checks them; a modified sibling is reverted and reported as a `sibling_modified` event (the task fails only with `"ownership": "enforce"`).
+- Claude: each sibling is passed with `--add-dir` (verified: read works, and it needs the symlink path). Edit through `--add-dir` is NOT blocked by Claude, hence the post-hoc check.
+- Codex: no flag needed; the `workspace-write` sandbox lets `../web` be read and denies writes outside the cwd. Codex's own `--add-dir` makes siblings writable, so `mar` does not use it. Caveat: under `/tmp` (and other temp dirs) the sandbox treats the temp dir as writable, so writes to a sibling can succeed there; the post-hoc check still reverts them.
+
+**Limits.** One repo per writer task; immediate children only (no nested workspaces); every in-scope repo must be clean with at least one commit; the DB and history live in the parent folder (run `mar history --repo <parent>`).
