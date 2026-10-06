@@ -3,37 +3,45 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
-import { WRITER_ROLES, type Dag, type Role, type Runtime, type Tier } from "@mar/core";
+import { type Dag, type Role, type Runtime, type Tier } from "@mar/core";
 import { claudeAdapter, codexAdapter, type Adapter } from "@mar/adapters";
 import { Store, startServer } from "@mar/server";
-import { createWorktrees, ensureMarExcluded, integrate as realIntegrate, planGoal, redact, repoMap, runDag as realRunDag, usesSharedWorktree, type IntegrateResult, type Worktrees } from "@mar/orchestrator";
-import { loadConfig, type MarConfig } from "./config.js";
+import { createWorktrees, ensureMarExcluded, git, integrate as realIntegrate, planGoal, redact, repoMap, runDag as realRunDag, runPhases, usesSharedWorktree, type IntegrationOutcome, type PhasePlanArgs, type PhaseRec, type PhaseStop, type Plan, type Worktrees } from "@mar/orchestrator";
+import { effectiveMaxTotalTokens, loadConfig, type MarConfig } from "./config.js";
+import { renderPhaseHeader, renderPhaseSummary, renderPlanTable, renderStop } from "./phaseOutput.js";
 import { renderAnswer, saveReports } from "./answer.js";
 import { nodeRunner, preflight } from "./preflight.js";
 
 export class UsageError extends Error {}
 
 const USAGE = `Usage:
-  mar run "<goal>" [--repo <path>] [--port <n>] [--unsafe] [--budget <tokens>]
-  mar resume <runId> [--repo <path>] [--port <n>] [--unsafe] [--budget <tokens>]
+  mar run "<goal>" [--repo <path>] [--port <n>] [--unsafe] [--budget <tokens>] [--phases <n>]
+  mar resume <runId> [--repo <path>] [--port <n>] [--unsafe] [--budget <tokens>] [--phases <n>]
   mar --help
 
 Options:
   --repo <path>     repository to work on (default: .)
   --port <n>        UI/event server port (default: 4317)
   --budget <n>      default per-task token budget (overrides config)
+  --phases <n>      max planning phases for this invocation, 1-10 (overrides maxPhases; use with resume to go past the limit)
   --unsafe          skip agent permission prompts (dangerous)
 `;
 const MAX_GOAL = 20000;
 
 export type Cli =
   | { cmd: "help" }
-  | { cmd: "run"; goal: string; repo: string; port: number; unsafe: boolean; budget?: number }
-  | { cmd: "resume"; runId: string; repo: string; port: number; unsafe: boolean; budget?: number };
+  | { cmd: "run"; goal: string; repo: string; port: number; unsafe: boolean; budget?: number; phases?: number }
+  | { cmd: "resume"; runId: string; repo: string; port: number; unsafe: boolean; budget?: number; phases?: number };
 
 const posInt = (name: string, v: string): number => {
   if (!/^[0-9]+$/.test(v) || !Number.isSafeInteger(Number(v)) || Number(v) < 1) throw new UsageError(`--${name} must be a positive integer (got "${v}")`);
   return Number(v);
+};
+
+const phasesOpt = (v: string): number => {
+  const n = posInt("phases", v);
+  if (n > 10) throw new UsageError(`--phases must be between 1 and 10 (got "${v}")`);
+  return n;
 };
 
 const port = (v: string): number => {
@@ -48,7 +56,7 @@ export function parseCli(argv: string[]): Cli {
     parsed = parseArgs({
       args: argv, allowPositionals: true, strict: true,
       options: {
-        repo: { type: "string", default: "." }, port: { type: "string" }, budget: { type: "string" },
+        repo: { type: "string", default: "." }, port: { type: "string" }, budget: { type: "string" }, phases: { type: "string" },
         unsafe: { type: "boolean", default: false }, help: { type: "boolean", short: "h", default: false },
       },
     });
@@ -60,6 +68,7 @@ export function parseCli(argv: string[]): Cli {
     repo: values.repo as string, unsafe: values.unsafe as boolean,
     port: values.port === undefined ? 4317 : port(values.port),
     ...(values.budget === undefined ? {} : { budget: posInt("budget", values.budget) }),
+    ...(values.phases === undefined ? {} : { phases: phasesOpt(values.phases) }),
   };
   if (cmd === "run") {
     if (rest.length !== 1) throw new UsageError('run requires exactly one quoted goal');
@@ -113,7 +122,7 @@ export const newRunId = () => "r" + Date.now().toString(36);
 const codexModelRefreshTimedOut = (e: unknown) =>
   e instanceof Error && /failed to refresh available models: request timed out/i.test(e.message);
 
-async function planWithCodexRetry(a: Parameters<typeof planGoal>[0]): Promise<Dag> {
+async function planWithCodexRetry(a: Parameters<typeof planGoal>[0]): Promise<Plan> {
   try { return await planGoal(a); }
   catch (e) {
     if (!codexModelRefreshTimedOut(e) || a.signal?.aborted) throw e;
@@ -125,54 +134,55 @@ async function planWithCodexRetry(a: Parameters<typeof planGoal>[0]): Promise<Da
 export interface ExecuteOpts {
   goal: string; repo: string; store: Store; adapters: Record<Runtime, Adapter>; config: MarConfig;
   runId?: string; unsafe?: boolean; signal?: AbortSignal;
-  worktrees?: Pick<Worktrees, "create" | "commit" | "remove"> & Partial<Pick<Worktrees, "shared" | "head" | "changedFiles" | "link">>; repoMapFn?: (repo: string) => string;
+  worktrees?: Pick<Worktrees, "create" | "commit" | "remove"> & Partial<Pick<Worktrees, "shared" | "head" | "changedFiles" | "link">>;
+  /** Repo map for the planner: `ref` (re-plans) is the integration branch to list instead of HEAD. */
+  repoMapFn?: (repo: string, maxChars: number, ref?: string) => string;
   runDagFn?: typeof realRunDag;
   /** Test seam. Without it, integration runs only against real worktrees (injected fakes have no branches). */
   integrateFn?: typeof realIntegrate;
+  /** Prints progress lines (phase headers and plan tables). Default: silent. */
+  log?: (line: string) => void;
 }
 
-/** `result` is set when the integration branch was built (possibly stopped by a conflict / failed verify); `error` when it could not run. */
-export interface IntegrationOutcome { result?: IntegrateResult; error?: string }
-export interface ExecuteResult { runId: string; results: Record<string, string>; integration?: IntegrationOutcome }
-
-// Tasks in dependency order (dependencies first, plan order otherwise). Cycle-safe: the DAG is validated, but never loop.
-function topoOrder(dag: Dag): string[] {
-  const byId = new Map(dag.tasks.map((t) => [t.id, t]));
-  const seen = new Set<string>(); const out: string[] = [];
-  const visit = (id: string) => {
-    if (seen.has(id)) return;
-    seen.add(id);
-    for (const d of byId.get(id)?.dependsOn ?? []) visit(d);
-    out.push(id);
-  };
-  for (const t of dag.tasks) visit(t.id);
-  return out;
+export type { IntegrationOutcome };
+export interface ExecuteResult {
+  runId: string; results: Record<string, string>; integration?: IntegrationOutcome;
+  phases: PhaseRec[]; remaining: string; complete: boolean; stop?: PhaseStop;
 }
 
 export async function executeRun(o: ExecuteOpts): Promise<ExecuteResult> {
   const repo = resolve(o.repo);
   const runId = o.runId ?? newRunId();
   const { store, config, adapters } = o;
+  const log = o.log ?? (() => {});
   // The goal is persisted, served by /api/runs and sent to the planner: never keep secrets in it.
   const goal = redact(o.goal);
   store.createRun(runId, goal, repo);
-  let dag: Dag | undefined = store.loadPlan(runId);
-  if (!dag) {
-    // Without a plan there are no task rows, so the failure is recorded as a run-level event.
+  const verifyCfg = { commands: config.verify, timeoutMs: config.verifyTimeoutMinutes * 60_000 };
+  const sharedOn = o.worktrees ? o.worktrees.shared !== undefined : true;
+
+  // Plans phase `a.phase`: Claude first, then Codex. Phase 1 failures are recorded as a run-level event and thrown;
+  // a failing re-plan is reported by runPhases as a stop.
+  async function plan(a: PhasePlanArgs): Promise<Plan> {
     const failPlanning: (reason: string) => never = (reason) => {
-      try { store.appendEvent({ run_id: runId, task_id: null, agent_id: null, type: "task_failed", payload: { reason } }); } catch { /* best effort */ }
+      if (a.phase === 1) try { store.appendEvent({ run_id: runId, task_id: null, agent_id: null, type: "task_failed", payload: { reason } }); } catch { /* best effort */ }
       throw new Error(reason);
     };
     if (o.signal?.aborted) failPlanning("aborted during planning");
     try {
-      const map = (o.repoMapFn ?? repoMap)(repo);
-      try {
-        dag = await planGoal({ goal, repoMap: map, adapter: adapters.claude, model: config.plannerModel, cwd: repo, signal: o.signal });
-      } catch (claudeError) {
+      const mapFn = o.repoMapFn ?? repoMap;
+      let map: string;
+      try { map = mapFn(repo, config.repoMapChars, a.integrationBranch); }
+      catch (e) { if (!a.integrationBranch) throw e; map = mapFn(repo, config.repoMapChars); }
+      const common = {
+        goal, repoMap: map, cwd: repo, signal: o.signal, phase: a.phase, maxTasks: a.maxTasks, previousRemaining: a.previousRemaining,
+        history: a.history, takenIds: a.takenIds, externalIds: a.externalIds, onUsage: a.onUsage,
+      };
+      try { return await planGoal({ ...common, adapter: adapters.claude, model: config.plannerModel }); }
+      catch (claudeError) {
         if (o.signal?.aborted) throw claudeError;
-        try {
-          dag = await planWithCodexRetry({ goal, repoMap: map, adapter: adapters.codex, model: config.tiers.codex.mid, cwd: repo, signal: o.signal });
-        } catch (codexError) {
+        try { return await planWithCodexRetry({ ...common, adapter: adapters.codex, model: config.tiers.codex.mid }); }
+        catch (codexError) {
           if (o.signal?.aborted) throw codexError;
           const reason = (e: unknown) => redact(e instanceof Error ? e.message : String(e)).slice(0, 200);
           throw new Error(`Claude: ${reason(claudeError)}; Codex: ${reason(codexError)}`);
@@ -180,55 +190,53 @@ export async function executeRun(o: ExecuteOpts): Promise<ExecuteResult> {
       }
     } catch (e) {
       if (o.signal?.aborted) failPlanning("aborted during planning");
-      failPlanning(`planning failed: ${redact(e instanceof Error ? e.message : String(e)).slice(0, 500)}`);
+      return failPlanning(`planning failed: ${redact(e instanceof Error ? e.message : String(e)).slice(0, 500)}`);
     }
-    store.savePlan(runId, dag);
-  }
-  const verifyCfg = { commands: config.verify, timeoutMs: config.verifyTimeoutMinutes * 60_000 };
-  // With two or more done writer branches, merge them (topological order) into mar/<run>/integration and re-verify.
-  // Never throws: the run's reporting must survive an integration failure.
-  async function maybeIntegrate(results: Record<string, string>): Promise<IntegrationOutcome | undefined> {
-    if (!config.integrate || !dag || o.signal?.aborted) return undefined;
-    if (!o.integrateFn && o.worktrees) return undefined; // injected fake worktrees have no real branches
-    const writers = new Set(dag.tasks.filter((t) => WRITER_ROLES.has(t.role) && results[t.id] === "done").map((t) => t.id));
-    if (writers.size < 2) return undefined;
-    const branches = topoOrder(dag).filter((id) => writers.has(id)).map((id) => `mar/${runId}/${id}`);
-    let outcome: IntegrationOutcome;
-    try {
-      const result = await (o.integrateFn ?? realIntegrate)({
-        repo, runId, branches, signal: o.signal, linkPaths: config.linkPaths, ...(config.verify.length ? { verify: verifyCfg } : {}),
-      });
-      outcome = { result };
-    } catch (e) {
-      outcome = { error: redact(e instanceof Error ? e.message : String(e)).slice(0, 300) };
-    }
-    try {
-      const r = outcome.result;
-      store.appendEvent({
-        run_id: runId, task_id: null, agent_id: null, type: "integration",
-        payload: r ? {
-          branch: r.branch, merged: r.merged, ...(r.conflict ? { conflict: r.conflict } : {}),
-          ...(r.verify ? { verify: { ok: r.verify.ok, ...(r.verify.failed ? { failed: { ...r.verify.failed, command: redact(r.verify.failed.command) } } : {}), tail: redact(r.verify.tail) } } : {}),
-        } : { error: outcome.error },
-      });
-    } catch { /* best effort */ }
-    return outcome;
   }
 
+  const canIntegrate = config.integrate && (o.integrateFn !== undefined || o.worktrees === undefined); // injected fakes have no real branches
   try {
-    const results = await (o.runDagFn ?? realRunDag)({
-      store, runId, dag, repo, adapters,
-      worktrees: o.worktrees ?? createWorktrees(repo, runId, { linkPaths: config.linkPaths }),
-      modelFor: (rt, tier: Tier) => config.tiers[rt][tier],
-      fallbackRuntime: true,
-      toolsFor, concurrency: config.concurrency, defaultBudgetTokens: config.defaultBudgetTokens,
-      maxAttempts: config.maxAttempts, unsafe: o.unsafe, signal: o.signal,
-      taskTimeoutMs: config.taskTimeoutMinutes * 60_000, maxBudgetUsdPerTask: config.maxBudgetUsdPerTask,
-      repairResult: makeRepair(adapters, config, repo, o.signal),
-      ...(config.verify.length ? { verify: verifyCfg } : {}), ownership: config.ownership,
+    const out = await runPhases({
+      store, runId, signal: o.signal,
+      limits: { maxTasks: config.maxTasks, maxPhases: config.maxPhases, maxTotalTokens: effectiveMaxTotalTokens(config) },
+      plan,
+      run: (dag, ctx) => (o.runDagFn ?? realRunDag)({
+        store, runId, dag, repo, adapters,
+        worktrees: o.worktrees ?? createWorktrees(repo, runId, { linkPaths: config.linkPaths, ...(ctx.baseRef ? { baseRef: ctx.baseRef } : {}) }),
+        modelFor: (rt, tier: Tier) => config.tiers[rt][tier],
+        fallbackRuntime: true,
+        toolsFor, concurrency: config.concurrency, defaultBudgetTokens: config.defaultBudgetTokens,
+        maxAttempts: config.maxAttempts, unsafe: o.unsafe, signal: o.signal,
+        taskTimeoutMs: config.taskTimeoutMinutes * 60_000, maxBudgetUsdPerTask: config.maxBudgetUsdPerTask,
+        repairResult: makeRepair(adapters, config, repo, o.signal),
+        ...(config.verify.length ? { verify: verifyCfg } : {}), ownership: config.ownership,
+      }),
+      ...(canIntegrate ? {
+        integrate: async (a) => {
+          try {
+            const result = await (o.integrateFn ?? realIntegrate)({
+              repo, runId, branches: a.branches, signal: o.signal, linkPaths: config.linkPaths,
+              ...(config.verify.length ? { verify: verifyCfg } : {}),
+              ...(a.accumulate ? { baseRef: a.baseRef, reset: false } : {}),
+            });
+            return { result };
+          } catch (e) { return { error: redact(e instanceof Error ? e.message : String(e)).slice(0, 300) }; }
+        },
+      } : {}),
+      ...(o.worktrees ? {} : {
+        diffStat: async (branch: string) => {
+          const base = (await git(["merge-base", "HEAD", branch], repo)).trim();
+          return git(["diff", "--stat", `${base}..${branch}`], repo);
+        },
+      }),
+      onPhaseStart: (p) => {
+        log(`\n${renderPhaseHeader(p.phase, p.maxPhases)}`);
+        const byId = new Map(p.dag.tasks.map((t) => [t.id, t]));
+        log(renderPlanTable(p.dag.tasks, (t) => sharedOn && usesSharedWorktree(t, byId, toolsFor)));
+        if (p.remaining) log(`Remaining after this phase: ${redact(p.remaining).replace(/\s+/g, " ")}`);
+      },
     });
-    const integration = await maybeIntegrate(results);
-    return { runId, results, ...(integration ? { integration } : {}) };
+    return { runId, results: out.results, ...(out.integration ? { integration: out.integration } : {}), phases: out.phases, remaining: out.remaining, complete: out.complete, ...(out.stop ? { stop: out.stop } : {}) };
   } catch (e) {
     // Never leave a task `running` after an unexpected scheduler failure.
     for (const s of store.taskStatuses(runId)) if (s.status === "running") store.setTaskStatus(runId, s.task_id, "failed", "run crashed");
@@ -326,6 +334,7 @@ export async function runMain(argv: string[], deps: MainDeps = {}): Promise<numb
     const repo = resolve(cli.repo);
     let config = loadConfig(repo);
     if (cli.budget !== undefined) config = { ...config, defaultBudgetTokens: cli.budget };
+    if (cli.phases !== undefined) config = { ...config, maxPhases: cli.phases };
 
     const problems = await (deps.preflight ?? ((r: string) => preflight(r, nodeRunner(r))))(repo);
     if (problems.length) { console.error("mar: preflight failed:\n" + problems.map((p) => `  - ${p}`).join("\n")); return 1; }
@@ -360,52 +369,60 @@ export async function runMain(argv: string[], deps: MainDeps = {}): Promise<numb
     if (!existsSync(dist)) console.log("Note: UI is not built (packages/ui/dist missing); running without the UI.");
     if (cli.unsafe) console.log("WARNING: --unsafe is on. Agents run with permission prompts DISABLED and can run arbitrary commands.");
 
-    const { results, integration } = await executeRun({
-      goal, repo, store, runId, config, unsafe: cli.unsafe, signal: ac.signal,
+    const out = await executeRun({
+      goal, repo, store, runId, config, unsafe: cli.unsafe, signal: ac.signal, log: (l) => console.log(l),
       adapters: deps.adapters?.() ?? { claude: claudeAdapter(), codex: codexAdapter() },
       worktrees: deps.worktrees, repoMapFn: deps.repoMapFn, integrateFn: deps.integrateFn,
     });
+    const { results, phases } = out;
+    const multi = phases.length > 1;
 
-    const dag = store.loadPlan(runId);
     const rows = store.taskStatuses(runId);
     const status = new Map(rows.map((s) => [s.task_id, s.status]));
     const detail = new Map(rows.map((s) => [s.task_id, s.detail]));
     const reports = store.listReports(runId);
-    const answer = renderAnswer(dag, new Map(rows.map((s) => [s.task_id, { status: results[s.task_id] ?? s.status, detail: s.detail }])),
-      new Map(reports.map((r) => [r.task_id, r.body])),
-      new Map((dag?.tasks ?? []).flatMap((t) => { const b = store!.latestBb(runId, `${t.id}/summary`)?.body; return b ? [[t.id, b] as const] : []; })));
-    if (answer) console.log(`\n${answer}`);
+    const states = new Map(rows.map((s) => [s.task_id, { status: results[s.task_id] ?? s.status, detail: s.detail }]));
+    const reportById = new Map(reports.map((r) => [r.task_id, r.body]));
+    const summaryOf = (dag: Dag) => new Map(dag.tasks.flatMap((t) => { const b = store!.latestBb(runId, `${t.id}/summary`)?.body; return b ? [[t.id, b] as const] : []; }));
+    for (const p of phases) {
+      const answer = renderAnswer(p.dag, states, reportById, summaryOf(p.dag));
+      if (answer) console.log(`\n${multi ? `-- Phase ${p.phase} --\n` : ""}${answer}`);
+    }
     console.log(`\nRun ${runId}${ac.signal.aborted ? " (stopped)" : ""}:`);
     // Read-only tasks ran in the shared detached worktree and have no branch (injected fakes without `shared` get one each).
     const sharedOn = deps.worktrees ? deps.worktrees.shared !== undefined : true;
-    const byId = new Map((dag?.tasks ?? []).map((t) => [t.id, t]));
     const doneBranches: string[] = [];
     let anyBranch = false;
-    for (const t of dag?.tasks ?? []) {
-      const st = results[t.id] ?? status.get(t.id) ?? "not-run";
-      const noBranch = sharedOn && usesSharedWorktree(t, byId, toolsFor);
-      const branch = noBranch ? "(shared read-only worktree, no branch)" : `mar/${runId}/${t.id}`;
-      if (!noBranch) anyBranch = true;
-      // The stored detail is already redacted and capped by the scheduler (e.g. "failed:budget", "failed:timeout").
-      const why = st === "failed" && detail.get(t.id) ? `  (${detail.get(t.id)})` : "";
-      console.log(`  ${t.id}  ${st}${why}  ${branch}`);
-      if (st === "done" && !noBranch) doneBranches.push(branch);
+    let integ = { built: false, healthy: true };
+    for (const p of phases) {
+      const byId = new Map(p.dag.tasks.map((t) => [t.id, t]));
+      const summaryRows = p.dag.tasks.map((t) => {
+        const st = results[t.id] ?? status.get(t.id) ?? "not-run";
+        const noBranch = sharedOn && usesSharedWorktree(t, byId, toolsFor);
+        const branch = noBranch ? "(shared read-only worktree, no branch)" : `mar/${runId}/${t.id}`;
+        if (!noBranch) anyBranch = true;
+        if (st === "done" && !noBranch) doneBranches.push(branch);
+        return { id: t.id, status: st, detail: detail.get(t.id), branch };
+      });
+      const text = renderPhaseSummary(multi ? p.phase : null, summaryRows);
+      if (text) console.log(text);
+      if (multi && p.integration) integ = printIntegration(runId, p.integration);
     }
-    const integ = printIntegration(runId, integration);
+    if (!multi) integ = printIntegration(runId, out.integration);
     if (doneBranches.length && !integ.built) {
       console.log("\nNothing was merged. To integrate, do it on a feature branch (not main), e.g.:");
       for (const b of doneBranches) console.log(`  git merge ${b}`);
     }
-    if (!anyBranch && (dag?.tasks.length ?? 0) > 0) console.log("\nNo branches were created: all tasks were read-only.");
+    if (!anyBranch && phases.some((p) => p.dag.tasks.length > 0)) console.log("\nNo branches were created: all tasks were read-only.");
+    if (out.stop) console.log(`\n${renderStop(out.stop, out.remaining, runId, config.maxPhases)}`);
     if (reports.length) {
       const { saved, errors } = saveReports(repo, runId, reports);
       console.log("");
       for (const p of saved) console.log(`Saved: ${p}`);
       for (const e of errors) console.error(`mar: could not save report ${e}`);
     }
-    const allDone = !!dag && dag.tasks.length > 0 && dag.tasks.every((t) => (results[t.id] ?? status.get(t.id)) === "done");
-    // Exit 0 only if every task is done AND the integration (when it ran) merged cleanly and verified.
-    return allDone && integ.healthy && !ac.signal.aborted ? 0 : 1;
+    // Exit 0 only if every task of every phase is done, the planner said done, and the integration (when it ran) is healthy.
+    return out.complete && integ.healthy && !ac.signal.aborted ? 0 : 1;
   } catch (e) {
     reportError(e);
     return 1;

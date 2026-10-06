@@ -28,6 +28,12 @@ const Schema = z.object({
   ownership: z.enum(["warn", "enforce"]).default("warn"),
   // Merge all done writer branches into mar/<run>/integration (never your branch) and re-verify the result.
   integrate: z.boolean().default(true),
+  // Phased runs: tasks per phase, phases per run, and a cap on all tokens of the run (default: 5 x defaultBudgetTokens, see effectiveMaxTotalTokens).
+  maxTasks: z.number().int().min(1).max(16).default(8),
+  maxPhases: z.number().int().min(1).max(10).default(5),
+  maxTotalTokens: z.number().int().positive().optional(),
+  // Size of the repo map handed to the planner (flat file list when it fits, a structured map otherwise).
+  repoMapChars: z.number().int().min(2000).max(100000).default(20000),
   // Partial overrides are allowed and merged with the defaults below.
   tiers: z.object({ claude: tierKeys.partial().strict().optional(), codex: tierKeys.partial().strict().optional() }).strict().optional(),
 }).strict().transform((c) => ({
@@ -38,6 +44,9 @@ const Schema = z.object({
   },
 }));
 export type MarConfig = z.output<typeof Schema>;
+
+/** Token cap for a whole run: `maxTotalTokens`, else 5 x the (possibly `--budget`-overridden) per-task budget. */
+export const effectiveMaxTotalTokens = (c: Pick<MarConfig, "maxTotalTokens" | "defaultBudgetTokens">): number => c.maxTotalTokens ?? 5 * c.defaultBudgetTokens;
 
 const FILE = ".mar.json";
 
