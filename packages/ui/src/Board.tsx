@@ -48,7 +48,6 @@ export function Board({ groups, total, counts, chip, onChip, query, onQuery, sel
     if (seen === null) return;
     const fresh = rows.filter((r) => r.status === "running" && !seen.has(r.id)).map((r) => list.current?.querySelector(`[data-testid="row-${CSS.escape(r.id)}"]`)).filter((e): e is Element => !!e);
     return rowsIn(fresh);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runningIds, rows.length]);
   useEffect(() => {
     if (selected) list.current?.querySelector(".board-row.selected")?.scrollIntoView({ block: "nearest" });

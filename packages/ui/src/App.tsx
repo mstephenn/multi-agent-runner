@@ -96,7 +96,7 @@ export function App() {
   const summary = summarizeRun({ agents, phase, state, costUsd: overview.costUsd, etaMs: overview.etaMs, partial: truncated });
   const usage = budgetUsage(hasUsage ? overview.tokens : null, overview.maxTotalTokens ?? undefined);
   const budget: Budget = { tokens: hasUsage ? overview.tokens : null, partial: truncated, limit: overview.maxTotalTokens, pct: usage?.pct ?? null, over: usage?.over ?? false };
-  const problems = useMemo(() => deriveProblems(events, agents, state), [events, agents, state.kind, state.label]); // eslint-disable-line react-hooks/exhaustive-deps
+  const problems = useMemo(() => deriveProblems(events, agents, state), [events, agents, state.kind, state.label]);
   const answers = useMemo(() => deriveAnswer(snap.plan, snap.reports), [snap.plan, snap.reports]);
   const nowTexts = useMemo(() => deriveNowTexts({ events, blackboard, reports: snap.reports, plan: snap.plan, agents }), [events, blackboard, snap.reports, snap.plan, agents]);
   const counts = useMemo(() => chipCounts(agents), [agents]);
