@@ -257,3 +257,24 @@ pre.io { max-height: 320px; overflow: auto; white-space: pre-wrap; word-break: b
   .phase-remaining { max-width: 65vw; }
   .phase-popover { left: 0; right: auto; }
 }
+
+/* Loading spinner (static ring under reduced motion). */
+.spinner { width: 18px; height: 18px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.9s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
+
+/* Connection lost: keep the last state visible but clearly stale. */
+.banner.offline-banner { background: color-mix(in srgb, var(--warn) 18%, var(--panel)); border-color: var(--warn); }
+.app.offline .top { border-bottom: 2px dashed var(--warn); }
+.app.offline .main { filter: grayscale(0.85); opacity: 0.7; }
+.app.offline .conn-reconnecting { border: 1px solid var(--warn); border-radius: 10px; padding: 1px 8px; }
+
+/* Keyboard shortcut help. */
+.help-backdrop { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: 16px; background: color-mix(in srgb, var(--bg) 70%, transparent); }
+.help { width: min(420px, 100%); max-height: 100%; overflow: auto; padding: 16px 20px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); box-shadow: 0 8px 28px rgb(0 0 0 / 0.25); }
+.help h2 { margin: 0 0 10px; font-size: 15px; }
+.help dl { margin: 0 0 12px; }
+.help dl div { display: flex; align-items: baseline; gap: 12px; padding: 4px 0; }
+.help dt { flex: none; width: 48px; }
+.help dd { margin: 0; }
+kbd { display: inline-block; min-width: 24px; padding: 1px 6px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; background: var(--bg); font: 12px var(--mono); text-align: center; }

@@ -7,6 +7,8 @@ import { OverviewStrip } from "./OverviewStrip.js";
 import { GraphView } from "./GraphView.js";
 import { Inspector } from "./Inspector.js";
 import { BottomPanel } from "./BottomPanel.js";
+import { HelpOverlay } from "./HelpOverlay.js";
+import { shortcutAction, stepSelection } from "./shortcuts.js";
 
 const initialRun = () => new URLSearchParams(location.search).get("run");
 
@@ -77,16 +79,31 @@ export function App() {
   const startTs = snap.events[0]?.ts ?? run?.created ?? now;
   const endTs = running || cutoff !== null ? now : events.at(-1)?.ts ?? now;
   const agent = agents.find((a) => a.id === selected) ?? null;
+  const [help, setHelp] = useState(false);
+  const agentIds = useMemo(() => agents.map((a) => a.id), [agents]);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return; // e.g. the phase popover already used this Escape
+      const action = shortcutAction(e);
+      if (action === "help") setHelp((open) => !open);
+      else if (action === "close") { if (help) setHelp(false); else setSelected(null); }
+      else if (action === "next" || action === "prev") setSelected((cur) => stepSelection(agentIds, cur, action === "next" ? 1 : -1));
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [help, agentIds]);
 
-  if (runsError) return <div className="state" role="alert">Cannot reach the runner server: {runsError}</div>;
-  if (runs === null || readOnly === null) return <div className="state" role="status">Loading runs…</div>;
-  if (!runId) return <div className="state">No runs yet. Start one with <code>mar run</code>.</div>;
-  if (notFound) return <div className="state" role="alert">Run <code>{runId}</code> was not found. It may have been created in a different repository or deleted.</div>;
+  if (runsError) return <div className="state state-error" role="alert"><strong>Cannot reach the runner server</strong><span>{runsError}</span></div>;
+  if (runs === null || readOnly === null) return <div className="state" role="status"><span className="spinner" aria-hidden="true" />Loading runs…</div>;
+  if (!runId) return <div className="state"><strong>No runs yet</strong><span>Start one with <code>mar run</code>.</span></div>;
+  if (notFound) return <div className="state state-error" role="alert"><strong>Run not found</strong><span>Run <code>{runId}</code> was not found. It may have been created in a different repository or deleted.</span></div>;
+  const offline = conn === "reconnecting";
   return (
-    <div className="app">
+    <div className={`app${offline ? " offline" : ""}`} data-conn={conn}>
       <Header repos={repos} readOnly={readOnly === true} runs={runs} run={run} runId={runId} onRun={chooseRun} agents={agents} elapsedMs={endTs - startTs} conn={conn} partial={truncated} phase={phase} phaseHistory={phaseHistory} />
       <OverviewStrip overview={overview} partial={truncated} hasUsage={hasUsage} />
-      {error && <div className="banner" role="alert">{error}. {conn === "reconnecting" ? "Retrying…" : ""}</div>}
+      {offline && <div className="banner offline-banner" role="alert" data-testid="offline-banner"><strong>Connection lost.</strong> Showing the last known state{error ? ` (${error})` : ""}. Retrying…</div>}
+      {error && !offline && <div className="banner" role="alert">{error}.</div>}
       {truncated && <div className="banner info" role="status" data-testid="truncated-banner">Showing the latest {snap.events.length.toLocaleString("en-US")} events of a longer run — token totals and early context may be incomplete.</div>}
       {cutoff !== null && <div className="banner info" role="status">Replaying: views show state as of the scrubber position.</div>}
       <main className="main">
@@ -94,6 +111,7 @@ export function App() {
         {agent && <Inspector key={agent.id} agent={agent} events={events} blackboard={blackboard} plan={snap.plan} reports={snap.reports} width={inspectorWidth} onWidthChange={setInspectorWidth} onClose={() => setSelected(null)} />}
       </main>
       <BottomPanel events={events} allEvents={snap.events} agents={agents} blackboard={blackboard} flow={flow} now={now} liveEnd={liveEnd} cutoff={cutoff} onCutoff={setCutoff} onSelect={setSelected} />
+      {help && <HelpOverlay onClose={() => setHelp(false)} />}
     </div>
   );
 }

@@ -117,7 +117,7 @@ export function GraphView({ agents, plan, flow, selected, onSelect }: Props) {
     data: { waypoints: edge.waypoints, label: graph.links.get(edge.id)?.label },
   })), [graph, selectedEdge]);
 
-  if (agents.length === 0) return <div className="empty">No agents yet. Waiting for the planner.</div>;
+  if (agents.length === 0) return <div className="empty" role="status"><span className="spinner" aria-hidden="true" /><span>No agents yet. Waiting for the planner.</span></div>;
   return (
     <div className="graph" aria-label="Task graph">
       <ReactFlow

@@ -677,7 +677,6 @@ test("workspace repos and sibling warnings appear in task views", async ({ page 
   await expect(warnings).toContainText("1 more file not listed.");
 });
 
-
 test("graph controls filter tasks, recover from empty results, and toggle the minimap", async ({ page }) => {
   const controls = page.getByLabel("Graph controls");
   await controls.getByLabel("Running / failed").check();
@@ -706,6 +705,7 @@ test("graph cards keep completed durations fixed while running elapsed time adva
   const initial = await running.textContent();
   await expect.poll(() => running.textContent(), { timeout: 3000 }).not.toBe(initial);
   await expect(completed).toHaveText(fixed!);
+});
 
 test("goal expands and phase remaining work opens dismissible history", async ({ page }) => {
   await page.goto("/?run=r3");

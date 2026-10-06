@@ -12,7 +12,7 @@ export function PhasePopover({ phase, history = [] }: { phase: PhaseInfo; histor
       if (event.target instanceof Node && !root.current?.contains(event.target)) setOpen(false);
     };
     const escape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") { setOpen(false); trigger.current?.focus(); }
+      if (event.key === "Escape") { event.preventDefault(); setOpen(false); trigger.current?.focus(); }
     };
     document.addEventListener("pointerdown", outside);
     document.addEventListener("keydown", escape);
