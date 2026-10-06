@@ -10,6 +10,8 @@ const eventFromRow = (r: EventRow): StoredEvent => {
   return { ...r, payload };
 };
 
+export interface PhaseRow { run_id: string; phase: number; dag: Dag; remaining: string; status: string }
+
 export class Store {
   private db: Database.Database;
   private subs = new Set<(e: StoredEvent) => void>();
@@ -25,6 +27,7 @@ export class Store {
       CREATE UNIQUE INDEX IF NOT EXISTS bb_run_key_version ON bb_entries(run_id, key, version);
       CREATE TABLE IF NOT EXISTS task_status (run_id TEXT, task_id TEXT, status TEXT, detail TEXT, PRIMARY KEY (run_id, task_id));
       CREATE TABLE IF NOT EXISTS plans (run_id TEXT PRIMARY KEY, dag TEXT);
+      CREATE TABLE IF NOT EXISTS phases (run_id TEXT, phase INTEGER, dag TEXT, remaining TEXT, status TEXT, PRIMARY KEY (run_id, phase));
       CREATE TABLE IF NOT EXISTS reports (run_id TEXT, task_id TEXT, body TEXT NOT NULL, ts INTEGER, PRIMARY KEY (run_id, task_id));
     `);
   }
@@ -117,5 +120,32 @@ export class Store {
     const r = this.db.prepare("SELECT dag FROM plans WHERE run_id=?").get(runId) as { dag: string } | undefined;
     if (!r) return undefined;
     try { return JSON.parse(r.dag) as Dag; } catch { throw new Error(`corrupt plan for run ${runId}`); }
+  }
+
+  /** One planning phase: its own DAG, the text of the work left after it ("" = nothing), and its status. Upserts. `savePlan` keeps the UNION of all phases. */
+  savePhase(runId: string, phase: number, dag: Dag, remaining: string, status: string): void {
+    this.db.prepare("INSERT INTO phases (run_id, phase, dag, remaining, status) VALUES (?,?,?,?,?) ON CONFLICT(run_id,phase) DO UPDATE SET dag=excluded.dag, remaining=excluded.remaining, status=excluded.status")
+      .run(runId, phase, JSON.stringify(dag), remaining, status);
+  }
+  listPhases(runId: string): PhaseRow[] {
+    const rows = this.db.prepare("SELECT run_id, phase, dag, remaining, status FROM phases WHERE run_id=? ORDER BY phase").all(runId) as (Omit<PhaseRow, "dag"> & { dag: string })[];
+    return rows.map((r) => {
+      try { return { ...r, dag: JSON.parse(r.dag) as Dag }; } catch { throw new Error(`corrupt phase ${r.phase} for run ${runId}`); }
+    });
+  }
+  setPhaseStatus(runId: string, phase: number, status: string): void {
+    this.db.prepare("UPDATE phases SET status=? WHERE run_id=? AND phase=?").run(status, runId, phase);
+  }
+
+  /** Sum of input+output tokens of every `usage` event of the run (workers and planner calls). */
+  usageTokens(runId: string): number {
+    const rows = this.db.prepare("SELECT payload FROM events WHERE run_id=? AND type='usage'").all(runId) as { payload: string }[];
+    let total = 0;
+    for (const r of rows) {
+      let p: { input?: unknown; output?: unknown };
+      try { p = JSON.parse(r.payload) as typeof p; } catch { continue; }
+      for (const v of [p.input, p.output]) if (typeof v === "number" && Number.isFinite(v) && v > 0) total += v;
+    }
+    return total;
   }
 }

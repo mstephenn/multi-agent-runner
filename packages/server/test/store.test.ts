@@ -183,3 +183,62 @@ describe("Store reports", () => {
     expect(b.endsWith("…[truncated]")).toBe(true);
   });
 });
+
+describe("Store phases", () => {
+  const dag = (id: string) => ({ tasks: [{ id }] }) as any;
+  it("saves and lists phases in phase order, upserting on re-save", () => {
+    const s = mk();
+    s.savePhase("r1", 2, dag("p2-a"), "later", "planned");
+    s.savePhase("r1", 1, dag("p1-a"), "more", "planned");
+    expect(s.listPhases("r1").map((p) => p.phase)).toEqual([1, 2]);
+    expect(s.listPhases("r1")[0]).toEqual({ run_id: "r1", phase: 1, dag: dag("p1-a"), remaining: "more", status: "planned" });
+    s.savePhase("r1", 1, dag("p1-a"), "", "done");
+    expect(s.listPhases("r1")[0]).toMatchObject({ remaining: "", status: "done" });
+    expect(s.listPhases("r1")).toHaveLength(2);
+  });
+  it("setPhaseStatus updates only the status", () => {
+    const s = mk();
+    s.savePhase("r1", 1, dag("a"), "rem", "planned");
+    s.setPhaseStatus("r1", 1, "incomplete");
+    expect(s.listPhases("r1")[0]).toMatchObject({ status: "incomplete", remaining: "rem" });
+  });
+  it("is empty for a run without phases (old single-plan runs) and isolated per run", () => {
+    const s = mk(); s.createRun("r2", "g", "/x");
+    s.savePlan("r1", dag("a"));
+    expect(s.listPhases("r1")).toEqual([]);
+    s.savePhase("r2", 1, dag("a"), "", "planned");
+    expect(s.listPhases("r1")).toEqual([]);
+  });
+  it("throws on a corrupt phase dag", () => {
+    const f = mkdtempSync(join(tmpdir(), "mar-st-"));
+    try {
+      const path = join(f, "a.db");
+      const s = new Store(path); s.createRun("r1", "g", "/r"); s.close();
+      const db = new Database(path);
+      db.prepare("INSERT INTO phases VALUES ('r1',1,'{nope','', 'planned')").run(); db.close();
+      const again = new Store(path);
+      expect(() => again.listPhases("r1")).toThrow(/corrupt phase/);
+      again.close();
+    } finally { rmSync(f, { recursive: true, force: true }); }
+  });
+  it("opens a database created before the phases table existed", () => {
+    const f = mkdtempSync(join(tmpdir(), "mar-st-"));
+    try {
+      const path = join(f, "old.db");
+      const db = new Database(path);
+      db.exec("CREATE TABLE runs (id TEXT PRIMARY KEY, goal TEXT, repo TEXT, created INTEGER); CREATE TABLE plans (run_id TEXT PRIMARY KEY, dag TEXT);");
+      db.prepare("INSERT INTO plans VALUES ('r1', ?)").run(JSON.stringify(dag("a"))); db.close();
+      const s = new Store(path);
+      expect(s.listPhases("r1")).toEqual([]);
+      expect(s.loadPlan("r1")).toEqual(dag("a"));
+      s.close();
+    } finally { rmSync(f, { recursive: true, force: true }); }
+  });
+  it("usageTokens sums input+output of usage events of one run (nulls and junk count as 0)", () => {
+    const s = mk(); s.createRun("r2", "g", "/x");
+    const ev = (run: string, payload: Record<string, unknown>, type: "usage" | "task_started" = "usage") => s.appendEvent({ run_id: run, task_id: null, agent_id: null, type, payload });
+    ev("r1", { input: 10, output: 5 }); ev("r1", { input: null, output: 7 }); ev("r1", { input: "x" }); ev("r1", { input: 100 }, "task_started"); ev("r2", { input: 999, output: 1 });
+    expect(s.usageTokens("r1")).toBe(22);
+    expect(s.usageTokens("none")).toBe(0);
+  });
+});
