@@ -219,6 +219,8 @@ One project can span several git repositories side by side in a parent folder (f
 
 ## Tests
 
+GitHub Actions runs `pnpm install --frozen-lockfile`, `pnpm typecheck`, and `pnpm test` on pushes to `main` and on pull requests, using Node.js 22 and pnpm 10 with a cached pnpm store. Use the stable job name `CI` as the required status check in branch protection. Browser e2e and live tests remain opt-in.
+
 ```bash
 pnpm typecheck
 pnpm exec vitest run           # unit and integration tests (also: pnpm test)
