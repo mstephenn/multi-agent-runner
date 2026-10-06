@@ -1,6 +1,6 @@
 import { WRITER_ROLES, type Dag, type TaskSpec } from "@mar/core";
 import type { Store } from "../../server/src/store.js";
-import { buildHistory, type HistoryIntegration, type HistoryPhase, type HistoryTask } from "./history.js";
+import { buildHistory, type HistoryDepConflict, type HistoryIntegration, type HistoryPhase, type HistoryPredicted, type HistoryTask, type HistoryUnmerged } from "./history.js";
 import type { IntegrateResult } from "./integrate.js";
 import type { Plan } from "./planner.js";
 import { redact } from "./redact.js";
@@ -21,6 +21,8 @@ export interface PhaseLimits {
 export interface PhasePlanArgs {
   phase: number; maxTasks: number;
   previousRemaining: string; history: string;
+  /** Re-plan after a phase with failed/blocked tasks or a stopped integration (the planner said nothing remained). */
+  recovery: boolean;
   takenIds: ReadonlySet<string>; externalIds: ReadonlySet<string>;
   /** Existing integration branch (phase >= 2), if any: what the repo map should describe. */
   integrationBranch?: string;
@@ -44,7 +46,7 @@ export interface PhasesDeps {
 
 /** `integration` is the (last) integration outcome of the phase; `integrations` lists every one (one per repo in a workspace run). */
 export interface PhaseRec { phase: number; dag: Dag; remaining: string; integration?: IntegrationOutcome; integrations?: IntegrationOutcome[] }
-export type StopReason = "max_phases" | "max_tokens" | "no_progress" | "aborted" | "replan_failed";
+export type StopReason = "max_phases" | "max_tokens" | "no_progress" | "aborted" | "replan_failed" | "recovery_stalled";
 export interface PhaseStop { reason: StopReason; message: string }
 export interface PhasesResult {
   phases: PhaseRec[];
@@ -57,6 +59,30 @@ export interface PhasesResult {
   stop?: PhaseStop;
   /** The most recent integration attempt, if any. */
   integration?: IntegrationOutcome;
+}
+
+const isIntegrationStuck = (i: IntegrationOutcome): boolean => i.error !== undefined || i.result?.conflict !== undefined || (i.result?.verify !== undefined && !i.result.verify.ok);
+const normGoal = (g: string) => g.toLowerCase().replace(/\s+/g, " ").trim();
+const strList = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
+
+export interface StallPhase { phase: number; remaining: string; tasks: { id: string; goal: string; repo?: string; paths: readonly string[]; status: string }[] }
+/**
+ * Whether the LAST of `phases` is a recovery phase (planned after one that said nothing remained) that went nowhere:
+ * it finished no task, or one of its failed tasks is goal-equivalent (same goal, or same repo and paths) to a failed task
+ * of the recovery phase before it. Returns the message, or undefined.
+ */
+export function recoveryStall(phases: readonly StallPhase[]): string | undefined {
+  const i = phases.length - 1;
+  const isRec = (k: number) => k > 0 && phases[k - 1]!.remaining === "";
+  if (!isRec(i)) return undefined;
+  const cur = phases[i]!;
+  if (cur.tasks.length > 0 && !cur.tasks.some((t) => t.status === "done")) return `recovery phase ${cur.phase} finished no task, so another recovery would repeat it`;
+  if (!isRec(i - 1)) return undefined;
+  const sig = (t: StallPhase["tasks"][number]) => (t.paths.length ? `${t.repo ?? ""}|${[...t.paths].sort().join(",")}` : undefined);
+  for (const t of cur.tasks.filter((x) => x.status === "failed"))
+    for (const u of phases[i - 1]!.tasks.filter((x) => x.status === "failed"))
+      if (normGoal(t.goal) === normGoal(u.goal) || (sig(t) !== undefined && sig(t) === sig(u))) return `${u.id} and ${t.id} are the same work and both failed in consecutive recovery phases (failed again)`;
+  return undefined;
 }
 
 /** Tasks in dependency order (dependencies first, plan order otherwise). Cycle-safe. */
@@ -115,6 +141,16 @@ export async function runPhases(d: PhasesDeps): Promise<PhasesResult> {
     lastIntegration = outcome;
     if (outcome.result) { integrationBranch = outcome.result.branch; integratedRepos.add(outcome.repo ?? ""); }
   }
+
+  // A phase planned after one that said "nothing remains" can only be a recovery from failures (a normal next phase needs remaining work).
+  const isRecovery = (idx: number) => idx > 0 && phases[idx - 1].remaining === "";
+  // The latest integration outcome per repo, across phases: a stuck one (conflict, failed verify, error) still needs fixing.
+  const integrationStuck = () => {
+    const latest = new Map<string, IntegrationOutcome>();
+    for (const p of phases) for (const i of p.integrations ?? (p.integration ? [p.integration] : [])) latest.set(i.repo ?? "", i);
+    return [...latest.values()].some(isIntegrationStuck);
+  };
+  const hasFailures = (rec: PhaseRec) => rec.dag.tasks.some((t) => results[t.id] === "failed" || results[t.id] === "blocked") || integrationStuck();
 
   const planned = () => ({ tasks: phases.flatMap((p) => p.dag.tasks) });
   const doneCount = (r: PhaseRec) => r.dag.tasks.filter((t) => results[t.id] === "done").length;
@@ -179,6 +215,9 @@ export async function runPhases(d: PhasesDeps): Promise<PhasesResult> {
   // What to stop on after a phase ran: abort, or no task finished while work remains (re-planning would just repeat).
   const afterPhase = (rec: PhaseRec): PhaseStop | undefined => {
     if (aborted()) return { reason: "aborted", message: "the run was stopped" };
+    const idx = phases.indexOf(rec);
+    const stalled = recoveryStall(phases.slice(0, idx + 1).map((p) => ({ phase: p.phase, remaining: p.remaining, tasks: p.dag.tasks.map((t) => ({ id: t.id, goal: t.goal, ...(t.repo ? { repo: t.repo } : {}), paths: t.paths, status: results[t.id] ?? "not-run" })) })));
+    if (stalled) return { reason: "recovery_stalled", message: stalled };
     if (doneCount(rec) === 0 && rec.remaining !== "") return { reason: "no_progress", message: `phase ${rec.phase} finished no task, so re-planning would repeat it` };
     return undefined;
   };
@@ -215,6 +254,40 @@ export async function runPhases(d: PhasesDeps): Promise<PhasesResult> {
       };
     });
     const last = hist.at(-1);
+    // Recovery context: events recorded by the scheduler, and done writer branches the integration branch does not contain.
+    const phaseOf = (taskId: string) => phases.find((p) => p.dag.tasks.some((t) => t.id === taskId))?.phase;
+    const at = (n: number | undefined) => hist.find((h) => h.phase === n);
+    let events: ReturnType<Store["eventsOfType"]> = [];
+    try { events = store.eventsOfType(runId, ["dependency_merge_conflict", "predicted_conflict"]); } catch { /* optional context */ }
+    for (const e of events) {
+      const pl = e.payload;
+      if (e.type === "dependency_merge_conflict" && typeof pl.task === "string" && typeof pl.dependency === "string") {
+        const h = at(phaseOf(pl.task));
+        const c: HistoryDepConflict = { task: pl.task, dependency: pl.dependency, ...(typeof pl.repo === "string" ? { repo: pl.repo } : {}), files: strList(pl.files) };
+        if (h) (h.depConflicts ??= []).push(c);
+      } else if (e.type === "predicted_conflict") {
+        const tasks = strList(pl.tasks);
+        const h = at(phaseOf(tasks[0] ?? ""));
+        const c: HistoryPredicted = { tasks, files: strList(pl.files) };
+        if (h && tasks.length) (h.predicted ??= []).push(c);
+      }
+    }
+    if (last && d.integrate) {
+      const outcomes = phases.flatMap((p) => p.integrations ?? (p.integration ? [p.integration] : []));
+      const merged = new Set(outcomes.flatMap((o) => o.result?.merged ?? []));
+      const conflictAt = new Map(outcomes.flatMap((o) => (o.result?.conflict ? [[o.result.conflict.branch, o.result.conflict.files] as const] : [])));
+      const unmerged: HistoryUnmerged[] = [];
+      for (const p of phases) for (const id of topoOrder(p.dag)) {
+        const t = p.dag.tasks.find((x) => x.id === id)!;
+        if (!WRITER_ROLES.has(t.role) || results[id] !== "done") continue;
+        if (t.repo && d.integrates && !d.integrates(t.repo)) continue;
+        const branch = `mar/${runId}/${id}`;
+        if (merged.has(branch)) continue;
+        const files = conflictAt.get(branch);
+        unmerged.push({ task: id, branch, ...(t.repo ? { repo: t.repo } : {}), ...(files ? { conflictFiles: files } : {}) });
+      }
+      if (unmerged.length) last.unmerged = unmerged;
+    }
     if (d.diffStat) {
       for (const i of last?.integrations ?? (last?.integration ? [last.integration] : [])) {
         if (!i.branch) continue;
@@ -225,8 +298,9 @@ export async function runPhases(d: PhasesDeps): Promise<PhasesResult> {
   }
 
   // --- 1. replay stored phases that are not finished (resume) -------------------------------------------------------
-  for (const rec of phases.slice()) {
+  for (const [i, rec] of phases.slice().entries()) {
     if (allDone(rec) && rec.dag.tasks.length > 0) continue;
+    if (i + 1 < phases.length && isRecovery(i + 1)) continue; // a recovery phase was planned after it: its failures were handed over, never re-run them
     stop = guard(rec.phase);
     if (stop) break;
     await execute(rec);
@@ -237,7 +311,10 @@ export async function runPhases(d: PhasesDeps): Promise<PhasesResult> {
   // --- 2. plan and run further phases --------------------------------------------------------------------------------
   while (!stop) {
     const last = phases.at(-1);
-    if (last && last.remaining === "") break; // the planner already said this phase completes the goal
+    const failures = last !== undefined && hasFailures(last);
+    // The planner said this phase completes the goal: done, unless it ended with failures or a stuck integration.
+    const recovery = failures && last!.remaining === "" && !aborted();
+    if (last && last.remaining === "" && !recovery) break;
     const phase = (last?.phase ?? 0) + 1;
     if (last) {
       if (aborted()) { stop = { reason: "aborted", message: "the run was stopped" }; break; }
@@ -248,7 +325,7 @@ export async function runPhases(d: PhasesDeps): Promise<PhasesResult> {
       if (stop) break;
     }
     const args: PhasePlanArgs = {
-      phase, maxTasks: limits.maxTasks, previousRemaining: last?.remaining ?? "",
+      phase, maxTasks: limits.maxTasks, previousRemaining: last?.remaining ?? "", recovery: failures,
       history: last ? await historyFor() : "",
       takenIds: new Set(phases.flatMap((p) => p.dag.tasks.map((t) => t.id))),
       externalIds: new Set(phases.flatMap((p) => p.dag.tasks.filter((t) => results[t.id] === "done").map((t) => t.id))),
@@ -261,6 +338,10 @@ export async function runPhases(d: PhasesDeps): Promise<PhasesResult> {
       try { plan = await d.plan(args); }
       catch (e) {
         stop = aborted() ? { reason: "aborted", message: "the run was stopped while re-planning" } : { reason: "replan_failed", message: `re-planning failed: ${msg(e)}` };
+        break;
+      }
+      if (plan.tasks.length === 0 && recovery) { // nothing planned although the last phase has unresolved failures
+        stop = { reason: "recovery_stalled", message: `the planner proposed no recovery work although phase ${last.phase} has unresolved failures` };
         break;
       }
       if (plan.tasks.length === 0) { // the planner says the goal is done
@@ -280,6 +361,8 @@ export async function runPhases(d: PhasesDeps): Promise<PhasesResult> {
   const lastPhase = phases.at(-1);
   const remaining = lastPhase?.remaining ?? "";
   const tasks = phases.flatMap((p) => p.dag.tasks);
-  const complete = !stop && remaining === "" && tasks.length > 0 && tasks.every((t) => results[t.id] === "done");
+  // Failures of earlier phases are superseded when the final phase is a recovery phase that finished everything.
+  const recovered = lastPhase !== undefined && isRecovery(phases.length - 1) && allDone(lastPhase);
+  const complete = !stop && remaining === "" && tasks.length > 0 && (recovered || tasks.every((t) => results[t.id] === "done"));
   return { phases, results, remaining, complete, ...(stop ? { stop } : {}), ...(lastIntegration ? { integration: lastIntegration } : {}) };
 }

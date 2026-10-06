@@ -221,3 +221,26 @@ describe("repoMap errors and prompt wording", () => {
     expect(f.calls[0]!.prompt).toContain("complete, well-structured answer with file references");
   });
 });
+
+describe("planner shared-file discipline", () => {
+  const RULE = /must be owned by exactly ONE task/;
+  const promptOf = async (extra: object) => {
+    const ph = (extra as { phase?: number }).phase ?? 1;
+    const f = fakeAdapter(() => [{ type: "result", text: JSON.stringify({ tasks: [{ id: `p${ph}-a`, role: "researcher", runtime: "claude", tier: "low", goal: "x" }] }) }]);
+    await planGoal({ goal: "g", repoMap: "a.ts", adapter: f.adapter, model: null, cwd: "/r", ...extra });
+    return f.calls[0].prompt;
+  };
+  it.each([["phase 1", {}], ["workspace", { workspace: ["api", "web"] }]])("%s prompt carries the shared-file rule", async (_n, extra) => {
+    const p = await promptOf(extra);
+    expect(p).toMatch(RULE);
+    expect(p).toContain("their OWN new test files");
+    expect(p).toContain("If two tasks must touch the same file, order them with dependsOn");
+  });
+  it("a re-plan prompt carries the rule and, after failures, the recovery instruction", async () => {
+    const normal = await promptOf({ phase: 2, previousRemaining: "more" });
+    expect(normal).toMatch(RULE);
+    expect(normal).not.toContain("The previous phase had failures.");
+    const rec = await promptOf({ phase: 2, recovery: true, previousRemaining: "" });
+    expect(rec).toContain("The previous phase had failures. Plan ONLY the work needed to finish the goal: fix or finish failed tasks, re-apply unmerged branches on top of the integration branch tip, resolve the listed conflicts (one task owns each conflicted file), and re-verify. Do not redo tasks that are done and merged. Prefer serialising tasks that touch the same files.");
+  });
+});

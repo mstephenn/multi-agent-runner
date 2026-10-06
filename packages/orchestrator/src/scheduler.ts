@@ -3,7 +3,7 @@ import type { Adapter } from "@mar/adapters";
 import type { Store } from "../../server/src/store.js";
 import { BudgetTracker } from "./budget.js";
 import { buildPrompt, type WorkspacePrompt } from "./prompt.js";
-import type { CreateCtx } from "./worktree.js";
+import { DependencyMergeConflict, type CreateCtx } from "./worktree.js";
 import { injectSlices, publishResult } from "./blackboard.js";
 import { redact } from "./redact.js";
 import { usesSharedWorktree } from "./readonly.js";
@@ -142,6 +142,30 @@ async function runDagInner(d: RunDeps): Promise<Record<string, Outcome>> {
   };
 
   const startShaOf = new Map<string, string>();
+  // Runtime conflict prediction: parallel writers (no dependency path between them, same repo) that stray into the same file.
+  const strays = new Map<string, string[]>();
+  const predictedPairs = new Set<string>();
+  const reaches = (from: string, to: string, seen = new Set<string>()): boolean => {
+    if (seen.has(from)) return false;
+    seen.add(from);
+    return (byId.get(from)?.dependsOn ?? []).some((x) => x === to || reaches(x, to, seen));
+  };
+  function predictConflicts(task: TaskSpec, outside: string[]) {
+    strays.set(task.id, outside);
+    for (const other of byId.values()) {
+      if (other.id === task.id || !WRITER_ROLES.has(other.role) || other.repo !== task.repo) continue;
+      if (reaches(task.id, other.id) || reaches(other.id, task.id)) continue;
+      const pair = [task.id, other.id].sort();
+      if (predictedPairs.has(pair.join("\0"))) continue;
+      const theirs = strays.get(other.id) ?? [];
+      const files = new Set<string>();
+      for (const f of outside) if (theirs.includes(f) || (other.paths.length > 0 && matchesAnyGlob(f, other.paths))) files.add(f);
+      for (const f of theirs) if (task.paths.length > 0 && matchesAnyGlob(f, task.paths)) files.add(f);
+      if (files.size === 0) continue;
+      predictedPairs.add(pair.join("\0"));
+      bestEffort(() => emit(task, "predicted_conflict", { tasks: pair, files: [...files].slice(0, MAX_VIOLATION_FILES).map(redact) }));
+    }
+  }
   // Post-hoc path ownership: files this writer changed (committed) outside every declared glob.
   async function checkOwnership(task: TaskSpec, startSha: string | undefined) {
     if (task.paths.length === 0 || startSha === undefined || !d.worktrees.changedFiles) return;
@@ -151,6 +175,7 @@ async function runDagInner(d: RunDeps): Promise<Record<string, Outcome>> {
     catch (e) { if (enforce) throw e; return; } // advisory mode never fails a task over bookkeeping
     if (outside.length === 0) return;
     emit(task, "ownership_violation", { files: outside.slice(0, MAX_VIOLATION_FILES).map(redact), count: outside.length, paths: task.paths, enforced: enforce });
+    predictConflicts(task, outside);
     if (enforce)
       throw new TaskFailure("failed:ownership", true,
         `\n\nYou changed files outside your declared paths (${task.paths.join(", ")}): ${outside.slice(0, 20).map(redact).join(", ")}. Only change files matching your paths.`);
@@ -196,9 +221,17 @@ async function runDagInner(d: RunDeps): Promise<Record<string, Outcome>> {
     emit(task, "prompt_sent", { prompt: redact(prompt), keys: slices.map((s) => s.key), tokens: estimateTokens(prompt), runtime: task.runtime });
     if (ws && !shared && task.repo === undefined) throw new TaskFailure("failed:no-repo", false);
     if (siblingNames.length > 0) sharedUsedOf.set(d, true); // the sibling symlinks point into the shared view: release it at the end of the run
-    const cwd = shared ? await acquireShared()
-      : ws ? await d.worktrees.create(task.id, sameRepoDeps(task), { repo: task.repo, siblings: siblingNames.length > 0, ...(siblingNames.length > 0 ? { siblingDeps: siblingDepsOf(task) } : {}) })
-      : await d.worktrees.create(task.id, task.dependsOn);
+    let cwd: string;
+    try {
+      cwd = shared ? await acquireShared()
+        : ws ? await d.worktrees.create(task.id, sameRepoDeps(task), { repo: task.repo, siblings: siblingNames.length > 0, ...(siblingNames.length > 0 ? { siblingDeps: siblingDepsOf(task) } : {}) })
+        : await d.worktrees.create(task.id, task.dependsOn);
+    } catch (e) {
+      if (!(e instanceof DependencyMergeConflict)) throw e;
+      // Not retryable: the same merge would conflict again. The files go to the event and the re-planner's history.
+      bestEffort(() => emit(task, "dependency_merge_conflict", { task: task.id, dependency: e.dependency, ...(e.repo ? { repo: e.repo } : {}), files: e.files.slice(0, MAX_VIOLATION_FILES).map(redact) }));
+      throw new TaskFailure(e.message, false);
+    }
     const extraDirs = siblingNames.length > 0 ? d.worktrees.siblingDirs?.(task.id) ?? [] : [];
     const ac = new AbortController();
     const onAbort = () => ac.abort();

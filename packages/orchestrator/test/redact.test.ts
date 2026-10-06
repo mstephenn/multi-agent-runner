@@ -1,5 +1,15 @@
 import { describe, it, expect } from "vitest";
 import { redact } from "../src/index.js";
+// Wall-clock limits are flaky on slow CI runners. Linearity is checked by growth instead: a linear scan takes ~4x as long
+// for 4x the input, a quadratic one ~16x (and the old URL pattern took seconds). Best-of-3 and a small constant absorb jitter.
+const bestMs = (fn: () => void): number => { let best = Infinity; for (let i = 0; i < 3; i++) { const t = performance.now(); fn(); best = Math.min(best, performance.now() - t); } return best; };
+const expectLinear = (unit: string, redactFn: (s: string) => string): void => {
+  const small = unit.repeat(10_000), big = unit.repeat(40_000);
+  redactFn(small); // warm up
+  const tSmall = bestMs(() => redactFn(small)), tBig = bestMs(() => redactFn(big));
+  expect(tBig).toBeLessThan(tSmall * 10 + 25); // linear ~4x, quadratic ~16x (25 ms absorbs timer jitter)
+};
+
 describe("redact", () => {
   it("masks common secret shapes", () => {
     const out = redact("key sk-abc1234567890abcdef ghp_abcdefghijklmnopqrstuvwxyz0123456789 AKIAABCDEFGHIJKLMNOP Bearer abc.def.ghi DB_PASSWORD=hunter2 name=bob");
@@ -54,13 +64,8 @@ describe("redact hardening", () => {
     expect(r("postgres://user:p@ss@host/db")).toBe("postgres://[REDACTED]@host/db");
     expect(r("ssh://u:pw@h")).toBe("ssh://[REDACTED]@h");
   });
-  it("is linear on long adversarial inputs (<200ms)", () => {
-    for (const unit of ["a.", "a-", "a://a:", "a=", "A_"]) {
-      const big = unit.repeat(50_000);
-      const t = performance.now();
-      redact(big);
-      expect(performance.now() - t).toBeLessThan(200);
-    }
+  it("is linear on long adversarial inputs", () => {
+    for (const unit of ["a.", "a-", "a://a:", "a=", "A_"]) expectLinear(unit, redact);
   });
   it("leaves more benign near-misses unchanged", () => {
     for (const x of ["tokenizer: bpe", "secretary=bob", "a.b.c://x", "key=value", "private=1", "my-key: 5"]) expect(r(x)).toBe(x);
@@ -95,12 +100,7 @@ describe("redact gaps (M1)", () => {
     expect(out).not.toContain("dXNlcjpw");
     expect(out).toContain("Authorization");
   });
-  it("stays linear on adversarial input for the new patterns (<200ms)", () => {
-    for (const unit of ["eyJabcde.", "sk_live_", "Basic ", "A_KEY", "pass="]) {
-      const big = unit.repeat(20_000);
-      const t = performance.now();
-      redact(big);
-      expect(performance.now() - t).toBeLessThan(200);
-    }
+  it("stays linear on adversarial input for the new patterns", () => {
+    for (const unit of ["eyJabcde.", "sk_live_", "Basic ", "A_KEY", "pass="]) expectLinear(unit, redact);
   });
 });

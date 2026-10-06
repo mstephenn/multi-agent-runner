@@ -1,6 +1,6 @@
 import { rm, rmdir, symlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { IDENT, SAFE, branchExists, createWorktrees, discardWorktree, git, ok, type CreateCtx, type Worktrees } from "./worktree.js";
+import { DependencyMergeConflict, IDENT, SAFE, branchExists, conflictedFiles, createWorktrees, discardWorktree, git, ok, type CreateCtx, type Worktrees } from "./worktree.js";
 import type { WorkspaceRepo } from "./workspace.js";
 
 const MAX_SIBLING_FILES = 50;
@@ -98,7 +98,12 @@ export function createWorkspaceWorktrees(root: string, runId: string, repos: rea
           const depBranch = `mar/${runId}/${dep}`;
           if (!(await branchExists(depBranch, r.path))) throw new Error(`sibling repo ${r.name}: dependency ${dep}: branch ${depBranch} not found`);
           try { await git([...IDENT, "merge", "--no-edit", depBranch], dir); }
-          catch (e) { await ok(["merge", "--abort"], dir); throw new Error(`sibling repo ${r.name}: dependency ${dep}: merge into the sibling view of ${taskId} failed: ${(e as Error).message}`); }
+          catch (e) {
+            const files = await conflictedFiles(dir);
+            await ok(["merge", "--abort"], dir);
+            if (files.length > 0) throw new DependencyMergeConflict(taskId, dep, files, r.name);
+            throw new Error(`sibling repo ${r.name}: dependency ${dep}: merge into the sibling view of ${taskId} failed: ${(e as Error).message}`);
+          }
         }
       } catch (e) { await discardWorktree(r.path, dir); throw e; }
       return dir;

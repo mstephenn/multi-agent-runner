@@ -750,3 +750,51 @@ describe("runDag ownership across retries", () => {
     expect(seen).toEqual(["sha1", "sha1"]);
   });
 });
+
+describe("runDag dependency merge conflicts and predicted conflicts", () => {
+  const ev = (store: Store, type: string) => store.listEvents("r").filter((e) => e.type === type);
+  it("a DependencyMergeConflict from create fails the task with a readable detail, emits dependency_merge_conflict once (no retry) and blocks dependents", async () => {
+    const { DependencyMergeConflict } = await import("../src/worktree.js");
+    let creates = 0;
+    const files = Array.from({ length: 60 }, (_, i) => `src/f${i}.ts`);
+    const worktrees = {
+      create: async (id: string, deps: string[] = []) => { creates++; if (id === "c") throw new DependencyMergeConflict("c", deps[1]!, files); return `/wt/${id}`; },
+      remove: async () => {}, commit: async () => {},
+    };
+    const { store, deps } = harness([T("a"), T("b"), T("c", { dependsOn: ["a", "b"], paths: [] }), T("d", { dependsOn: ["c"], paths: [] })], () => ok(), { worktrees, maxAttempts: 3 });
+    expect(await runDag(deps)).toEqual({ a: "done", b: "done", c: "failed", d: "blocked" });
+    expect(creates).toBe(3); // a, b, c once: not retried
+    const detail = store.taskStatuses("r").find((s) => s.task_id === "c")!.detail!;
+    expect(detail).toMatch(/^dependency b: merge conflict in src\/f0\.ts/);
+    expect(detail.length).toBeLessThanOrEqual(300);
+    const e = ev(store, "dependency_merge_conflict");
+    expect(e).toHaveLength(1);
+    expect(e[0].payload).toMatchObject({ task: "c", dependency: "b" });
+    expect((e[0].payload.files as string[])).toHaveLength(50);
+  });
+  const withChanged = (changed: Record<string, string[]>) => ({
+    worktrees: { create: async (id: string) => `/wt/${id}`, remove: async () => {}, commit: async () => {}, head: async () => "sha", changedFiles: async (id: string) => changed[id] ?? [] },
+  });
+  it("emits predicted_conflict once per pair when two parallel writers both stray into the same file", async () => {
+    const over = withChanged({ a: ["a/x.ts", "shared.txt"], b: ["b/y.ts", "shared.txt", "other.css"], c: ["c/z.ts", "shared.txt"] });
+    const { store, deps } = harness([T("a"), T("b"), T("c")], () => ok(), { ...over, concurrency: 3 });
+    await runDag(deps);
+    const e = ev(store, "predicted_conflict").map((x) => ({ tasks: [...(x.payload.tasks as string[])].sort(), files: x.payload.files }));
+    expect(e.sort((p, q) => p.tasks.join().localeCompare(q.tasks.join()))).toEqual([
+      { tasks: ["a", "b"], files: ["shared.txt"] }, { tasks: ["a", "c"], files: ["shared.txt"] }, { tasks: ["b", "c"], files: ["shared.txt"] },
+    ]);
+    expect(ev(store, "ownership_violation")).toHaveLength(3);
+  });
+  it("also predicts when a violation lands inside the other task's declared paths", async () => {
+    const over = withChanged({ a: ["a/x.ts", "b/stolen.ts"] });
+    const { store, deps } = harness([T("a"), T("b")], () => ok(), { ...over });
+    await runDag(deps);
+    expect(ev(store, "predicted_conflict").map((x) => x.payload)).toEqual([{ tasks: ["a", "b"], files: ["b/stolen.ts"] }]);
+  });
+  it("no prediction for ordered tasks or disjoint violations", async () => {
+    const over = withChanged({ a: ["a/x.ts", "s.txt"], b: ["b/y.ts", "s.txt"], c: ["c/q.ts", "own.txt"], d: ["d/q.ts", "own2.txt"] });
+    const { store, deps } = harness([T("a"), T("b", { dependsOn: ["a"] }), T("c"), T("d")], () => ok(), { ...over });
+    await runDag(deps);
+    expect(ev(store, "predicted_conflict")).toEqual([]);
+  });
+});

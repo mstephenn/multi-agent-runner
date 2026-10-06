@@ -19,6 +19,9 @@ const badPath = (p: string): string | null => {
   return null;
 };
 
+// Well-known files nearly every change touches; two parallel writers listing the same one is a conflict waiting to happen.
+const SHARED_FILE = /^(package\.json|pnpm-lock\.yaml|package-lock\.json|yarn\.lock|tsconfig[^/]*\.json|README\.md)$/;
+
 export interface ParseDagOpts {
   /** Ids of tasks finished in EARLIER phases: their blackboard keys may be listed in `needs` without a `dependsOn`. */
   external?: ReadonlySet<string>;
@@ -98,7 +101,7 @@ export function parseDag(input: unknown, opts: ParseDagOpts = {}): Dag {
         throw new DagError(`tasks ${a.id} and ${b.id} can run in parallel but ${missing.join(" and ")} declare${missing.length === 1 ? "s" : ""} no paths: list repo-relative paths, or make one depend on the other`);
       for (const pa of a.paths) for (const pb of b.paths)
         if (globsOverlap(pa, pb))
-          throw new DagError(`tasks ${a.id} and ${b.id} can run in parallel but their paths overlap (${pa} vs ${pb}): make paths disjoint or make one depend on the other`);
+          throw new DagError(`tasks ${a.id} and ${b.id} can run in parallel but their paths overlap (${pa} vs ${pb}): ${pa === pb && SHARED_FILE.test(pa) ? "shared file; give it to one task or order them" : "make paths disjoint or make one depend on the other"}`);
     }
   return dag;
 }

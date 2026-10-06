@@ -98,3 +98,16 @@ describe("parseDag external (earlier-phase) needs", () => {
     expect(() => parseDag({ tasks: [t("a", { phase: 0 })] })).toThrow();
   });
 });
+
+describe("shared files between parallel writers", () => {
+  const w = (id: string, paths: string[]) => ({ id, role: "implementer", runtime: "claude", tier: "mid", goal: "x", paths });
+  it.each(["package.json", "pnpm-lock.yaml", "package-lock.json", "yarn.lock", "tsconfig.json", "tsconfig.build.json", "README.md"])("rejects %s listed by two parallel writers with the shared-file hint", (f) => {
+    expect(() => parseDag({ tasks: [w("a", [f, "a/**"]), w("b", [f, "b/**"])] })).toThrow(/shared file; give it to one task or order them/);
+  });
+  it("allows the shared file when only one parallel writer lists it", () => {
+    expect(() => parseDag({ tasks: [w("a", ["package.json", "a/**"]), w("b", ["b/**"])] })).not.toThrow();
+  });
+  it("allows it when the writers are ordered", () => {
+    expect(() => parseDag({ tasks: [w("a", ["README.md"]), { ...w("b", ["README.md"]), dependsOn: ["a"] }] })).not.toThrow();
+  });
+});
