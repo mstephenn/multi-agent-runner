@@ -32,7 +32,7 @@ const decode = (s: string): string | undefined => {
   try { const d = decodeURIComponent(s); return d.includes("\0") ? undefined : d; } catch { return undefined; }
 };
 
-export async function startServer(store: Store, opts: { port: number; staticDir?: string; onStop?: (runId: string) => void }) {
+export async function startServer(store: Store, opts: { port: number; staticDir?: string; onStop?: (runId: string) => void; readOnly?: boolean }) {
   let port = 0;
   // Local-only server that any web page in the user's browser can reach: pin Host (DNS rebinding) and Origin (CSRF/CSWSH).
   const hostOk = (req: IncomingMessage) => {
@@ -68,6 +68,7 @@ export async function startServer(store: Store, opts: { port: number; staticDir?
   const handle = (req: IncomingMessage, res: ServerResponse) => {
     if (!hostOk(req)) return json(res, 403, { error: "forbidden host" });
     const [pathname = "/", query = ""] = (req.url ?? "/").split("?", 2);
+    if (pathname === "/api/meta") return req.method === "GET" ? json(res, 200, { readOnly: opts.readOnly === true }) : status(res, 405);
     if (pathname === "/api/runs") return req.method === "GET" ? json(res, 200, store.listRuns()) : status(res, 405);
     const m = pathname.match(/^\/api\/runs\/([^/]+)(\/stop)?$/);
     if (!m) return serveStatic(req, res, pathname);
@@ -75,6 +76,7 @@ export async function startServer(store: Store, opts: { port: number; staticDir?
     if (id === undefined || !RUN_ID.test(id)) return json(res, 400, { error: "invalid run id" });
     if (m[2]) {
       if (req.method !== "POST") return status(res, 405);
+      if (opts.readOnly) return json(res, 405, { error: "read-only history view" });
       if (!originOk(req)) return json(res, 403, { error: "forbidden origin" });
       if (req.headers["x-mar"] !== "1") return json(res, 403, { error: "missing x-mar header" });
       if (!store.hasRun(id)) return json(res, 404, { error: "unknown run" });
