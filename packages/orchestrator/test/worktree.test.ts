@@ -419,4 +419,30 @@ describe("dependency merge conflicts", () => {
     expect(g(repo, "worktree", "list", "--porcelain").split("\n").filter((l) => l.startsWith("worktree "))).toHaveLength(1);
     expect(g(repo, "status", "--porcelain")).toBe("");
   });
+  describe("resolveConflicts", () => {
+    it("leaves the conflicted merge in the worktree; commit refuses markers, then accepts a resolved merge with every dependency merged", async () => {
+      const w = createWorktrees(repo, "run1", { resolveConflicts: true });
+      await branchWith(w, "a", "shared.txt", "from a\n");
+      await branchWith(w, "b", "shared.txt", "from b\n");
+      await branchWith(w, "d", "other.txt", "from d\n");
+      const dir = await w.create("c", ["a", "b", "d"]);
+      expect(w.pendingMerges!("c")).toEqual({ branch: "mar/run1/b", files: ["shared.txt"], remaining: ["mar/run1/d"] });
+      await expect(w.commit("c", "m")).rejects.toThrow(/unresolved merge conflict in shared.txt/);
+      writeFileSync(join(dir, "shared.txt"), "from a\nfrom b\n");
+      g(dir, "add", "shared.txt");
+      writeFileSync(join(dir, "mine.txt"), "x");
+      await expect(w.commit("c", "m")).rejects.toThrow(/mar\/run1\/d was not merged/); // d never merged
+      g(dir, "-c", "user.name=t", "-c", "user.email=t@t", "merge", "--no-edit", "mar/run1/d");
+      await w.commit("c", "m");
+      expect(readFileSync(join(dir, "shared.txt"), "utf8")).toBe("from a\nfrom b\n");
+    });
+    it("a left-in conflict marker (even after git add) fails the commit", async () => {
+      const w = createWorktrees(repo, "run1", { resolveConflicts: true });
+      await branchWith(w, "a", "shared.txt", "from a\n");
+      await branchWith(w, "b", "shared.txt", "from b\n");
+      const dir = await w.create("c", ["a", "b"]);
+      g(dir, "add", "shared.txt"); // markers still inside
+      await expect(w.commit("c", "m")).rejects.toThrow(/unresolved merge conflict/);
+    });
+  });
 });

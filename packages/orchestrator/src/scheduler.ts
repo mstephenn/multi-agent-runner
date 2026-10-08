@@ -3,7 +3,7 @@ import type { Adapter } from "@mar/adapters";
 import type { Store } from "../../server/src/store.js";
 import { BudgetTracker } from "./budget.js";
 import { buildPrompt, type WorkspacePrompt } from "./prompt.js";
-import { DependencyMergeConflict, type CreateCtx } from "./worktree.js";
+import { DependencyMergeConflict, type CreateCtx, type PendingMerge } from "./worktree.js";
 import { injectSlices, publishResult } from "./blackboard.js";
 import { redact } from "./redact.js";
 import { usesSharedWorktree } from "./readonly.js";
@@ -12,7 +12,7 @@ import { runVerify } from "./verify.js";
 export interface RunDeps {
   store: Store; runId: string; dag: Dag; repo: string;
   adapters: Record<Runtime, Adapter>;
-  worktrees: { create(taskId: string, dependsOn?: string[], ctx?: CreateCtx): Promise<string>; commit(taskId: string, message: string): Promise<void>; remove(taskId: string): Promise<void>;
+  worktrees: { pendingMerges?(taskId: string): PendingMerge | undefined; create(taskId: string, dependsOn?: string[], ctx?: CreateCtx): Promise<string>; commit(taskId: string, message: string): Promise<void>; remove(taskId: string): Promise<void>;
     // Optional: writer-task helpers. Absent = no dependency links / no ownership enforcement.
     link?(taskId: string): Promise<string[]>;                              // symlink configured dependency paths (node_modules...)
     head?(taskId: string): Promise<string>;                                // HEAD sha of the task's worktree
@@ -55,6 +55,8 @@ const VERIFY_TAIL_CHARS = 1500;
 const MAX_VIOLATION_FILES = 50;
 
 const TIMEOUT = Symbol("timeout");
+const mergeNote = (m: PendingMerge) => `\n\n## Resolve a merge conflict first\nMerging dependency branch \`${m.branch}\` into this worktree conflicted in: ${m.files.join(", ")}. The merge is in progress. Before your own work: open each conflicted file, combine BOTH sides' intent (keep every route/export/migration from both; never just pick one side), remove all conflict markers, \`git add\` them and run \`git commit --no-edit\`.${m.remaining.length ? ` Then merge the remaining dependency branches one at a time (${m.remaining.map((b) => `\`git merge --no-edit ${b}\``).join(", ")}) resolving any conflicts the same way.` : ""} Your task fails if any conflict marker remains or a dependency branch is left unmerged.`;
+const RESUME_NOTE = "\n\n## Resumed task\nAn earlier attempt at this task was interrupted, timed out or failed. Its partial work is already in this worktree (see `git log` and `git status`). Inspect it and continue from there; do not redo or discard work that is already correct.";
 const stripFence = (s: string) => s.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
 async function parseResult(raw: string, repair?: (r: string) => Promise<string>): Promise<TaskResult> {
   const attempt = (s: string) => TaskResultSchema.parse(JSON.parse(stripFence(s)));
@@ -108,7 +110,14 @@ async function runDagInner(d: RunDeps): Promise<Record<string, Outcome>> {
   // Resume: only tasks already `done` are seeded; failed/running/blocked ones run again.
   // Only tasks of THIS dag count: the store also holds the tasks of other phases.
   const byId = new Map(d.dag.tasks.map((t) => [t.id, t]));
-  bestEffort(() => { for (const s of store.taskStatuses(runId)) if (s.status === "done" && byId.has(s.task_id)) outcome.set(s.task_id, "done"); });
+  bestEffort(() => {
+    for (const s of store.taskStatuses(runId)) {
+      if (!byId.has(s.task_id)) continue;
+      if (s.status === "done") outcome.set(s.task_id, "done");
+      // Stale failed/blocked/running rows of an earlier attempt: these tasks are about to run again, so they wait as pending.
+      else store.setTaskStatus(runId, s.task_id, "pending");
+    }
+  });
   const running = new Map<string, Promise<void>>();
   const emit = (task: TaskSpec, type: EventType, payload: Record<string, unknown> = {}) =>
     store.appendEvent({ run_id: runId, task_id: task.id, agent_id: task.id, type, payload });
@@ -217,8 +226,7 @@ async function runDagInner(d: RunDeps): Promise<Record<string, Outcome>> {
     // Workspace: a writer sees the other repos read-only at ../<name> (only for runtimes where that was verified).
     const siblingNames = ws && !shared && task.repo !== undefined && d.adapters[task.runtime].siblingRead !== false ? ws.repos.filter((n) => n !== task.repo).sort() : [];
     const wsPrompt: WorkspacePrompt | undefined = !ws ? undefined : shared ? { all: [...ws.repos].sort() } : { repo: task.repo, siblings: siblingNames };
-    const prompt = buildPrompt(task, slices, wsPrompt) + extra;
-    emit(task, "prompt_sent", { prompt: redact(prompt), keys: slices.map((s) => s.key), tokens: estimateTokens(prompt), runtime: task.runtime });
+    let prompt = buildPrompt(task, slices, wsPrompt) + extra;
     if (ws && !shared && task.repo === undefined) throw new TaskFailure("failed:no-repo", false);
     if (siblingNames.length > 0) sharedUsedOf.set(d, true); // the sibling symlinks point into the shared view: release it at the end of the run
     let cwd: string;
@@ -232,6 +240,12 @@ async function runDagInner(d: RunDeps): Promise<Record<string, Outcome>> {
       bestEffort(() => emit(task, "dependency_merge_conflict", { task: task.id, dependency: e.dependency, ...(e.repo ? { repo: e.repo } : {}), files: e.files.slice(0, MAX_VIOLATION_FILES).map(redact) }));
       throw new TaskFailure(e.message, false);
     }
+    const pm = d.worktrees.pendingMerges?.(task.id);
+    if (pm) {
+      bestEffort(() => emit(task, "dependency_merge_conflict", { task: task.id, dependency: pm.branch, resolving: true, files: pm.files.slice(0, MAX_VIOLATION_FILES).map(redact) }));
+      prompt += mergeNote(pm);
+    }
+    emit(task, "prompt_sent", { prompt: redact(prompt), keys: slices.map((s) => s.key), tokens: estimateTokens(prompt), runtime: task.runtime });
     const extraDirs = siblingNames.length > 0 ? d.worktrees.siblingDirs?.(task.id) ?? [] : [];
     const ac = new AbortController();
     const onAbort = () => ac.abort();
@@ -318,10 +332,12 @@ async function runDagInner(d: RunDeps): Promise<Record<string, Outcome>> {
 
   // `budget` is created once per task and shared by all of its attempts (retries do not get a fresh allowance).
   async function runTaskInner(task: TaskSpec) {
+    // A task that already started in this run (timed out, failed or interrupted) left its partial work on its branch; the worktree reuses it.
+    const resumed = !useShared(task) && store.eventsOfType(runId, ["task_started"]).some((e) => e.task_id === task.id);
     store.setTaskStatus(runId, task.id, "running");
     emit(task, "task_started", { runtime: task.runtime, tier: task.tier, role: task.role, worktree: useShared(task) ? "shared" : "own", unsafe: d.unsafe === true, ...(d.workspace ? { repo: task.repo ?? "*" } : {}) });
     const budget = new BudgetTracker(task.budgetTokens ?? d.defaultBudgetTokens);
-    let extra = "";
+    let extra = resumed ? RESUME_NOTE : "";
     const max = d.maxAttempts ?? 1;
     for (let n = 1; n <= max; n++) {
       try {
