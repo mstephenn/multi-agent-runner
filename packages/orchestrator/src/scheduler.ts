@@ -55,6 +55,7 @@ const VERIFY_TAIL_CHARS = 1500;
 const MAX_VIOLATION_FILES = 50;
 
 const TIMEOUT = Symbol("timeout");
+const LIMIT_ERROR = /usage limit|rate limit|quota|credits/i;
 const mergeNote = (m: PendingMerge) => `\n\n## Resolve a merge conflict first\nMerging dependency branch \`${m.branch}\` into this worktree conflicted in: ${m.files.join(", ")}. The merge is in progress. Before your own work: open each conflicted file, combine BOTH sides' intent (keep every route/export/migration from both; never just pick one side), remove all conflict markers, \`git add\` them and run \`git commit --no-edit\`.${m.remaining.length ? ` Then merge the remaining dependency branches one at a time (${m.remaining.map((b) => `\`git merge --no-edit ${b}\``).join(", ")}) resolving any conflicts the same way.` : ""} Your task fails if any conflict marker remains or a dependency branch is left unmerged.`;
 const RESUME_NOTE = "\n\n## Resumed task\nAn earlier attempt at this task was interrupted, timed out or failed. Its partial work is already in this worktree (see `git log` and `git status`). Inspect it and continue from there; do not redo or discard work that is already correct.";
 const stripFence = (s: string) => s.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
@@ -150,6 +151,7 @@ async function runDagInner(d: RunDeps): Promise<Record<string, Outcome>> {
     return sharedP;
   };
 
+  const limited = new Map<Runtime, string>(); // runtimes that reported a usage limit during this run, with the message
   const startShaOf = new Map<string, string>();
   // Runtime conflict prediction: parallel writers (no dependency path between them, same repo) that stray into the same file.
   const strays = new Map<string, string[]>();
@@ -286,12 +288,20 @@ async function runDagInner(d: RunDeps): Promise<Record<string, Outcome>> {
         return raw;
       };
       const work = (async () => {
+        // A runtime that hit its usage limit earlier in this run stays unavailable: go straight to the other CLI.
+        if (d.fallbackRuntime && d.maxBudgetUsdPerTask === undefined && limited.has(task.runtime)) {
+          const alternate: Runtime = task.runtime === "claude" ? "codex" : "claude";
+          emit(task, "runtime_fallback", { from: task.runtime, to: alternate, reason: limited.get(task.runtime) });
+          return consume(alternate);
+        }
         try { return await consume(task.runtime); }
         catch (e) {
           // Codex cannot enforce maxBudgetUsd; switching CLIs would bypass a configured spend cap.
           if (!d.fallbackRuntime || d.maxBudgetUsdPerTask !== undefined || budget.exceeded || ac.signal.aborted || d.signal?.aborted) throw e;
           const alternate: Runtime = task.runtime === "claude" ? "codex" : "claude";
-          emit(task, "runtime_fallback", { from: task.runtime, to: alternate, reason: redact(e instanceof Error ? e.message : String(e)).slice(0, 500) });
+          const reason = redact(e instanceof Error ? e.message : String(e)).slice(0, 500);
+          if (LIMIT_ERROR.test(reason)) limited.set(task.runtime, reason);
+          emit(task, "runtime_fallback", { from: task.runtime, to: alternate, reason });
           return consume(alternate);
         }
       })();

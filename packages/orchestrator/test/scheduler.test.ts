@@ -487,6 +487,15 @@ describe("runDag shared read-only worktree", () => {
     expect(f.calls[0].prompt).toMatch(/Resolve a merge conflict first[\s\S]*app\.ts[\s\S]*git merge --no-edit mar\/r\/d/);
     expect(store.listEvents("r").some((e) => e.type === "dependency_merge_conflict" && e.payload.resolving === true)).toBe(true);
   });
+  it("after a runtime reports a usage limit, later tasks go straight to the other runtime", async () => {
+    const codex = fakeAdapter(() => new Error("codex exited 1: You hit your usage limit")), claude = fakeAdapter(() => ok());
+    const { store, deps } = harness([T("a", { runtime: "codex" }), T("b", { runtime: "codex" })], () => ok(), { fallbackRuntime: true, concurrency: 1 });
+    (deps as any).adapters = { claude: claude.adapter, codex: codex.adapter };
+    expect(await runDag(deps as any)).toEqual({ a: "done", b: "done" });
+    expect(store.listEvents("r").filter((e) => e.type === "runtime_fallback").map((e) => e.task_id)).toEqual(["a", "b"]);
+    expect(codex.calls.map((c) => c.taskId)).toEqual(["a"]); // b never tried codex
+    expect(claude.calls.map((c) => c.taskId)).toEqual(["a", "b"]);
+  });
   it("release is called once even when a task fails", async () => {
     const w = fakeWt();
     const { deps } = harness([R("a"), R("b")], (i: any) => (i.taskId === "a" ? new Error("x") : ok()), { worktrees: w.worktrees, toolsFor: roTools });

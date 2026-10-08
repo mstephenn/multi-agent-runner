@@ -64,16 +64,22 @@ export function codexAdapter(bin = "codex"): Adapter {
       let turnFailure: string | null = null;
       let lastError: string | null = null;
       let gotResult = false;
-      for await (const line of spawnLines(bin, buildCodexArgs(i), { cwd: i.cwd, signal: i.signal, stdin: i.prompt, env: workerEnv() })) {
-        const f = codexFailure(line);
-        if (f !== null) {
-          lastError = f;
-          if (parse(line)?.type === "turn.failed") turnFailure = f;
+      try {
+        for await (const line of spawnLines(bin, buildCodexArgs(i), { cwd: i.cwd, signal: i.signal, stdin: i.prompt, env: workerEnv() })) {
+          const f = codexFailure(line);
+          if (f !== null) {
+            lastError = f;
+            if (parse(line)?.type === "turn.failed") turnFailure = f;
+          }
+          for (const e of normalizeCodexLine(line)) {
+            if (e.type === "result") gotResult = true;
+            yield e;
+          }
         }
-        for (const e of normalizeCodexLine(line)) {
-          if (e.type === "result") gotResult = true;
-          yield e;
-        }
+      } catch (e) {
+        // codex reports its real reason (usage limit, auth...) as JSON on stdout while stderr stays empty: put it in the error.
+        if (e instanceof AdapterError && lastError !== null && !e.message.includes(lastError)) throw new AdapterError(`${e.message.trimEnd()} ${lastError}`);
+        throw e;
       }
       if (i.signal.aborted) return;
       if (turnFailure !== null) throw new AdapterError(`codex turn failed: ${turnFailure}`);

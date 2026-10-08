@@ -174,7 +174,7 @@ Optional file in the repo root. Unknown keys are rejected.
 | `linkPaths` | list of repo-relative paths | `[]` | Paths (single-segment `*` globs such as `node_modules`, `packages/*/node_modules`) symlinked from your repo into writer worktrees so verify can run without reinstalling; secrets (`.env*`, keys), `.git` and `.mar` are refused |
 | `ownership` | `"warn"` or `"enforce"` | `"warn"` | Writer touched files outside its `paths`: record an event (and print an `Ownership warnings:` block), or fail the task (`failed:ownership`). Recommended `"enforce"` when several writers run in parallel in one repo |
 | `integrate` | boolean | `true` | Build `mar/<runId>/integration` |
-| `tiers` | `{claude?, codex?}` each with partial `low`/`mid`/`high` (string or null) | claude: `claude-haiku-4-5-20251001` / `claude-sonnet-5-5` / `claude-sonnet-5-5`; codex: all `null` | Model per runtime and tier; `null` uses that CLI's built-in default (Codex runs with `--ignore-user-config`, so your own Codex config is not used) |
+| `tiers` | `{claude?, codex?}` each with partial `low`/`mid`/`high` (string or null) | claude: `claude-haiku-5-5` / `claude-sonnet-5-5` / `claude-sonnet-5-5`; codex: all `null` | Model per runtime and tier; `null` uses that CLI's built-in default (Codex runs with `--ignore-user-config`, so your own Codex config is not used) |
 | `repos` | list of folder names | unset | Workspace only: restrict the run to these repos; `--repos` wins |
 
 Example:
