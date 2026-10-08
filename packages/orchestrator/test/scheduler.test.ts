@@ -456,6 +456,46 @@ describe("runDag shared read-only worktree", () => {
     const wtOf = Object.fromEntries(store.listEvents("r").filter((e) => e.type === "task_started").map((e) => [e.task_id, e.payload.worktree]));
     expect(wtOf).toEqual({ i: "own", r: "own", s: "shared" });
   });
+  it("a writer depending on a read-only (branchless) task is not asked to merge its branch", async () => {
+    const w = fakeWt(); const deps_: Record<string, string[] | undefined> = {};
+    w.worktrees.create = async (id: string, d?: string[]) => { deps_[id] = d; return `/wt/${id}`; };
+    const { deps } = harness([R("design"), T("impl", { dependsOn: ["design"] })], () => ok(), { worktrees: w.worktrees, toolsFor: roTools });
+    expect(await runDag(deps)).toEqual({ design: "done", impl: "done" });
+    expect(deps_["impl"]).toEqual([]);
+  });
+  it("a task that already started in this run gets a resume note in its prompt", async () => {
+    const w = fakeWt();
+    const { store, f, deps } = harness([T("i")], () => ok(), { worktrees: w.worktrees, toolsFor: roTools });
+    store.appendEvent({ run_id: "r", task_id: "i", agent_id: "i", type: "task_started", payload: {} });
+    await runDag(deps);
+    expect(f.calls[0].prompt).toContain("Resumed task");
+  });
+  it("on resume, stale failed/blocked rows of tasks that have not restarted yet read as pending", async () => {
+    const w = fakeWt();
+    const { store, deps } = harness([T("a"), T("b", { dependsOn: ["a"] })], () => ok(), { worktrees: w.worktrees, toolsFor: roTools, concurrency: 1 });
+    store.setTaskStatus("r", "a", "failed", "failed:timeout"); store.setTaskStatus("r", "b", "blocked");
+    const seen: string[] = [];
+    w.worktrees.create = async (id: string) => { if (id === "a") seen.push(store.taskStatuses("r").find((t) => t.task_id === "b")!.status); return `/wt/${id}`; };
+    await runDag(deps);
+    expect(seen).toEqual(["pending"]);
+  });
+  it("a task handed a conflicted merge gets resolve instructions in its prompt and the run continues", async () => {
+    const w: any = fakeWt();
+    w.worktrees.pendingMerges = () => ({ branch: "mar/r/b", files: ["app.ts"], remaining: ["mar/r/d"] });
+    const { store, f, deps } = harness([T("c")], () => ok(), { worktrees: w.worktrees, toolsFor: roTools });
+    expect(await runDag(deps)).toEqual({ c: "done" });
+    expect(f.calls[0].prompt).toMatch(/Resolve a merge conflict first[\s\S]*app\.ts[\s\S]*git merge --no-edit mar\/r\/d/);
+    expect(store.listEvents("r").some((e) => e.type === "dependency_merge_conflict" && e.payload.resolving === true)).toBe(true);
+  });
+  it("after a runtime reports a usage limit, later tasks go straight to the other runtime", async () => {
+    const codex = fakeAdapter(() => new Error("codex exited 1: You hit your usage limit")), claude = fakeAdapter(() => ok());
+    const { store, deps } = harness([T("a", { runtime: "codex" }), T("b", { runtime: "codex" })], () => ok(), { fallbackRuntime: true, concurrency: 1 });
+    (deps as any).adapters = { claude: claude.adapter, codex: codex.adapter };
+    expect(await runDag(deps as any)).toEqual({ a: "done", b: "done" });
+    expect(store.listEvents("r").filter((e) => e.type === "runtime_fallback").map((e) => e.task_id)).toEqual(["a", "b"]);
+    expect(codex.calls.map((c) => c.taskId)).toEqual(["a"]); // b never tried codex
+    expect(claude.calls.map((c) => c.taskId)).toEqual(["a", "b"]);
+  });
   it("release is called once even when a task fails", async () => {
     const w = fakeWt();
     const { deps } = harness([R("a"), R("b")], (i: any) => (i.taskId === "a" ? new Error("x") : ok()), { worktrees: w.worktrees, toolsFor: roTools });

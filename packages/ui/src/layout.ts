@@ -145,7 +145,7 @@ export function layoutGraph(
     return { phase, x: padding + from * (w + gap), y: 0, width: (to - from + 1) * w + (to - from) * gap, height,
       nodeIds: best.slice(from, to + 1).flatMap((c) => c.flat()) };
   });
-  let track = 0;
+  let track = 0; // every long edge gets its own track: sharing one would make separate edges read as a single line
   result.edges = validEdges.map((edge) => {
     const source = result.positions.get(edge.source)!, target = result.positions.get(edge.target)!;
     const start = { x: source.x + w, y: source.y + h / 2 };

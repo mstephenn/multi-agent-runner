@@ -6,7 +6,7 @@ import { linkPathProblem, parseCommand, REPO_NAME, type WorkspaceRepo } from "@m
 const tierKeys = z.object({ low: z.string().nullable(), mid: z.string().nullable(), high: z.string().nullable() });
 type Tiers = z.infer<typeof tierKeys>;
 const DEFAULT_TIERS: { claude: Tiers; codex: Tiers } = {
-  claude: { low: "claude-haiku-4-5-20251001", mid: "claude-sonnet-5-5", high: "claude-sonnet-5-5" },
+  claude: { low: "claude-haiku-5-5", mid: "claude-sonnet-5-5", high: "claude-sonnet-5-5" },
   codex: { low: null, mid: null, high: null },
 };
 const isOpus = (m: string | null | undefined) => !!m && /opus/i.test(m);

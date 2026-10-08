@@ -125,6 +125,11 @@ export interface WorktreeOpts {
   stateRoot?: string;
   /** Workspace mode: a task's worktree is `<run dir>/<taskId>/<taskSubdir>` (the task dir also holds sibling symlinks). */
   taskSubdir?: string;
+  /**
+   * On a dependency merge conflict, leave the merge in progress in the task's worktree (instead of failing) so the task
+   * resolves it first; see `Worktrees.pendingMerges`. `commit` then refuses unresolved conflicts or unmerged dependencies.
+   */
+  resolveConflicts?: boolean;
   /** Workspace mode: the detached shared worktree is `<run dir>/.shared/<sharedSubdir>`. */
   sharedSubdir?: string;
 }
@@ -143,7 +148,12 @@ export interface CreateCtx {
   siblingDeps?: Record<string, string[]>;
 }
 
+/** A dependency merge left in progress for the task to resolve: the conflicted dependency branch, its files, and the dependency branches still to merge. */
+export interface PendingMerge { branch: string; files: string[]; remaining: string[] }
+
 export interface Worktrees {
+  /** Present with `resolveConflicts`: the merge the task must resolve before its own work (cleared when the task is created again). */
+  pendingMerges?(taskId: string): PendingMerge | undefined;
   create(taskId: string, dependsOn?: string[], ctx?: CreateCtx): Promise<string>;
   commit(taskId: string, message: string): Promise<void>;
   remove(taskId: string): Promise<void>;
@@ -180,6 +190,7 @@ export function createWorktrees(repoPath: string, runId: string, opts: WorktreeO
   const runDir = join(resolve(opts.stateRoot ?? repoPath), ".mar", "worktrees", runId);
   const dirFor = (t: string) => (opts.taskSubdir ? join(runDir, t, opts.taskSubdir) : join(runDir, t));
   const branchFor = (t: string) => `mar/${runId}/${t}`;
+  const pending = new Map<string, PendingMerge>();
   const check = (t: string, what = "task") => { if (!SAFE.test(t)) throw new Error(`invalid ${what} id: ${t}`); };
 
   const ensureExcluded = () => (opts.stateRoot ? Promise.resolve() : ensureMarExcluded(root));
@@ -196,6 +207,7 @@ export function createWorktrees(repoPath: string, runId: string, opts: WorktreeO
     const existed = await branchExists(branch, root);
     let createdBranch = false;   // true only if THIS call's `worktree add -b` succeeded
     let preMerge: string | null = null; // HEAD of a resumed branch before any dependency merge
+    pending.delete(taskId);
     try {
       if (existed) await git(["worktree", "add", "--", dir, branch], root);
       else { await git(["worktree", "add", "-b", branch, "--", dir, baseRef], root); createdBranch = true; }
@@ -206,7 +218,11 @@ export function createWorktrees(repoPath: string, runId: string, opts: WorktreeO
         try {
           await git([...IDENT, "merge", "--no-edit", depBranch], dir);
         } catch (e) {
-          const files = await conflictedFiles(dir); // before the abort: it clears the index
+          const files = await conflictedFiles(dir); // before any abort: it clears the index
+          if (files.length > 0 && opts.resolveConflicts) { // keep the conflicted merge in the worktree for the task to resolve
+            pending.set(taskId, { branch: depBranch, files, remaining: dependsOn.slice(dependsOn.indexOf(dep) + 1).map(branchFor) });
+            break;
+          }
           await ok(["merge", "--abort"], dir);
           if (files.length > 0) throw new DependencyMergeConflict(taskId, dep, files);
           throw new Error(`dependency ${dep}: merge into ${taskId} failed: ${(e as Error).message}`);
@@ -221,6 +237,11 @@ export function createWorktrees(repoPath: string, runId: string, opts: WorktreeO
     }
     return dir;
   }
+
+  const requireMerged = async (pm: PendingMerge, cwd: string) => {
+    for (const b of [pm.branch, ...pm.remaining])
+      if (!(await ok(["merge-base", "--is-ancestor", b, "HEAD"], cwd))) throw new Error(`dependency branch ${b} was not merged into the task`);
+  };
 
   // Dot-prefixed: can never match a task id (SAFE has no "."), so it cannot collide with a task worktree.
   const sharedDir = opts.sharedSubdir ? join(runDir, ".shared", opts.sharedSubdir) : join(runDir, ".shared");
@@ -273,6 +294,7 @@ export function createWorktrees(repoPath: string, runId: string, opts: WorktreeO
         await pruneRunDir();
       },
     },
+    ...(opts.resolveConflicts ? { pendingMerges: (taskId: string) => pending.get(taskId) } : {}),
     create(taskId: string, dependsOn: string[] = [], _ctx?: CreateCtx) {
       const p = queue.then(() => createOne(taskId, dependsOn));
       queue = p.catch(() => {});
@@ -281,10 +303,18 @@ export function createWorktrees(repoPath: string, runId: string, opts: WorktreeO
     async commit(taskId: string, message: string) {
       check(taskId);
       const cwd = dirFor(taskId);
+      const pm = pending.get(taskId);
+      if (pm) { // the task was handed a conflicted merge: it must have resolved it and merged every dependency
+        const unmerged = await conflictedFiles(cwd);
+        const markers = (await git(["grep", "-l", "-E", "^(<<<<<<<|>>>>>>>) ", "--", ...pm.files], cwd).catch(() => "")).split("\n").filter(Boolean);
+        if (unmerged.length || markers.length) throw new Error(`unresolved merge conflict in ${[...new Set([...unmerged, ...markers])].join(", ")}`);
+      }
       // Never stage env files a worker created (secrets); they are discarded with the worktree.
       await git(["add", "-A", "--", ".", ":(exclude,glob)**/.env*", ...(links.length ? await linkExcludes(root, cwd, links) : [])], cwd);
-      if ((await gitExit(["diff", "--cached", "--quiet"], cwd)) === 0) return; // nothing staged
+      const merging = await ok(["rev-parse", "-q", "--verify", "MERGE_HEAD"], cwd); // a resolved merge is committed even when it stages nothing
+      if ((await gitExit(["diff", "--cached", "--quiet"], cwd)) === 0 && !merging) { if (pm) await requireMerged(pm, cwd); return; } // nothing staged
       await git([...IDENT, "commit", "-m", message], cwd);
+      if (pm) await requireMerged(pm, cwd);
     },
     async remove(taskId: string) {
       check(taskId);

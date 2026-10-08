@@ -125,6 +125,10 @@ describe("codexAdapter", () => {
     expect(r.at(-1).text.endsWith(" -")).toBe(true);
     expect(evs.some((e) => e.type === "usage")).toBe(true);
   });
+  it("a non-zero exit with an empty stderr still reports the error codex printed on stdout (e.g. a usage limit)", async () => {
+    const bin = fakeBin(`${emit({ type: "turn.started" }, { type: "error", message: "You hit your usage limit" })}process.exit(1);`);
+    await expect(collect(codexAdapter(bin).run({ ...base, cwd: "." }))).rejects.toThrow(/exited 1.*usage limit/);
+  });
   it("passes a clean run through (fixture replay)", async () => {
     const bin = fakeBin(`process.stdin.resume();${lines.map((l) => `console.log(${JSON.stringify(l)});`).join("")}`);
     const evs = await collect(codexAdapter(bin).run({ ...base, cwd: "." }));

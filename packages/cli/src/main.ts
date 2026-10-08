@@ -11,6 +11,7 @@ import { effectiveMaxTotalTokens, loadConfig, loadWorkspaceConfig, type MarConfi
 import { ownershipRows, renderOwnershipWarnings, renderPhaseHeader, renderPhaseSummary, renderPlanTable, renderStop } from "./phaseOutput.js";
 import { renderAnswer, saveReports } from "./answer.js";
 import { nodeRunner, preflight, preflightWorkspace } from "./preflight.js";
+import { pendingFeatures } from "./features.js";
 import { ensureInitialCommit, initIfNoRepo } from "./bootstrap.js";
 import { runHistory, SIGNAL_DEBOUNCE_MS, type HistoryCli, type HistoryDeps } from "./history.js";
 import { sanitizeForTerminal } from "./sanitize.js";
@@ -274,7 +275,7 @@ export async function executeRun(o: ExecuteOpts): Promise<ExecuteResult> {
         store, runId, dag, repo, adapters,
         worktrees: o.worktrees ?? (ws
           ? createWorkspaceWorktrees(repo, runId, ws.repos, { linkPaths: Object.fromEntries(ws.repos.map((r) => [r.name, ws.repoConfigs[r.name]?.linkPaths ?? []])), ...(ctx.baseRef ? { baseRef: ctx.baseRef } : {}) })
-          : createWorktrees(repo, runId, { linkPaths: config.linkPaths, ...(ctx.baseRef ? { baseRef: ctx.baseRef } : {}) })),
+          : createWorktrees(repo, runId, { linkPaths: config.linkPaths, resolveConflicts: true, ...(ctx.baseRef ? { baseRef: ctx.baseRef } : {}) })),
         modelFor: (rt, tier: Tier) => config.tiers[rt][tier],
         fallbackRuntime: true,
         toolsFor, concurrency: config.concurrency, defaultBudgetTokens: config.defaultBudgetTokens,
@@ -516,7 +517,8 @@ export async function runMain(argv: string[], deps: MainDeps = {}): Promise<numb
       goal = run.goal;
     } else { runId = newRunId(); goal = cli.goal; }
 
-    const features: string[] = [];
+    const features: string[] = cli.cmd === "resume" ? pendingFeatures(store, runId) : []; // requests queued before a stop are not lost
+    if (features.length) console.log(`Note: resuming with ${features.length} queued feature request(s).`);
     let runActive = true;
     proc.on("SIGINT", onSignal); proc.on("SIGTERM", onSignal); proc.on("SIGHUP", onSignal); handlersOn = true;
     const dist = uiDist();
