@@ -225,7 +225,7 @@ async function runDagInner(d: RunDeps): Promise<Record<string, Outcome>> {
     try {
       cwd = shared ? await acquireShared()
         : ws ? await d.worktrees.create(task.id, sameRepoDeps(task), { repo: task.repo, siblings: siblingNames.length > 0, ...(siblingNames.length > 0 ? { siblingDeps: siblingDepsOf(task) } : {}) })
-        : await d.worktrees.create(task.id, task.dependsOn);
+        : await d.worktrees.create(task.id, task.dependsOn.filter((id) => { const dep = byId.get(id); return dep !== undefined && !useShared(dep); })); // read-only deps ran in the shared worktree: no branch to merge
     } catch (e) {
       if (!(e instanceof DependencyMergeConflict)) throw e;
       // Not retryable: the same merge would conflict again. The files go to the event and the re-planner's history.

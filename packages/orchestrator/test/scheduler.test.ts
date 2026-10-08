@@ -456,6 +456,13 @@ describe("runDag shared read-only worktree", () => {
     const wtOf = Object.fromEntries(store.listEvents("r").filter((e) => e.type === "task_started").map((e) => [e.task_id, e.payload.worktree]));
     expect(wtOf).toEqual({ i: "own", r: "own", s: "shared" });
   });
+  it("a writer depending on a read-only (branchless) task is not asked to merge its branch", async () => {
+    const w = fakeWt(); const deps_: Record<string, string[] | undefined> = {};
+    w.worktrees.create = async (id: string, d?: string[]) => { deps_[id] = d; return `/wt/${id}`; };
+    const { deps } = harness([R("design"), T("impl", { dependsOn: ["design"] })], () => ok(), { worktrees: w.worktrees, toolsFor: roTools });
+    expect(await runDag(deps)).toEqual({ design: "done", impl: "done" });
+    expect(deps_["impl"]).toEqual([]);
+  });
   it("release is called once even when a task fails", async () => {
     const w = fakeWt();
     const { deps } = harness([R("a"), R("b")], (i: any) => (i.taskId === "a" ? new Error("x") : ok()), { worktrees: w.worktrees, toolsFor: roTools });
