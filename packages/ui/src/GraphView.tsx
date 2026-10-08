@@ -1,5 +1,5 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
-import { Background, Handle, MiniMap, Position, ReactFlow, ReactFlowProvider, type Node, type NodeProps } from "@xyflow/react";
+import { Background, Handle, MarkerType, MiniMap, Position, ReactFlow, ReactFlowProvider, type Node, type NodeProps } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import type { Dag } from "@mar/core";
 import { matchesGraphFilter, taskDuration, phaseBadge, planPhases, type GraphFilter, type AgentView, type FlowEdge } from "./derive.js";
@@ -100,9 +100,17 @@ export function GraphView({ agents, plan, flow, selected, onSelect }: Props) {
       const id = JSON.stringify(["dep", d, t.id]);
       if (known.has(d) && known.has(t.id) && !flowPairs.has(JSON.stringify([d, t.id]))) links.set(id, { id, source: d, target: t.id });
     }
+    // One edge per task pair: its label lists every blackboard key passed along it (a line per key buries the graph).
+    const keys = new Map<string, { from: string; to: string; keys: string[] }>();
     for (const f of flow) {
-      const id = JSON.stringify(["flow", f.from, f.to, f.key]);
-      if (known.has(f.from) && known.has(f.to)) links.set(id, { id, source: f.from, target: f.to, label: f.key });
+      if (!known.has(f.from) || !known.has(f.to)) continue;
+      const pair = keys.get(JSON.stringify([f.from, f.to])) ?? { from: f.from, to: f.to, keys: [] };
+      if (!pair.keys.includes(f.key)) pair.keys.push(f.key);
+      keys.set(JSON.stringify([f.from, f.to]), pair);
+    }
+    for (const p of keys.values()) {
+      const id = JSON.stringify(["flow", p.from, p.to]);
+      links.set(id, { id, source: p.from, target: p.to, label: p.keys.join("\n") });
     }
     const layout = layoutGraph(visible, [...links.values()], {
       nodeWidth: NODE_W, nodeHeight: NODE_H, columnGap: 110, rowGap: 14, laneGap: 10, padding: 12, edgeOffset: 24, layers: true, labelSpace: 18,
@@ -123,13 +131,14 @@ export function GraphView({ agents, plan, flow, selected, onSelect }: Props) {
     data: { agent, selected: agent.id === selected, phaseCount: planPhases(plan) },
   }))], [bands, visible, graph, selected, plan]);
   const edges = useMemo<RoutedEdge[]>(() => graph.layout.edges.map((edge) => ({
-    id: edge.id, source: edge.source, target: edge.target, type: "routed",
+    id: edge.id, source: edge.source, target: edge.target, type: "routed", markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16, color: graph.links.get(edge.id)?.label === undefined ? "#8b949e" : "#6e9bff" },
     selected: edge.id === selectedEdge,
     animated: graph.links.get(edge.id)?.label !== undefined,
     ariaLabel: graph.links.get(edge.id)?.label ?? `Dependency from ${edge.source} to ${edge.target}`,
-    className: graph.links.get(edge.id)?.label === undefined ? "dep" : "flow",
+    // Long edges (routed over the top of the graph) fade out unless they touch the selected task or edge, so one line never reads as spanning phases.
+    className: [graph.links.get(edge.id)?.label === undefined ? "dep" : "flow", edge.waypoints.length > 4 ? (selected !== null && (edge.source === selected || edge.target === selected) ? "long hot" : "long") : ""].join(" ").trim(),
     data: { waypoints: edge.waypoints, label: graph.links.get(edge.id)?.label },
-  })), [graph, selectedEdge]);
+  })), [graph, selectedEdge, selected]);
 
   if (agents.length === 0) return <div className="empty" role="status"><span className="spinner" aria-hidden="true" /><span>No agents yet. Waiting for the planner.</span></div>;
   return (

@@ -25,3 +25,5 @@
 .band-phase { background: color-mix(in srgb, var(--accent) 5%, transparent); border: 1px dashed var(--line); }
 .band-repo { border-top: 1px solid var(--line); background: color-mix(in srgb, var(--ink) 3%, transparent); }
 .band-repo span { top: auto; bottom: 4px; }
+.react-flow__edge.long { opacity: .22; transition: opacity .15s; }
+.react-flow__edge.long:hover, .react-flow__edge.long.selected, .react-flow__edge.long.hot { opacity: 1; }

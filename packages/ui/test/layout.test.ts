@@ -176,3 +176,11 @@ describe("labelSpace", () => {
     expect(() => layoutGraph(nodes, [], { labelSpace: -1 })).toThrow(/labelSpace/);
   });
 });
+
+describe("long edge tracks", () => {
+  it("every long edge gets its own track", () => {
+    const nodes = ["a", "b", "c", "d", "e", "f"].map((id, i) => ({ id, phase: i + 1 }));
+    const r = layoutGraph(nodes, [edge("a", "c"), edge("d", "f"), edge("a", "f")], { nodeWidth: 100, nodeHeight: 40, columnGap: 40, padding: 10, edgeOffset: 10 });
+    expect(new Set(r.edges.map((e) => e.waypoints[2]!.y)).size).toBe(3);
+  });
+});
