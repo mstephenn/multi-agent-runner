@@ -12,7 +12,8 @@ export const DEBOUNCE_MS = 250;
 // The server caps `?limit=` at this; used once when the default window comes back truncated.
 export const MAX_EVENT_LIMIT = 50000;
 export const backoff = (n: number) => Math.min(500 * 2 ** n, 5000);
-export const REFRESH_ON = new Set(["task_finished", "task_failed", "blackboard_write"]);
+// Events after which the plan/task-status part of the snapshot may have changed (a new phase is saved before its `phase_started`).
+export const REFRESH_ON = new Set(["task_started", "task_finished", "task_failed", "blackboard_write", "phase_started", "phase_finished", "run_started"]);
 
 export const wsUrl = (loc: { protocol: string; host: string }, runId: string, after: number) =>
   `${loc.protocol === "https:" ? "wss" : "ws"}://${loc.host}/ws?run=${encodeURIComponent(runId)}&after=${after}`;

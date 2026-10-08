@@ -77,6 +77,20 @@ describe("runPhases", () => {
     expect(s.loadPlan("r1")!.tasks.map((t) => [t.id, t.phase])).toEqual([["p1-api", 1], ["p2-ui", 2]]);
     expect(s.listPhases("r1").map((p) => [p.phase, p.remaining, p.status])).toEqual([[1, "wire the UI", "done"], [2, "", "done"]]);
   });
+  it("features added while running are planned as a further phase even when the planner said done", async () => {
+    const s = mk();
+    const h = harness(s, { plans: {
+      1: { tasks: [task("p1-api")], remaining: "" },
+      2: { tasks: [task("p2-dark", { needs: ["p1-api/summary"] })], remaining: "" },
+    } });
+    let queue: string[] = [];
+    h.deps.run = ((orig) => async (dag, ctx) => { const r = await orig(dag, ctx); if (ctx.phase === 1) queue = ["add a dark mode"]; return r; })(h.deps.run);
+    h.deps.takeFeatures = () => queue.splice(0);
+    const out = await runPhases(h.deps);
+    expect(h.runs.map((r) => r.phase)).toEqual([1, 2]);
+    expect(h.planCalls()[1]!.prompt).toContain("add a dark mode");
+    expect(out.complete).toBe(true);
+  });
   it("a single phase with remaining '' makes exactly one planner call and no phase 2", async () => {
     const s = mk();
     const h = harness(s, { plans: { 1: { tasks: [task("p1-a")], remaining: "" } } });

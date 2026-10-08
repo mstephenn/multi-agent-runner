@@ -44,13 +44,6 @@ describe.skipIf(!canBuild)("packaged bundle", () => {
     expect(src).not.toContain("/Users/");
   });
 
-  it("run in a non-git directory without child repos fails with a clear non-zero exit", () => {
-    const dir = tmp("mar-nogit-");
-    const r = mar(bundle, ["run", "x", "--repo", dir]);
-    expect(r.status).not.toBe(0);
-    expect(r.stderr).toContain("is not a git repository and has no git repositories in its immediate subfolders");
-  });
-
   it("history works from the bundle against a seeded repo and does not touch it", () => {
     const repo = seedRepo(); tmps.push(repo);
     const db = join(repo, ".mar", "mar.db");

@@ -21,13 +21,13 @@ afterEach(async () => {
 const ev = (s: Store, type: any = "task_started", payload: Record<string, unknown> = {}) => s.appendEvent({ run_id: "r", task_id: "a", agent_id: "a", type, payload });
 
 interface Raw { status: number; headers: Record<string, string | string[] | undefined>; body: string }
-const raw = (port: number, path: string, o: { method?: string; headers?: Record<string, string> } = {}) =>
+const raw = (port: number, path: string, o: { method?: string; headers?: Record<string, string>; body?: string } = {}) =>
   new Promise<Raw>((resolve, reject) => {
     const r = request({ host: "127.0.0.1", port, path, method: o.method ?? "GET", headers: o.headers }, (res) => {
       let body = ""; res.setEncoding("utf8"); res.on("data", (d) => { body += d; });
       res.on("end", () => resolve({ status: res.statusCode ?? 0, headers: res.headers, body }));
     });
-    r.on("error", reject); r.end();
+    r.on("error", reject); r.end(o.body);
   });
 // resolves "open" when the upgrade succeeds, else the HTTP status of the rejection or "close:<code>"
 const wsProbe = (url: string, o: WebSocket.ClientOptions = {}) =>
@@ -279,6 +279,21 @@ describe("server", () => {
     expect((await raw(srv.port, "/api/runs/bad%20id/stop", { method: "POST", headers: h })).status).toBe(400);
     expect((await raw(srv.port, "/api/runs/%E0%A4%A")).status).toBe(400);
     expect(stopped).toBe("");
+  });
+
+  it("features endpoint: validates, calls onFeature, 409 when refused", async () => {
+    const s = new Store(":memory:"); s.createRun("r", "g", "/x");
+    const got: string[] = []; let accept = true;
+    srv = await startServer(s, { port: 0, onFeature: (_id, t) => { if (accept) got.push(t); return accept; } });
+    const post = (body: string, h: Record<string, string> = { "x-mar": "1" }) => raw(srv!.port, "/api/runs/r/features", { method: "POST", headers: h, body });
+    expect((await post('{"text":" dark mode "}')).status).toBe(204);
+    expect(got).toEqual(["dark mode"]);
+    expect((await post('{"text":"  "}')).status).toBe(400);
+    expect((await post("nope")).status).toBe(400);
+    expect((await post('{"text":"x"}', {})).status).toBe(403);
+    expect((await post(JSON.stringify({ text: "x".repeat(9000) }))).status).toBe(413);
+    accept = false;
+    expect((await post('{"text":"x"}')).status).toBe(409);
   });
 
   it("binds to 127.0.0.1 only (real bound address)", async () => {

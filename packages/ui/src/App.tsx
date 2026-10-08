@@ -9,6 +9,8 @@ import { Inspector, type InspectorTab } from "./Inspector.js";
 import { Board } from "./Board.js";
 import { AnswerPanel } from "./AnswerPanel.js";
 import { ProblemsStrip } from "./ProblemsStrip.js";
+import { UseCases } from "./UseCasesPanel.js";
+import { deriveUseCases } from "./useCases.js";
 import { MainTabs, loadMainTab, saveMainTab, type MainTabId, type TabSpec } from "./MainTabs.js";
 import { Timeline } from "./Timeline.js";
 import { BlackboardPanel } from "./BlackboardPanel.js";
@@ -101,8 +103,10 @@ export function App() {
   const nowTexts = useMemo(() => deriveNowTexts({ events, blackboard, reports: snap.reports, plan: snap.plan, agents }), [events, blackboard, snap.reports, snap.plan, agents]);
   const counts = useMemo(() => chipCounts(agents), [agents]);
   const groups = useMemo(() => groupBoard(agents, { query, chip }), [agents, query, chip]);
+  const useCaseBoard = useMemo(() => deriveUseCases(snap.plan, agents), [snap.plan, agents]);
   const tabs: TabSpec[] = [
-    { id: "board", label: "Board" }, ...(answers.length > 0 ? [{ id: "answer" as const, label: "Answer" }] : []),
+    { id: "board", label: "Board" }, ...(useCaseBoard.cases.length > 0 ? [{ id: "usecases" as const, label: `Use cases (${useCaseBoard.cases.length})` }] : []),
+    ...(answers.length > 0 ? [{ id: "answer" as const, label: "Answer" }] : []),
     { id: "graph", label: "Graph" }, { id: "timeline", label: "Timeline" }, { id: "blackboard", label: `Blackboard (${blackboard.length})` },
   ];
   const tab = tabs.some((t) => t.id === tabPref) ? tabPref : "board"; // the saved choice stays saved while Answer is unavailable
@@ -143,6 +147,7 @@ export function App() {
       <main className="main">
         <MainTabs tabs={tabs} active={tab} onChange={chooseTab}>
           {tab === "board" && <Board groups={groups} total={agents.length} counts={counts} chip={chip} onChip={setChip} query={query} onQuery={setQuery} selected={selected} onSelect={setSelected} now={now} nowTexts={nowTexts} />}
+          {tab === "usecases" && <UseCases board={useCaseBoard} selected={selected} onSelect={setSelected} />}
           {tab === "answer" && <AnswerPanel reports={answers} />}
           {tab === "graph" && <GraphView agents={agents} plan={snap.plan} flow={flow} selected={selected} onSelect={setSelected} />}
           {tab === "timeline" && <Timeline events={events} allEvents={snap.events} agents={agents} now={now} liveEnd={liveEnd} cutoff={cutoff} onCutoff={setCutoff} onSelect={setSelected} />}

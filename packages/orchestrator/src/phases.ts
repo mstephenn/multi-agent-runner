@@ -1,4 +1,4 @@
-import { WRITER_ROLES, type Dag, type TaskSpec } from "@mar/core";
+import { WRITER_ROLES, type Dag, type TaskSpec, type UseCase } from "@mar/core";
 import type { Store } from "../../server/src/store.js";
 import { buildHistory, type HistoryDepConflict, type HistoryIntegration, type HistoryPhase, type HistoryPredicted, type HistoryTask, type HistoryUnmerged } from "./history.js";
 import type { IntegrateResult } from "./integrate.js";
@@ -24,6 +24,8 @@ export interface PhasePlanArgs {
   /** Re-plan after a phase with failed/blocked tasks or a stopped integration (the planner said nothing remained). */
   recovery: boolean;
   takenIds: ReadonlySet<string>; externalIds: ReadonlySet<string>;
+  /** Use cases declared by earlier phases. */
+  useCases: readonly UseCase[];
   /** Existing integration branch (phase >= 2), if any: what the repo map should describe. */
   integrationBranch?: string;
   onUsage: (u: { input: number | null; output: number | null }) => void;
@@ -41,6 +43,8 @@ export interface PhasesDeps {
   integrates?(repo: string): boolean;
   /** `git diff --stat` of the integration branch vs the run's base commit, for the re-planner (`repo` in workspace runs). */
   diffStat?(branch: string, repo?: string): Promise<string>;
+  /** Drains the features the user added while the run was going; they are folded into the work remaining before the next planning call. */
+  takeFeatures?(): string[];
   onPhaseStart?(p: { phase: number; maxPhases: number; dag: Dag; remaining: string }): void;
 }
 
@@ -152,7 +156,12 @@ export async function runPhases(d: PhasesDeps): Promise<PhasesResult> {
   };
   const hasFailures = (rec: PhaseRec) => rec.dag.tasks.some((t) => results[t.id] === "failed" || results[t.id] === "blocked") || integrationStuck();
 
-  const planned = () => ({ tasks: phases.flatMap((p) => p.dag.tasks) });
+  const useCasesSoFar = (): UseCase[] => {
+    const seen = new Map<string, UseCase>();
+    for (const p of phases) for (const u of p.dag.useCases ?? []) if (!seen.has(u.id)) seen.set(u.id, u);
+    return [...seen.values()];
+  };
+  const planned = (): Dag => { const useCases = useCasesSoFar(); return { tasks: phases.flatMap((p) => p.dag.tasks), ...(useCases.length ? { useCases } : {}) }; };
   const doneCount = (r: PhaseRec) => r.dag.tasks.filter((t) => results[t.id] === "done").length;
   const allDone = (r: PhaseRec) => doneCount(r) === r.dag.tasks.length;
   const tokens = () => { try { return store.usageTokens(runId); } catch { return 0; } };
@@ -311,6 +320,11 @@ export async function runPhases(d: PhasesDeps): Promise<PhasesResult> {
   // --- 2. plan and run further phases --------------------------------------------------------------------------------
   while (!stop) {
     const last = phases.at(-1);
+    const added = last ? d.takeFeatures?.() ?? [] : []; // before phase 1 is planned they stay queued
+    if (last && added.length) {
+      last.remaining = [last.remaining, "Additional features requested by the user while the run was going:", ...added.map((f) => `- ${f}`)].filter(Boolean).join("\n").slice(0, 4000);
+      bestEffort(() => store.savePhase(runId, last.phase, last.dag, last.remaining, "planned"));
+    }
     const failures = last !== undefined && hasFailures(last);
     // The planner said this phase completes the goal: done, unless it ended with failures or a stuck integration.
     const recovery = failures && last!.remaining === "" && !aborted();
@@ -327,7 +341,7 @@ export async function runPhases(d: PhasesDeps): Promise<PhasesResult> {
     const args: PhasePlanArgs = {
       phase, maxTasks: limits.maxTasks, previousRemaining: last?.remaining ?? "", recovery: failures,
       history: last ? await historyFor() : "",
-      takenIds: new Set(phases.flatMap((p) => p.dag.tasks.map((t) => t.id))),
+      takenIds: new Set(phases.flatMap((p) => p.dag.tasks.map((t) => t.id))), useCases: useCasesSoFar(),
       externalIds: new Set(phases.flatMap((p) => p.dag.tasks.filter((t) => results[t.id] === "done").map((t) => t.id))),
       ...(integrationBranch ? { integrationBranch } : {}),
       onUsage: (u) => emit("usage", { input: u.input, output: u.output, cached: null, costUsd: null, planner: true }, "planner"),
@@ -350,7 +364,7 @@ export async function runPhases(d: PhasesDeps): Promise<PhasesResult> {
         break;
       }
     }
-    const rec: PhaseRec = { phase, dag: stamp({ tasks: plan.tasks }, phase), remaining: plan.remaining };
+    const rec: PhaseRec = { phase, dag: stamp({ tasks: plan.tasks, ...(plan.useCases ? { useCases: plan.useCases } : {}) }, phase), remaining: plan.remaining };
     phases.push(rec);
     store.savePhase(runId, phase, rec.dag, rec.remaining, "planned");
     store.savePlan(runId, planned());

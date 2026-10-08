@@ -35,6 +35,36 @@ function StopButton({ runId }: { runId: string }) {
   );
 }
 
+function AddFeature({ runId }: { runId: string }) {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState("");
+  const [state, setState] = useState<"idle" | "sending" | "sent">("idle");
+  const [err, setErr] = useState<string | null>(null);
+  useEffect(() => { setOpen(false); setText(""); setState("idle"); setErr(null); }, [runId]);
+  const send = async () => {
+    setState("sending"); setErr(null);
+    try {
+      const res = await fetch(`/api/runs/${encodeURIComponent(runId)}/features`, { method: "POST", headers: { "x-mar": "1", "content-type": "application/json" }, body: JSON.stringify({ text }) });
+      if (res.status === 409) throw new Error("The run has finished planning; start a new run for this.");
+      if (!res.ok) throw new Error(`Could not add feature (HTTP ${res.status})`);
+      setText(""); setState("sent"); setOpen(false);
+    } catch (e) { setErr(e instanceof Error ? e.message : "Could not add feature"); setState("idle"); }
+  };
+  return (
+    <span className="add-feature">
+      <button type="button" aria-expanded={open} onClick={() => { setOpen(!open); setState("idle"); }}>{state === "sent" && !open ? "Feature queued ✓" : "Add feature"}</button>
+      {open && (
+        <form className="add-feature-form" onSubmit={(e) => { e.preventDefault(); if (text.trim()) void send(); }}>
+          <label className="visually-hidden" htmlFor="add-feature-text">Describe the additional feature</label>
+          <textarea id="add-feature-text" rows={3} maxLength={4000} value={text} placeholder="Describe the feature to add. It is planned as the next phase, after the current one finishes." onChange={(e) => setText(e.target.value)} />
+          <button type="submit" disabled={state === "sending" || text.trim() === ""}>{state === "sending" ? "Adding…" : "Queue feature"}</button>
+        </form>
+      )}
+      {err && <span role="alert" className="error">{err}</span>}
+    </span>
+  );
+}
+
 // More than this many workspace repos collapse into one "N repos" button with a popover.
 const MAX_REPO_BADGES = 3;
 function RepoBadges({ repos }: { repos: string[] }) {
@@ -105,6 +135,7 @@ export function Header({ repos = [], readOnly = false, runs, run, runId, onRun, 
           ? <span className="badge history-badge" role="status" data-testid="history-badge" title="Stored run replay: nothing is written and nothing updates live">History (read-only)</span>
           : <>
               <span className={`conn conn-${conn}`} role="status">{conn === "live" ? "● live" : conn === "reconnecting" ? "reconnecting…" : "loading…"}</span>
+              <AddFeature runId={runId} />
               <StopButton runId={runId} />
             </>}
       </div>
