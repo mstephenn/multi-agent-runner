@@ -1,8 +1,8 @@
 import { type KeyboardEvent, type ReactNode } from "react";
 
-export type MainTabId = "board" | "answer" | "graph" | "timeline" | "blackboard";
+export type MainTabId = "board" | "usecases" | "answer" | "graph" | "timeline" | "blackboard";
 export const MAIN_TAB_KEY = "mar.main.tab";
-const ALL: MainTabId[] = ["board", "answer", "graph", "timeline", "blackboard"];
+const ALL: MainTabId[] = ["board", "usecases", "answer", "graph", "timeline", "blackboard"];
 
 // localStorage can throw (private window, blocked site data); the tabs must work without it.
 export const loadMainTab = (): MainTabId => {

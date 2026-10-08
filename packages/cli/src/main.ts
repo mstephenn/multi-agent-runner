@@ -188,6 +188,8 @@ async function planWithCodexRetry(a: Parameters<typeof planGoal>[0]): Promise<Pl
 export interface ExecuteOpts {
   goal: string; repo: string; store: Store; adapters: Record<Runtime, Adapter>; config: MarConfig;
   runId?: string; unsafe?: boolean; signal?: AbortSignal;
+  /** Drains features the user added to the running run (UI), to be planned as the next phase. */
+  takeFeatures?: () => string[];
   worktrees?: Pick<Worktrees, "create" | "commit" | "remove"> & Partial<Pick<Worktrees, "shared" | "head" | "changedFiles" | "link">>;
   /** Repo map for the planner: `ref` (re-plans) is the integration branch to list instead of HEAD. */
   repoMapFn?: (repo: string, maxChars: number, ref?: string) => string;
@@ -242,7 +244,7 @@ export async function executeRun(o: ExecuteOpts): Promise<ExecuteResult> {
       }
       const common = {
         goal, repoMap: map, cwd: repo, signal: o.signal, phase: a.phase, maxTasks: a.maxTasks, previousRemaining: a.previousRemaining,
-        history: a.history, ...(a.recovery ? { recovery: true } : {}), takenIds: a.takenIds, externalIds: a.externalIds, onUsage: a.onUsage,
+        history: a.history, useCases: a.useCases, ...(a.recovery ? { recovery: true } : {}), takenIds: a.takenIds, externalIds: a.externalIds, onUsage: a.onUsage,
         ...(ws ? { workspace: ws.repos.map((r) => r.name) } : {}),
       };
       try { return await planGoal({ ...common, adapter: adapters.claude, model: config.plannerModel }); }
@@ -265,7 +267,7 @@ export async function executeRun(o: ExecuteOpts): Promise<ExecuteResult> {
   const canIntegrate = integrateOn && (o.integrateFn !== undefined || o.worktrees === undefined); // injected fakes have no real branches
   try {
     const out = await runPhases({
-      store, runId, signal: o.signal,
+      store, runId, signal: o.signal, ...(o.takeFeatures ? { takeFeatures: o.takeFeatures } : {}),
       limits: { maxTasks: config.maxTasks, maxPhases: config.maxPhases, maxTotalTokens: effectiveMaxTotalTokens(config) },
       plan,
       run: (dag, ctx) => (o.runDagFn ?? realRunDag)({
@@ -514,10 +516,18 @@ export async function runMain(argv: string[], deps: MainDeps = {}): Promise<numb
       goal = run.goal;
     } else { runId = newRunId(); goal = cli.goal; }
 
+    const features: string[] = [];
+    let runActive = true;
     proc.on("SIGINT", onSignal); proc.on("SIGTERM", onSignal); proc.on("SIGHUP", onSignal); handlersOn = true;
     const dist = uiDist();
     try {
-      server = await (deps.startServer ?? startServer)(store, { port: cli.port, staticDir: dist, onStop: (id) => { if (id === runId) ac.abort(); } });
+      server = await (deps.startServer ?? startServer)(store, { port: cli.port, staticDir: dist, onStop: (id) => { if (id === runId) ac.abort(); },
+        onFeature: (id, text) => {
+          if (id !== runId || !runActive || ac.signal.aborted) return false;
+          features.push(text);
+          store!.appendEvent({ run_id: runId, task_id: null, agent_id: null, type: "feature_requested", payload: { text } });
+          return true;
+        } });
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code === "EADDRINUSE") console.error(`mar: port ${cli.port} is already in use; pick another with --port`);
       else console.error(`mar: could not start server: ${errMessage(e)}`);
@@ -528,10 +538,12 @@ export async function runMain(argv: string[], deps: MainDeps = {}): Promise<numb
     if (cli.unsafe) console.log("WARNING: --unsafe is on. Agents run with permission prompts DISABLED and can run arbitrary commands.");
 
     const out = await executeRun({
-      goal, repo, store, runId, config, unsafe: cli.unsafe, ...(workspace ? { workspace } : {}), signal: ac.signal, log: (l) => console.log(l),
+      goal, repo, store, runId, config, unsafe: cli.unsafe, ...(workspace ? { workspace } : {}), signal: ac.signal, takeFeatures: () => features.splice(0), log: (l) => console.log(l),
       adapters: deps.adapters?.() ?? { claude: claudeAdapter(), codex: codexAdapter() },
       worktrees: deps.worktrees, repoMapFn: deps.repoMapFn, integrateFn: deps.integrateFn,
     });
+    runActive = false;
+    if (features.length) console.log(`Note: ${features.length} feature request(s) arrived after planning ended and were not run; start a new run for them.`);
     const { results, phases } = out;
     const multi = phases.length > 1;
 

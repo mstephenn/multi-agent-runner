@@ -125,6 +125,18 @@ describe("createRunClient", () => {
     expect(FakeSocket.all).toHaveLength(1);
   });
 
+  it("reloads the snapshot (plan) when a new phase starts or a task starts", async () => {
+    createRunClient("r1", deps(), (s) => states.push(s));
+    await settle(20);
+    const sock = FakeSocket.all[0]!;
+    sock.onopen?.({});
+    for (const [i, type] of ["phase_started", "task_started"].entries()) {
+      const before = calls.length;
+      sock.send(ev(20 + i, type)); await settle(300);
+      expect(calls.length).toBe(before + 1);
+    }
+  });
+
   it("drops a stale snapshot reload that resolves after a newer one", async () => {
     const resolvers: ((r: Resp) => void)[] = [];
     createRunClient("r1", deps(), (s) => states.push(s));

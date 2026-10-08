@@ -1,8 +1,8 @@
 import { z } from "zod";
-import { TaskSpec, WRITER_ROLES } from "./schemas.js";
+import { TaskSpec, UseCase, WRITER_ROLES } from "./schemas.js";
 import { globsOverlap } from "./globs.js";
 
-export type Dag = { tasks: TaskSpec[] };
+export type Dag = { tasks: TaskSpec[]; useCases?: UseCase[] };
 export class DagError extends Error {}
 
 // Keys the blackboard publishes for every finished task (see orchestrator publishResult).
@@ -25,6 +25,8 @@ const SHARED_FILE = /^(package\.json|pnpm-lock\.yaml|package-lock\.json|yarn\.lo
 export interface ParseDagOpts {
   /** Ids of tasks finished in EARLIER phases: their blackboard keys may be listed in `needs` without a `dependsOn`. */
   external?: ReadonlySet<string>;
+  /** Use case ids declared in EARLIER phases: tasks may reference them without redeclaring. */
+  knownUseCases?: ReadonlySet<string>;
   /**
    * Workspace repos (folder names). With 2+ repos every task that writes (or depends on a writer) must name one of them;
    * purely read-only tasks may omit `repo` (= the whole workspace, read-only). With exactly 1 repo writers default to it.
@@ -34,7 +36,11 @@ export interface ParseDagOpts {
 
 export function parseDag(input: unknown, opts: ParseDagOpts = {}): Dag {
   const external = opts.external ?? new Set<string>();
-  const dag = z.object({ tasks: z.array(TaskSpec).min(1) }).parse(input);
+  const parsed = z.object({ tasks: z.array(TaskSpec).min(1), useCases: z.array(UseCase).optional() }).parse(input);
+  const dag: Dag = { tasks: parsed.tasks, ...(parsed.useCases?.length ? { useCases: parsed.useCases } : {}) };
+  const ucIds = new Set([...(opts.knownUseCases ?? []), ...(dag.useCases ?? []).map((u) => u.id)]);
+  if ((dag.useCases ?? []).length !== new Set((dag.useCases ?? []).map((u) => u.id)).size) throw new DagError("duplicate use case id");
+  for (const t of dag.tasks) for (const u of t.useCases ?? []) if (!ucIds.has(u)) throw new DagError(`task ${t.id} references unknown use case ${u}; declare it in "useCases"`);
   const repos = opts.repos;
   if (repos?.length === 1) for (const t of dag.tasks) if (WRITER_ROLES.has(t.role) && t.repo === undefined) t.repo = repos[0];
   const byId = new Map<string, TaskSpec>();

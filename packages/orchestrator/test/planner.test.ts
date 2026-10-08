@@ -11,6 +11,22 @@ const res = (o: unknown) => [{ type: "result", text: typeof o === "string" ? o :
 const run = (script: any, extra: any = {}) => { const f = fakeAdapter(script); return { f, p: planGoal({ goal: 'add "x" feature', repoMap: "a.ts", adapter: f.adapter, model: null, cwd: "/r", ...extra }) }; };
 const count = (s: string, sub: string) => s.split(sub).length - 1;
 
+describe("planGoal use cases", () => {
+  const plan = { tasks: [{ id: "p1-a", role: "implementer", runtime: "codex", tier: "mid", goal: "g", useCases: ["uc-login"] }], useCases: [{ id: "uc-login", title: "Login" }], remaining: "" };
+  it("returns the declared use cases and asks for them in the prompt", async () => {
+    const { f, p } = run(() => res(plan));
+    const out = await p;
+    expect(out.useCases).toEqual(plan.useCases);
+    expect(f.calls[0].prompt).toContain('"useCases"');
+  });
+  it("rejects a task naming an undeclared use case, then accepts the corrected retry", async () => {
+    let n = 0;
+    const { p } = run(() => res(++n === 1 ? { ...plan, useCases: [] } : plan));
+    expect((await p).useCases).toHaveLength(1);
+    expect(n).toBe(2);
+  });
+});
+
 describe("planGoal", () => {
   it("returns a validated DAG", async () => {
     const { p } = run(() => res(valid));

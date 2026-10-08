@@ -110,4 +110,13 @@ describe("shared files between parallel writers", () => {
   it("allows it when the writers are ordered", () => {
     expect(() => parseDag({ tasks: [w("a", ["README.md"]), { ...w("b", ["README.md"]), dependsOn: ["a"] }] })).not.toThrow();
   });
+  it("accepts use cases and rejects tasks that reference an undeclared one", () => {
+    const uc = [{ id: "uc-1", title: "Login" }];
+    expect(parseDag({ tasks: [t("a", { useCases: ["uc-1"] })], useCases: uc }).useCases).toEqual(uc);
+    expect(() => parseDag({ tasks: [t("a", { useCases: ["nope"] })], useCases: uc })).toThrow(/unknown use case nope/);
+    expect(parseDag({ tasks: [t("a", { useCases: ["uc-0"] })] }, { knownUseCases: new Set(["uc-0"]) }).tasks[0].useCases).toEqual(["uc-0"]);
+  });
+  it("rejects duplicate use case ids", () => {
+    expect(() => parseDag({ tasks: [t("a")], useCases: [{ id: "u", title: "x" }, { id: "u", title: "y" }] })).toThrow(/duplicate use case/);
+  });
 });
