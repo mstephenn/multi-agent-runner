@@ -11,6 +11,7 @@ import { effectiveMaxTotalTokens, loadConfig, loadWorkspaceConfig, type MarConfi
 import { ownershipRows, renderOwnershipWarnings, renderPhaseHeader, renderPhaseSummary, renderPlanTable, renderStop } from "./phaseOutput.js";
 import { renderAnswer, saveReports } from "./answer.js";
 import { nodeRunner, preflight, preflightWorkspace } from "./preflight.js";
+import { ensureInitialCommit, initIfNoRepo } from "./bootstrap.js";
 import { runHistory, SIGNAL_DEBOUNCE_MS, type HistoryCli, type HistoryDeps } from "./history.js";
 import { sanitizeForTerminal } from "./sanitize.js";
 
@@ -450,6 +451,9 @@ export async function runMain(argv: string[], deps: MainDeps = {}): Promise<numb
   try {
     const repo = resolve(cli.repo); // the repository, or the parent folder of a workspace
     let config = loadConfig(repo);
+    // Real runs only (an injected preflight means a test double): an empty or non-repo folder becomes a repo.
+    const bootstrap = deps.preflight === undefined;
+    if (bootstrap && await initIfNoRepo(repo, nodeRunner(repo))) console.log(`Note: ${repo} was not a git repository; ran git init.`);
     const resolveWs = deps.resolveWorkspace ?? resolveWorkspace;
     let found = await resolveWs(repo, { repos: cli.repos });
     let workspace: WorkspaceInfo | undefined;
@@ -480,6 +484,11 @@ export async function runMain(argv: string[], deps: MainDeps = {}): Promise<numb
     if (cli.budget !== undefined) config = { ...config, defaultBudgetTokens: cli.budget };
     if (cli.phases !== undefined) config = { ...config, maxPhases: cli.phases };
 
+    if (bootstrap) {
+      for (const dir of workspace ? workspace.repos.map((r) => r.path) : [repo]) {
+        if (await ensureInitialCommit(nodeRunner(dir))) console.log(`Note: ${dir} had no commits; made an initial commit.`);
+      }
+    }
     let problems: string[];
     if (workspace) {
       problems = deps.preflight
