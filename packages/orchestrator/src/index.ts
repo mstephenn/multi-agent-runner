@@ -14,3 +14,4 @@ export * from "./workspace.js";
 export * from "./wsWorktrees.js";
 export * from "./knowledge.js";
 export * from "./knowledgeUpdate.js";
+export * from "./knowledgePrompt.js";
