@@ -152,6 +152,35 @@ mar history --ui                         # replay the newest run in the web UI
 - The event server binds `127.0.0.1` only and rejects requests whose `Host` or `Origin` is not loopback on the configured port.
 - Residual risk: this is defence in depth, not a sandbox. Bash is not OS-sandboxed and can read files outside the worktree (for example `~/.ssh` or other repos). For real isolation run `mar` in a container or VM.
 
+## Repository knowledge base
+
+`mar` keeps a small, repo-derived knowledge base (KB) so planners and workers do not have to rediscover the project on every run. It is on by default; set `"kbEnabled": false` in `.mar.json` to turn it off.
+
+**Location.** `<repo>/.mar/knowledge/`: one markdown file per entry plus `index.json`, which records each entry's id, section, title, file, content hash, source (`scan` or `manual`) and timestamps. The KB lives in the repo root, not in the task worktrees.
+
+**Entries.**
+
+- `structure` (section `structure`): the repo map in a fenced block, capped at 6,000 characters; omitted when the repo is not a git repo.
+- `stack` (`stack`): detected languages and config files (`package.json`, `tsconfig.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`, `Dockerfile`, ...), the package manager from its lockfile, and up to 40 dependency names.
+- `conventions` (`conventions`): lint, formatter, test and TypeScript config files, ES module use, and pointers to `CONTRIBUTING.md`, `CLAUDE.md` or `AGENTS.md` when present.
+- `commands` (`commands`): `package.json` scripts, `Makefile` targets, and `cargo`/`go` commands.
+- `task-<hash>` (`conventions`, titled "Completed task knowledge"): one per verified task that changed files or recorded decisions, holding its summary, files changed (never `.mar/knowledge/` itself) and decisions.
+
+**When it updates.**
+
+- At the start of every `mar run` and `mar resume`, the repo is scanned and the scan entries are merged. If the refresh fails, `mar` logs `Knowledge refresh failed: ...` and the run continues without the KB.
+- After each task passes its verify gate, the task's checkout is scanned before the worktree is removed, and its per-task entry is written. A task that only produced a summary changes nothing.
+- A scan entry is rewritten only when its content changes; its `createdAt` is kept. Entries that a later scan no longer produces are left in place, never deleted. Identical input performs no writes, including to `index.json`.
+- Knowledge bookkeeping is best effort: a KB error never fails a successful task.
+
+**Manual-edit protection.** Each entry stores the hash of its file as last written. If you edit a file, its hash no longer matches, so the next scan leaves it alone and marks the entry `source: "manual"`. Manual entries are never overwritten. To keep a value, edit the file; to let `mar` manage an entry again, delete its entry from `index.json` and its file, and the next run recreates it from the scan. If `index.json` is missing or invalid, `mar` rebuilds it from the `.md` files in the directory; each recovered file becomes a manual `conventions` entry, so nothing hand-written is lost.
+
+**Redaction.** Every entry body passes through the same redaction as run output (known token formats, private keys, URL credentials, bearer tokens, values of keys named like `secret`/`token`/`password`) before it is hashed or written. The digest injected into prompts is redacted again.
+
+**Prompt injection.** The planner and every worker prompt get a read-only digest of the KB: sections in the order above, then by id, capped at about 8,000 characters with a `[Knowledge base truncated]` marker. Missing or invalid KB files are skipped silently.
+
+**Gitignore.** `mar` adds `.mar/` to the repo's `.git/info/exclude` (a local file, not shared), so the KB, worktrees and `mar.db` stay out of commits by default. Keep that as is; it is the advice for most projects. `mar` re-adds the line whenever it is missing, so do not replace it with `.mar/*` and `!.mar/knowledge/` expecting it to stick. To share the KB, force-add it once with `git add -f .mar/knowledge` and commit the files, then re-add them with `git add -f` after `mar` changes them. Tracking the KB this way means reviewing its diffs like any other change, and redaction is the only protection against secrets in it.
+
 ## Configuration (`.mar.json`)
 
 Optional file in the repo root. Unknown keys are rejected.
@@ -174,6 +203,7 @@ Optional file in the repo root. Unknown keys are rejected.
 | `linkPaths` | list of repo-relative paths | `[]` | Paths (single-segment `*` globs such as `node_modules`, `packages/*/node_modules`) symlinked from your repo into writer worktrees so verify can run without reinstalling; secrets (`.env*`, keys), `.git` and `.mar` are refused |
 | `ownership` | `"warn"` or `"enforce"` | `"warn"` | Writer touched files outside its `paths`: record an event (and print an `Ownership warnings:` block), or fail the task (`failed:ownership`). Recommended `"enforce"` when several writers run in parallel in one repo |
 | `integrate` | boolean | `true` | Build `mar/<runId>/integration` |
+| `kbEnabled` | boolean | `true` | Keep the repository knowledge base in `.mar/knowledge/` and inject it into planner and worker prompts. `false` skips the refresh, the post-task updates and the injection (see [Repository knowledge base](#repository-knowledge-base)) |
 | `tiers` | `{claude?, codex?}` each with partial `low`/`mid`/`high` (string or null) | claude: `claude-haiku-5-5` / `claude-sonnet-5-5` / `claude-sonnet-5-5`; codex: all `null` | Model per runtime and tier; `null` uses that CLI's built-in default (Codex runs with `--ignore-user-config`, so your own Codex config is not used) |
 | `repos` | list of folder names | unset | Workspace only: restrict the run to these repos; `--repos` wins |
 
