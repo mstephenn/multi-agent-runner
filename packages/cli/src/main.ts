@@ -6,7 +6,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { type Dag, type Role, type Runtime, type Tier } from "@mar/core";
 import { claudeAdapter, codexAdapter, type Adapter } from "@mar/adapters";
 import { Store, startServer } from "@mar/server";
-import { createWorkspaceWorktrees, createWorktrees, ensureMarExcluded, git, integrate as realIntegrate, planGoal, redact, REPO_NAME, repoMap, resolveWorkspace, runDag as realRunDag, runPhases, usesSharedWorktree, workspaceRepoMap, type IntegrationOutcome, type PhasePlanArgs, type PhaseRec, type PhaseStop, type Plan, type Worktrees, type WorkspaceRepo } from "@mar/orchestrator";
+import { createWorkspaceWorktrees, createWorktrees, ensureMarExcluded, git, integrate as realIntegrate, planGoal, refreshKnowledge, redact, REPO_NAME, repoMap, resolveWorkspace, runDag as realRunDag, runPhases, usesSharedWorktree, workspaceRepoMap, type IntegrationOutcome, type PhasePlanArgs, type PhaseRec, type PhaseStop, type Plan, type Worktrees, type WorkspaceRepo } from "@mar/orchestrator";
 import { effectiveMaxTotalTokens, loadConfig, loadWorkspaceConfig, type MarConfig, type RepoConfig } from "./config.js";
 import { ownershipRows, renderOwnershipWarnings, renderPhaseHeader, renderPhaseSummary, renderPlanTable, renderStop } from "./phaseOutput.js";
 import { renderAnswer, saveReports } from "./answer.js";
@@ -226,6 +226,11 @@ export async function executeRun(o: ExecuteOpts): Promise<ExecuteResult> {
   // The goal is persisted, served by /api/runs and sent to the planner: never keep secrets in it.
   const goal = redact(o.goal);
   store.createRun(runId, goal, repo);
+  let knowledge: ReturnType<typeof refreshKnowledge>["kb"] | undefined;
+  if (config.kbEnabled) {
+    try { knowledge = refreshKnowledge(repo).kb; }
+    catch (e) { log(`Knowledge refresh failed: ${redact(e instanceof Error ? e.message : String(e))}`); }
+  }
   const ws = o.workspace;
   // Persisted once per run (resume reads it); single-repo runs record nothing, as before.
   if (ws && !store.listEvents(runId).some((e) => e.type === "run_started"))
@@ -253,6 +258,7 @@ export async function executeRun(o: ExecuteOpts): Promise<ExecuteResult> {
         catch (e) { if (!a.integrationBranch) throw e; map = mapFn(repo, config.repoMapChars); }
       }
       const common = {
+        ...(knowledge ? { knowledgeRoot: repo } : {}),
         goal, repoMap: map, cwd: repo, signal: o.signal, phase: a.phase, maxTasks: a.maxTasks, previousRemaining: a.previousRemaining,
         history: a.history, useCases: a.useCases, ...(a.recovery ? { recovery: true } : {}), takenIds: a.takenIds, externalIds: a.externalIds, onUsage: a.onUsage,
         ...(ws ? { workspace: ws.repos.map((r) => r.name) } : {}),
@@ -281,7 +287,7 @@ export async function executeRun(o: ExecuteOpts): Promise<ExecuteResult> {
       limits: { maxTasks: config.maxTasks, maxPhases: config.maxPhases, maxTotalTokens: effectiveMaxTotalTokens(config) },
       plan,
       run: (dag, ctx) => (o.runDagFn ?? realRunDag)({
-        store, runId, dag, repo, adapters,
+        store, runId, dag, repo, adapters, ...(knowledge ? { knowledge } : {}),
         worktrees: o.worktrees ?? (ws
           ? createWorkspaceWorktrees(repo, runId, ws.repos, { linkPaths: Object.fromEntries(ws.repos.map((r) => [r.name, ws.repoConfigs[r.name]?.linkPaths ?? []])), ...(ctx.baseRef ? { baseRef: ctx.baseRef } : {}) })
           : createWorktrees(repo, runId, { linkPaths: config.linkPaths, resolveConflicts: true, ...(ctx.baseRef ? { baseRef: ctx.baseRef } : {}) })),

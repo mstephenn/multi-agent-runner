@@ -12,6 +12,8 @@ const DEFAULT_TIERS: { claude: Tiers; codex: Tiers } = {
 const isOpus = (m: string | null | undefined) => !!m && /opus/i.test(m);
 
 const shape = {
+  // Persist repository knowledge and include it in agent prompts.
+  kbEnabled: z.boolean().default(true),
   concurrency: z.number().int().min(1).max(16).default(3),
   // Self-heal retries after a failed task; zero disables retries.
   maxRetries: z.number().int().min(0).max(10).default(2),

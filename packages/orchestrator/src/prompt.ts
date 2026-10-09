@@ -1,4 +1,5 @@
 import type { TaskSpec } from "@mar/core";
+import { knowledgePrompt } from "./knowledgePrompt.js";
 
 type Slice = { key: string; version: number; body: string; tokens: number };
 
@@ -18,15 +19,16 @@ const workspaceNote = (w: WorkspacePrompt, task: TaskSpec): string => {
   return "";
 };
 
-export function buildPrompt(task: TaskSpec, slices: Slice[], workspace?: WorkspacePrompt): string {
+export function buildPrompt(task: TaskSpec, slices: Slice[], workspace?: WorkspacePrompt, knowledgeRoot?: string): string {
   const ctx = slices.length
     ? `\n## Context from earlier tasks\n${slices.map((s) => `### ${s.key}\n${s.body}`).join("\n\n")}\n`
     : "";
+  const knowledge = knowledgeRoot ? knowledgePrompt(knowledgeRoot) : "";
   return `You are a ${task.role} working in an isolated git worktree. Do only this task.
 
 ## Task
 ${task.goal}
-${workspace ? workspaceNote(workspace, task) : ""}${ctx}
+${workspace ? workspaceNote(workspace, task) : ""}${ctx}${knowledge ? `\n${knowledge}\n` : ""}
 ## Output contract
 When finished, reply with ONLY a JSON object: {"summary": string (<=900 chars), "report"?: string, "filesChanged": string[], "decisions": string[], "openQuestions": string[]}.
 Keep summary and the lists terse; do not restate the task or paste code.

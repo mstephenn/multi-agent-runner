@@ -7,9 +7,13 @@ import { DependencyMergeConflict, type CreateCtx, type PendingMerge } from "./wo
 import { injectSlices, publishResult } from "./blackboard.js";
 import { redact } from "./redact.js";
 import { usesSharedWorktree } from "./readonly.js";
+import type { KnowledgeBase } from "./knowledge.js";
+import { updateKnowledge } from "./knowledgeUpdate.js";
 import { runVerify } from "./verify.js";
 
 export interface RunDeps {
+  /** Shared persistent KB, supplied only when enabled. */
+  knowledge?: KnowledgeBase;
   store: Store; runId: string; dag: Dag; repo: string;
   adapters: Record<Runtime, Adapter>;
   worktrees: { pendingMerges?(taskId: string): PendingMerge | undefined; create(taskId: string, dependsOn?: string[], ctx?: CreateCtx): Promise<string>; commit(taskId: string, message: string): Promise<void>; remove(taskId: string): Promise<void>;
@@ -243,7 +247,7 @@ async function runDagInner(d: RunDeps): Promise<Record<string, Outcome>> {
     // Workspace: a writer sees the other repos read-only at ../<name> (only for runtimes where that was verified).
     const siblingNames = ws && !shared && task.repo !== undefined && d.adapters[task.runtime].siblingRead !== false ? ws.repos.filter((n) => n !== task.repo).sort() : [];
     const wsPrompt: WorkspacePrompt | undefined = !ws ? undefined : shared ? { all: [...ws.repos].sort() } : { repo: task.repo, siblings: siblingNames };
-    let prompt = buildPrompt(task, slices, wsPrompt) + extra;
+    let prompt = buildPrompt(task, slices, wsPrompt, d.knowledge?.root) + extra;
     if (ws && !shared && task.repo === undefined) throw new TaskFailure("failed:no-repo", false);
     if (siblingNames.length > 0) sharedUsedOf.set(d, true); // the sibling symlinks point into the shared view: release it at the end of the run
     let cwd: string;
@@ -339,6 +343,14 @@ async function runDagInner(d: RunDeps): Promise<Record<string, Outcome>> {
         await checkSiblings(task, true);
         await checkOwnership(task, startSha);
         await runGate(task, cwd, ac.signal); // before publishResult: dependents never see unverified output
+      }
+      if (d.knowledge) {
+        // Scan the verified task checkout before cleanup; persist into the run root's KB.
+        // Knowledge bookkeeping must not fail a successful task.
+        bestEffort(() => {
+          const updated = updateKnowledge({ ...d.knowledge!, root: cwd }, [{ taskId: `${runId}/${task.id}`, result: res }]);
+          d.knowledge!.index = updated.kb.index;
+        });
       }
       return res;
     } catch (e) {
