@@ -50,7 +50,7 @@ export const EventTypes = [
   "task_started", "task_finished", "task_failed", "prompt_sent", "tool_call",
   "tool_result", "assistant_text", "blackboard_write", "blackboard_read", "usage", "runtime_fallback",
   "verify_started", "verify_passed", "verify_failed", "ownership_violation", "integration",
-  "phase_started", "phase_finished", "run_started", "sibling_modified", "dependency_merge_conflict", "predicted_conflict", "feature_requested",
+  "phase_started", "phase_finished", "run_started", "sibling_modified", "dependency_merge_conflict", "predicted_conflict", "feature_requested", "task_retry",
 ] as const;
 export type EventType = (typeof EventTypes)[number];
 
