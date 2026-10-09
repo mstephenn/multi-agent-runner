@@ -288,7 +288,8 @@ export async function executeRun(o: ExecuteOpts): Promise<ExecuteResult> {
         modelFor: (rt, tier: Tier) => config.tiers[rt][tier],
         fallbackRuntime: true,
         toolsFor, concurrency: config.concurrency, defaultBudgetTokens: config.defaultBudgetTokens,
-        maxAttempts: config.maxAttempts, unsafe: o.unsafe, signal: o.signal,
+        maxAttempts: config.maxAttempts, maxRetries: config.maxRetries,
+        escalateOnRetry: config.escalateOnRetry, healEnabled: config.healEnabled, unsafe: o.unsafe, signal: o.signal,
         taskTimeoutMs: config.taskTimeoutMinutes * 60_000, maxBudgetUsdPerTask: config.maxBudgetUsdPerTask,
         repairResult: makeRepair(adapters, config, repo, o.signal),
         ...(ws
