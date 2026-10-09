@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, type KeyboardEvent, type PointerEvent } from "react";
 import type { BbEntry, Dag, StoredEvent } from "@mar/core";
-import { deriveContext, type AgentStatus, type AgentView } from "./derive.js";
+import { deriveContext, type AgentStatus, type AgentView, retryCount } from "./derive.js";
 import { reasonText, type Problem } from "./taskBoard.js";
 import { budgetUsage, fmtCost, fmtTokens } from "./fmt.js";
 import type { ReportRow } from "./runClient.js";
@@ -72,7 +72,7 @@ export function Inspector({ agent, events, blackboard, plan, reports = [], width
     <aside ref={aside} className="inspector" style={width === null ? undefined : { width }} aria-label={`Inspector for ${agent.id}`}>
       <div className="inspector-resize" role="separator" aria-label="Resize inspector" aria-orientation="vertical" aria-valuemin={MIN_WIDTH} aria-valuenow={width ?? undefined} tabIndex={0} onPointerDown={onResizeStart} onPointerMove={onResizeMove} onPointerUp={onResizeEnd} onPointerCancel={onResizeEnd} onKeyDown={onResizeKey} />
       <header className="insp-head">
-        <div><h2 className="mono">{agent.id}</h2>{agent.repo && <span className="badge repo-badge" title={`Repository: ${agent.repo}`}>{agent.repo === "*" ? "All repos" : agent.repo}</span>}</div>
+        <div><h2 className="mono">{agent.id}</h2>{retryCount(agent) > 0 && <span className="badge retry-badge">{retryCount(agent)} {retryCount(agent) === 1 ? "retry" : "retries"}</span>}{agent.repo && <span className="badge repo-badge" title={`Repository: ${agent.repo}`}>{agent.repo === "*" ? "All repos" : agent.repo}</span>}</div>
         <button type="button" onClick={onClose} aria-label="Close inspector">Close</button>
       </header>
       {(agent.status === "failed" || agent.status === "blocked") && (

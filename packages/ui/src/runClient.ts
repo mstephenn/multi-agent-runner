@@ -1,6 +1,6 @@
 import type { BbEntry, Dag, StoredEvent } from "@mar/core";
 
-export type TaskRow = { task_id: string; status: string; detail: string | null };
+export type TaskRow = { task_id: string; status: string; detail: string | null; attempt?: number };
 export type Snapshot = { events: StoredEvent[]; blackboard: BbEntry[]; tasks: TaskRow[]; plan: Dag | null; reports: ReportRow[]; truncated?: boolean };
 export type ReportRow = { task_id: string; body: string };
 export type Conn = "loading" | "live" | "reconnecting" | "history";

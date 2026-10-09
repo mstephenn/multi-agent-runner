@@ -47,6 +47,7 @@ export class Store {
     }
     this.db = new Database(path);
     this.db.pragma("journal_mode = WAL");
+    const hadAttempts = this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='task_attempts'").get();
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, goal TEXT, repo TEXT, created INTEGER);
       CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT, task_id TEXT, agent_id TEXT, ts INTEGER, type TEXT, payload TEXT);
@@ -54,10 +55,14 @@ export class Store {
       CREATE TABLE IF NOT EXISTS bb_entries (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT, key TEXT, author_task TEXT, version INTEGER, ts INTEGER, kind TEXT, body TEXT, refs TEXT);
       CREATE UNIQUE INDEX IF NOT EXISTS bb_run_key_version ON bb_entries(run_id, key, version);
       CREATE TABLE IF NOT EXISTS task_status (run_id TEXT, task_id TEXT, status TEXT, detail TEXT, PRIMARY KEY (run_id, task_id));
+      CREATE TABLE IF NOT EXISTS task_attempts (run_id TEXT, task_id TEXT, attempt INTEGER NOT NULL, PRIMARY KEY (run_id, task_id));
       CREATE TABLE IF NOT EXISTS plans (run_id TEXT PRIMARY KEY, dag TEXT);
       CREATE TABLE IF NOT EXISTS phases (run_id TEXT, phase INTEGER, dag TEXT, remaining TEXT, status TEXT, PRIMARY KEY (run_id, phase));
       CREATE TABLE IF NOT EXISTS reports (run_id TEXT, task_id TEXT, body TEXT NOT NULL, ts INTEGER, PRIMARY KEY (run_id, task_id));
     `);
+    if (!hadAttempts) this.db.transaction(() => {
+      for (const row of this.db.prepare("SELECT * FROM events WHERE type='task_started' ORDER BY id").all() as EventRow[]) this.recordStart(eventFromRow(row));
+    })();
   }
 
   private w(): Database.Database {
@@ -83,9 +88,13 @@ export class Store {
   appendEvent(e: NewEvent): StoredEvent {
     const ts = Date.now();
     const payload = e.payload ?? {};
-    const r = this.w().prepare("INSERT INTO events (run_id, task_id, agent_id, ts, type, payload) VALUES (?,?,?,?,?,?)")
-      .run(e.run_id, e.task_id, e.agent_id, ts, e.type, JSON.stringify(payload));
-    const stored = { ...e, payload, id: Number(r.lastInsertRowid), ts };
+    const stored = this.w().transaction(() => {
+      const r = this.db.prepare("INSERT INTO events (run_id, task_id, agent_id, ts, type, payload) VALUES (?,?,?,?,?,?)")
+        .run(e.run_id, e.task_id, e.agent_id, ts, e.type, JSON.stringify(payload));
+      const stored = { ...e, payload, id: Number(r.lastInsertRowid), ts };
+      this.recordStart(stored);
+      return stored;
+    })();
     for (const cb of this.subs) { try { cb(stored); } catch { /* a failing subscriber must not break the append or starve others */ } }
     return stored;
   }
@@ -143,12 +152,28 @@ export class Store {
     return this.rd([], () => this.db.prepare("SELECT * FROM bb_entries WHERE run_id=? ORDER BY id").all(runId) as BbRow[]).map((r) => this.bbRow(r));
   }
 
-  setTaskStatus(runId: string, taskId: string, status: string, detail?: string) {
-    this.w().prepare("INSERT INTO task_status VALUES (?,?,?,?) ON CONFLICT(run_id,task_id) DO UPDATE SET status=excluded.status, detail=excluded.detail")
-      .run(runId, taskId, status, detail ?? null);
+  private recordStart(e: StoredEvent): void {
+    if (e.type !== "task_started" || !e.task_id) return;
+    const value = e.payload?.attempt;
+    const explicit = typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+    this.db.prepare(`INSERT INTO task_attempts (run_id,task_id,attempt) VALUES (?,?,?)
+      ON CONFLICT(run_id,task_id) DO UPDATE SET attempt=${explicit ? "MAX(attempt,excluded.attempt)" : "attempt+1"}`)
+      .run(e.run_id, e.task_id, explicit ? value : 1);
+  }
+
+  setTaskStatus(runId: string, taskId: string, status: string, detail?: string, attempt?: number) {
+    if (attempt !== undefined && (!Number.isSafeInteger(attempt) || attempt < 1)) throw new Error("attempt must be a positive integer");
+    this.w().transaction(() => {
+      this.db.prepare("INSERT INTO task_status VALUES (?,?,?,?) ON CONFLICT(run_id,task_id) DO UPDATE SET status=excluded.status, detail=excluded.detail")
+        .run(runId, taskId, status, detail ?? null);
+      if (attempt !== undefined) this.db.prepare(`INSERT INTO task_attempts VALUES (?,?,?) ON CONFLICT(run_id,task_id) DO UPDATE SET attempt=MAX(attempt,excluded.attempt)`).run(runId, taskId, attempt);
+    })();
   }
   taskStatuses(runId: string) {
-    return this.rd([], () => this.db.prepare("SELECT task_id, status, detail FROM task_status WHERE run_id=?").all(runId) as { task_id: string; status: string; detail: string | null }[]);
+    const rows = this.rd([], () => this.db.prepare("SELECT task_id, status, detail FROM task_status WHERE run_id=?").all(runId) as { task_id: string; status: string; detail: string | null; attempt?: number }[]);
+    const attempts = this.rd([], () => this.db.prepare("SELECT task_id, attempt FROM task_attempts WHERE run_id=?").all(runId) as { task_id: string; attempt: number }[]);
+    const byId = new Map(attempts.map((a) => [a.task_id, a.attempt]));
+    return rows.map((row) => byId.has(row.task_id) ? { ...row, attempt: byId.get(row.task_id)! } : row);
   }
 
   /** Long-form task answer, kept outside the blackboard. Upserts (a retry overwrites); capped defensively with a visible marker. */

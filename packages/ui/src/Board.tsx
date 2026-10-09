@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { CHIPS, type BoardChip, type BoardGroup } from "./taskBoard.js";
-import { taskDuration, type AgentView } from "./derive.js";
+import { taskDuration, type AgentView, retryCount } from "./derive.js";
 import { fmtDuration, fmtTokens, STATUS_ICON } from "./fmt.js";
 import { rowsIn } from "./motion.js";
 
@@ -23,7 +23,7 @@ function Row({ a, now, text, selected, onSelect }: { a: AgentView; now: number; 
         <span className="c-id mono" title={a.id}>{a.id}{!!a.siblingWarnings?.length && <span className="sibling-indicator" title="Sibling repository modified" aria-label="Sibling repository modified"> ⚠</span>}</span>
         <span className="c-repo">{a.repo && <span className="badge repo-badge" title={a.repo === "*" ? "All workspace repositories" : `Repository: ${a.repo}`}>{a.repo === "*" ? "All repos" : a.repo}</span>}</span>
         <span className="c-badges">
-          {a.runtime && <span className={`badge rt-${a.runtime}`}>{a.runtime}</span>}
+          {retryCount(a) > 0 && <span className="badge retry-badge">{retryCount(a)} {retryCount(a) === 1 ? "retry" : "retries"}</span>}{a.runtime && <span className={`badge rt-${a.runtime}`}>{a.runtime}</span>}
           {a.tier && <span className="badge tier">{a.tier}</span>}
           {a.role && <span className="role">{a.role}</span>}
         </span>
