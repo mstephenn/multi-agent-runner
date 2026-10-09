@@ -33,6 +33,10 @@ export interface RunDeps {
   toolsFor(role: Role): string[];
   concurrency: number; defaultBudgetTokens?: number; unsafe?: boolean;
   maxAttempts?: number;                     // attempts per worker task; default 1 (no retry)
+  // Self-healing: retries after the first attempt (attempts = maxRetries + 1; wins over maxAttempts). Timeouts and
+  // unparseable results become retryable, partial worktree work is kept, and the final retry escalates tier (or
+  // switches runtime when already at "high").
+  maxRetries?: number;
   repairResult?: (raw: string) => Promise<string>;
   signal?: AbortSignal;
   // Per-attempt wall-clock limit; undefined = no timeout (the CLI supplies the default). A timeout fails the task
@@ -55,16 +59,18 @@ const VERIFY_TAIL_CHARS = 1500;
 const MAX_VIOLATION_FILES = 50;
 
 const TIMEOUT = Symbol("timeout");
+const RETRY_OUTPUT_CHARS = 1500;
+const NEXT_TIER: Record<Tier, Tier | undefined> = { low: "mid", mid: "high", high: undefined };
 const LIMIT_ERROR = /usage limit|rate limit|quota|credits/i;
 const mergeNote = (m: PendingMerge) => `\n\n## Resolve a merge conflict first\nMerging dependency branch \`${m.branch}\` into this worktree conflicted in: ${m.files.join(", ")}. The merge is in progress. Before your own work: open each conflicted file, combine BOTH sides' intent (keep every route/export/migration from both; never just pick one side), remove all conflict markers, \`git add\` them and run \`git commit --no-edit\`.${m.remaining.length ? ` Then merge the remaining dependency branches one at a time (${m.remaining.map((b) => `\`git merge --no-edit ${b}\``).join(", ")}) resolving any conflicts the same way.` : ""} Your task fails if any conflict marker remains or a dependency branch is left unmerged.`;
 const RESUME_NOTE = "\n\n## Resumed task\nAn earlier attempt at this task was interrupted, timed out or failed. Its partial work is already in this worktree (see `git log` and `git status`). Inspect it and continue from there; do not redo or discard work that is already correct.";
 const stripFence = (s: string) => s.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
-async function parseResult(raw: string, repair?: (r: string) => Promise<string>): Promise<TaskResult> {
+async function parseResult(raw: string, repair?: (r: string) => Promise<string>, healing = false): Promise<TaskResult> {
   const attempt = (s: string) => TaskResultSchema.parse(JSON.parse(stripFence(s)));
   try { return attempt(raw); } catch {
     // Not retryable: a retry would just reproduce the same unparseable output.
-    if (!repair) throw new TaskFailure("bad-result", false);
-    try { return attempt(await repair(raw)); } catch { throw new TaskFailure("bad-result", false); }
+    if (!repair) throw new TaskFailure("bad-result", healing);
+    try { return attempt(await repair(raw)); } catch { throw new TaskFailure("bad-result", healing); }
   }
 }
 
@@ -217,7 +223,7 @@ async function runDagInner(d: RunDeps): Promise<Record<string, Outcome>> {
     const timedOut = r.failed?.timedOut ?? false;
     emit(task, "verify_failed", { command, code: r.failed?.code ?? null, timedOut, tail, ms: r.ms });
     // Not retried on timeout (it would just time out again).
-    throw new TaskFailure("failed:verify", !timedOut, `\n\nVerification failed (${command}):\n${tail}`);
+    throw new TaskFailure("failed:verify", !timedOut || d.maxRetries !== undefined, `\n\nVerification failed (${command}):\n${tail}`);
   }
 
   async function attemptOnce(task: TaskSpec, extra: string, budget: BudgetTracker): Promise<TaskResult> {
@@ -312,11 +318,11 @@ async function runDagInner(d: RunDeps): Promise<Record<string, Outcome>> {
         const timeout = new Promise<typeof TIMEOUT>((res) => { timer = setTimeout(() => { ac.abort(); res(TIMEOUT); }, d.taskTimeoutMs); });
         work.catch(() => {}); // a late rejection after the timeout won must not be unhandled
         const first = await Promise.race([work, timeout]);
-        if (first === TIMEOUT) throw new TaskFailure("failed:timeout", false);
+        if (first === TIMEOUT) throw new TaskFailure("failed:timeout", d.maxRetries !== undefined && !d.signal?.aborted);
         raw = first;
       }
       if (raw === undefined) throw new TaskFailure("no-result", !d.signal?.aborted);
-      const res = await parseResult(raw, d.repairResult);
+      const res = await parseResult(raw, d.repairResult, d.maxRetries !== undefined);
       if (!shared) await d.worktrees.commit(task.id, `mar(${task.id}): ${task.goal.split("\n")[0].slice(0, 60)}`);
       committed = true;
       if (gated) {
@@ -348,10 +354,19 @@ async function runDagInner(d: RunDeps): Promise<Record<string, Outcome>> {
     emit(task, "task_started", { runtime: task.runtime, tier: task.tier, role: task.role, worktree: useShared(task) ? "shared" : "own", unsafe: d.unsafe === true, ...(d.workspace ? { repo: task.repo ?? "*" } : {}) });
     const budget = new BudgetTracker(task.budgetTokens ?? d.defaultBudgetTokens);
     let extra = resumed ? RESUME_NOTE : "";
-    const max = d.maxAttempts ?? 1;
+    const max = d.maxRetries !== undefined ? Math.max(0, Math.floor(d.maxRetries)) + 1 : d.maxAttempts ?? 1;
+    let lastReason = "";
     for (let n = 1; n <= max; n++) {
+      // Final retry of a self-healing task: a stronger tier, or the other runtime when already at the top tier.
+      let current = task;
+      if (d.maxRetries !== undefined && n > 1 && n === max) {
+        const tier = NEXT_TIER[task.tier];
+        if (tier) current = { ...task, tier };
+        else if (d.maxBudgetUsdPerTask === undefined) current = { ...task, runtime: task.runtime === "claude" ? "codex" : "claude" };
+      }
+      if (n > 1) bestEffort(() => emit(task, "task_retry", { attempt: n, max, reason: lastReason, escalated: current !== task, tier: current.tier, runtime: current.runtime }));
       try {
-        const res = await attemptOnce(task, extra, budget);
+        const res = await attemptOnce(current, extra, budget);
         // Full report goes to its own table (redacted), never the blackboard. A failed save must not fail a good task.
         let reportSaved = false;
         const report = res.report ? redact(res.report) : "";
@@ -374,7 +389,10 @@ async function runDagInner(d: RunDeps): Promise<Record<string, Outcome>> {
           bestEffort(() => store.setTaskStatus(runId, task.id, "failed", msg));
           return;
         }
-        extra = e instanceof TaskFailure && e.note ? e.note : `\n\nPrevious attempt failed: ${msg}`;
+        lastReason = msg;
+        const detail = redact(e instanceof Error ? e.message : String(e)).slice(-RETRY_OUTPUT_CHARS);
+        extra = (e instanceof TaskFailure && e.note ? e.note : `\n\nPrevious attempt failed: ${detail}`)
+          + (d.maxRetries !== undefined ? RESUME_NOTE : ""); // partial work was committed to the branch: continue from it
       }
     }
   }
