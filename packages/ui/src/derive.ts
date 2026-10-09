@@ -2,7 +2,7 @@ import type { Dag, StoredEvent } from "@mar/core";
 
 export type AgentStatus = "pending" | "running" | "done" | "failed" | "blocked";
 export type AgentView = {
-  id: string; repo?: string; siblingWarnings?: SiblingWarning[]; role?: string; runtime?: string; tier?: string; status: AgentStatus; detail?: string;
+  id: string; attempt?: number; repo?: string; siblingWarnings?: SiblingWarning[]; role?: string; runtime?: string; tier?: string; status: AgentStatus; detail?: string;
   tokens: number | null; costUsd: number | null; startedAt?: number; endedAt?: number; unsafe: boolean; phase?: number;
 };
 export type SiblingWarning = { id: number; repo: string; files: string[]; count: number };
@@ -10,7 +10,7 @@ export type FlowEdge = { from: string; to: string; key: string; version: number;
 // One segment per attempt (a resumed/retried task yields several); the latest attempt is the only one that can be open-ended.
 export type Lane = { id: string; start: number; end: number | null; attempt: number };
 export type ActivityItem = { id: number; ts: number; kind: "text" | "tool_call" | "tool_result"; text: string; isError?: boolean };
-type TaskRow = { task_id: string; status: string; detail: string | null };
+type TaskRow = { task_id: string; status: string; detail: string | null; attempt?: number };
 
 const STATUSES: readonly string[] = ["pending", "running", "done", "failed", "blocked"];
 const MAX_TEXT = 500;
@@ -20,6 +20,8 @@ const rec = (v: unknown): Record<string, unknown> => (typeof v === "object" && v
 const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
 const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
 const nonneg = (v: unknown): number | undefined => { const n = num(v); return n === undefined ? undefined : Math.max(0, n); };
+const positiveAttempt = (v: unknown): number | undefined => typeof v === "number" && Number.isSafeInteger(v) && v > 0 ? v : undefined;
+export const retryCount = (a: AgentView): number => Math.max(0, (positiveAttempt(a.attempt) ?? 1) - 1);
 const isEnd = (t: string) => t === "task_finished" || t === "task_failed";
 
 // Only true cycles (a value that is its own ancestor) are marked; a repeated, non-circular reference serializes normally.
@@ -72,7 +74,10 @@ export function deriveAgents(events: StoredEvent[], tasks: TaskRow[], plan: Dag 
     const v = get(t.task_id);
     if (STATUSES.includes(t.status)) fromStore.set(t.task_id, t.status as AgentStatus);
     if (t.detail) v.detail = t.detail;
+    v.attempt = positiveAttempt(t.attempt);
   }
+  const starts = new Map<string, number>();
+  const seenStarts = new Set<number>();
   const flaggedUnsafe = new Set<string>();
   const reopened = new Set<string>(); // a start was seen AFTER a terminal event: the events show a newer attempt than any stored terminal row
   const lastEnd = new Map<string, number | undefined>(); // tasks whose latest event-order state is terminal
@@ -81,6 +86,12 @@ export function deriveAgents(events: StoredEvent[], tasks: TaskRow[], plan: Dag 
     const v = get(ev.task_id);
     const p = rec(ev.payload);
     const ts = num(ev.ts);
+    if (ev.type === "task_started" && !seenStarts.has(ev.id)) {
+      seenStarts.add(ev.id);
+      const attempt = positiveAttempt(p.attempt) ?? (starts.get(ev.task_id) ?? 0) + 1;
+      starts.set(ev.task_id, Math.max(starts.get(ev.task_id) ?? 0, attempt));
+      v.attempt = Math.max(v.attempt ?? 1, starts.get(ev.task_id)!);
+    }
     if (ev.type === "task_started") v.repo = str(p.repo) || v.repo;
     if (ev.type === "sibling_modified") {
       const repo = str(p.repo);
@@ -132,6 +143,7 @@ export function deriveAgents(events: StoredEvent[], tasks: TaskRow[], plan: Dag 
   const workspace = deriveWorkspaceRepos(events).length > 0;
   for (const t of plan?.tasks ?? []) {
     const v = get(t.id);
+    v.attempt = Math.max(v.attempt ?? 1, positiveAttempt(t.attempt) ?? 1);
     v.role ??= t.role; v.runtime ??= t.runtime; v.tier ??= t.tier; v.phase ??= t.phase;
     v.repo ??= t.repo ?? (workspace ? "*" : undefined);
   }
