@@ -21,8 +21,8 @@ export { SIGNAL_DEBOUNCE_MS };
 export class UsageError extends Error {}
 
 const USAGE = `Usage:
-  mar run "<goal>" [--repo <path>] [--repos <a,b>] [--port <n>] [--unsafe] [--budget <tokens>] [--phases <n>]
-  mar resume <runId> [--repo <path>] [--repos <a,b>] [--port <n>] [--unsafe] [--budget <tokens>] [--phases <n>]
+  mar run "<goal>" [--repo <path>] [--repos <a,b>] [--port <n>] [--unsafe] [--budget <tokens>] [--phases <n>] [--max-retries <n>]
+  mar resume <runId> [--repo <path>] [--repos <a,b>] [--port <n>] [--unsafe] [--budget <tokens>] [--phases <n>] [--max-retries <n>]
   mar history [<runId>] [--repo <path>] [--limit <n>] [--json] [--task <id>] [--ui] [--port <n>]
   mar --help
   mar --version
@@ -34,6 +34,7 @@ Options:
   --port <n>        UI/event server port (default: 4317)
   --budget <n>      default per-task token budget (overrides config)
   --phases <n>      max planning phases for this invocation, 1-10 (overrides maxPhases; use with resume to go past the limit)
+  --max-retries <n> self-heal retries per task, 0-10 (overrides maxRetries)
   --unsafe          skip agent permission prompts (dangerous)
 
 history (read-only; never changes the repo or <repo>/.mar):
@@ -49,8 +50,8 @@ const MAX_GOAL = 20000;
 export type Cli =
   | { cmd: "help" }
   | { cmd: "version" }
-  | { cmd: "run"; goal: string; repo: string; repos?: string[]; port: number; unsafe: boolean; budget?: number; phases?: number }
-  | { cmd: "resume"; runId: string; repo: string; repos?: string[]; port: number; unsafe: boolean; budget?: number; phases?: number }
+  | { cmd: "run"; goal: string; repo: string; repos?: string[]; port: number; unsafe: boolean; budget?: number; phases?: number; maxRetries?: number }
+  | { cmd: "resume"; runId: string; repo: string; repos?: string[]; port: number; unsafe: boolean; budget?: number; phases?: number; maxRetries?: number }
   | HistoryCli;
 
 const posInt = (name: string, v: string): number => {
@@ -62,6 +63,13 @@ const phasesOpt = (v: string): number => {
   const n = posInt("phases", v);
   if (n > 10) throw new UsageError(`--phases must be between 1 and 10 (got "${v}")`);
   return n;
+};
+
+const maxRetriesOpt = (v: string): number => {
+  if (!/^[0-9]+$/.test(v) || !Number.isSafeInteger(Number(v)) || Number(v) > 10) {
+    throw new UsageError(`--max-retries must be between 0 and 10 (got "${v}")`);
+  }
+  return Number(v);
 };
 
 const MAX_HISTORY_LIMIT = 200;
@@ -89,7 +97,7 @@ export function parseCli(argv: string[]): Cli {
     parsed = parseArgs({
       args: argv, allowPositionals: true, strict: true,
       options: {
-        repo: { type: "string", default: "." }, port: { type: "string" }, budget: { type: "string" }, phases: { type: "string" }, repos: { type: "string" },
+        repo: { type: "string", default: "." }, port: { type: "string" }, budget: { type: "string" }, phases: { type: "string" }, "max-retries": { type: "string" }, repos: { type: "string" },
         unsafe: { type: "boolean", default: false }, limit: { type: "string" }, json: { type: "boolean", default: false },
         task: { type: "string" }, ui: { type: "boolean", default: false }, help: { type: "boolean", short: "h", default: false },
         version: { type: "boolean", short: "v", default: false },
@@ -101,7 +109,7 @@ export function parseCli(argv: string[]): Cli {
   if (values.version) return { cmd: "version" };
   const [cmd, ...rest] = positionals;
   if (cmd === "history") {
-    for (const f of ["unsafe", "budget", "phases", "repos"] as const) if (values[f] !== undefined && values[f] !== false) throw new UsageError(`--${f} does not apply to history`);
+    for (const f of ["unsafe", "budget", "phases", "max-retries", "repos"] as const) if (values[f] !== undefined && values[f] !== false) throw new UsageError(`--${f} does not apply to history`);
     if (rest.length > 1) throw new UsageError("history takes at most one run id");
     const runId = rest[0];
     if (runId !== undefined && !runId.trim()) throw new UsageError("run id must not be empty");
@@ -123,6 +131,7 @@ export function parseCli(argv: string[]): Cli {
     port: values.port === undefined ? 4317 : port(values.port),
     ...(values.budget === undefined ? {} : { budget: posInt("budget", values.budget) }),
     ...(values.phases === undefined ? {} : { phases: phasesOpt(values.phases) }),
+    ...(values["max-retries"] === undefined ? {} : { maxRetries: maxRetriesOpt(values["max-retries"]) }),
     ...(values.repos === undefined ? {} : { repos: reposOpt(values.repos) }),
   };
   if (cmd === "run") {
@@ -486,6 +495,7 @@ export async function runMain(argv: string[], deps: MainDeps = {}): Promise<numb
     }
     if (cli.budget !== undefined) config = { ...config, defaultBudgetTokens: cli.budget };
     if (cli.phases !== undefined) config = { ...config, maxPhases: cli.phases };
+    if (cli.maxRetries !== undefined) config = { ...config, maxRetries: cli.maxRetries };
 
     if (bootstrap) {
       for (const dir of workspace ? workspace.repos.map((r) => r.path) : [repo]) {

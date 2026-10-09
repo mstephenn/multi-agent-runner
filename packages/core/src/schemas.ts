@@ -29,6 +29,8 @@ export const TaskSpec = z.object({
   budgetTokens: z.number().int().positive().optional(),
   // Workspace runs (a parent folder of several git repos): the repo (folder name) this task works in; `paths` are relative to it.
   repo: z.string().regex(/^[A-Za-z0-9._-]+$/, "repo must match [A-Za-z0-9._-]+").optional(),
+  // One-based self-heal attempt; absent on tasks planned before healing.
+  attempt: z.number().int().positive().optional(),
   // Planning phase this task belongs to (stamped by the orchestrator; undefined = phase 1).
   phase: z.number().int().positive().optional(),
 });
@@ -50,6 +52,7 @@ export const EventTypes = [
   "task_started", "task_finished", "task_failed", "prompt_sent", "tool_call",
   "tool_result", "assistant_text", "blackboard_write", "blackboard_read", "usage", "runtime_fallback",
   "verify_started", "verify_passed", "verify_failed", "ownership_violation", "integration",
+  "heal_started", "heal_finished", "heal_failed",
   "phase_started", "phase_finished", "run_started", "sibling_modified", "dependency_merge_conflict", "predicted_conflict", "feature_requested", "task_retry",
 ] as const;
 export type EventType = (typeof EventTypes)[number];

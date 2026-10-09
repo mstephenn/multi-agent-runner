@@ -13,6 +13,10 @@ const isOpus = (m: string | null | undefined) => !!m && /opus/i.test(m);
 
 const shape = {
   concurrency: z.number().int().min(1).max(16).default(3),
+  // Self-heal retries after a failed task; zero disables retries.
+  maxRetries: z.number().int().min(0).max(10).default(2),
+  escalateOnRetry: z.boolean().default(true),
+  healEnabled: z.boolean().default(true),
   maxAttempts: z.number().int().min(1).max(3).default(1),
   defaultBudgetTokens: z.number().int().positive().default(200000),
   plannerModel: z.string().min(1).default("claude-sonnet-5-5"),
