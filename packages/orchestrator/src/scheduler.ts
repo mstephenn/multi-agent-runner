@@ -37,6 +37,10 @@ export interface RunDeps {
   // unparseable results become retryable, partial worktree work is kept, and the final retry escalates tier (or
   // switches runtime when already at "high").
   maxRetries?: number;
+  /** Disable final-retry escalation (default true). */
+  escalateOnRetry?: boolean;
+  /** Disable all retries, including legacy maxAttempts (default true). */
+  healEnabled?: boolean;
   repairResult?: (raw: string) => Promise<string>;
   signal?: AbortSignal;
   // Per-attempt wall-clock limit; undefined = no timeout (the CLI supplies the default). A timeout fails the task
@@ -126,8 +130,11 @@ async function runDagInner(d: RunDeps): Promise<Record<string, Outcome>> {
     }
   });
   const running = new Map<string, Promise<void>>();
-  const emit = (task: TaskSpec, type: EventType, payload: Record<string, unknown> = {}) =>
-    store.appendEvent({ run_id: runId, task_id: task.id, agent_id: task.id, type, payload });
+  const attempts = new Map<string, number>();
+  const emitEvent = (task: TaskSpec, type: EventType, payload: Record<string, unknown> = {}) =>
+    store.appendEvent({ run_id: runId, task_id: task.id, agent_id: task.id, type, payload: { attempt: attempts.get(task.id) ?? 1, ...payload } });
+
+  const emit = emitEvent;
 
   // Read-only tasks (see usesSharedWorktree: no writer role, no writer ancestor, no Edit/Write/Bash tools) run
   // concurrently in ONE directory, which is safe only because they cannot write. Without `shared`: legacy per-task.
@@ -226,8 +233,10 @@ async function runDagInner(d: RunDeps): Promise<Record<string, Outcome>> {
     throw new TaskFailure("failed:verify", !timedOut || d.maxRetries !== undefined, `\n\nVerification failed (${command}):\n${tail}`);
   }
 
-  async function attemptOnce(task: TaskSpec, extra: string, budget: BudgetTracker): Promise<TaskResult> {
-    const { slices, missing } = injectSlices(store, runId, task);
+  async function attemptOnce(task: TaskSpec, extra: string, budget: BudgetTracker, attempt: number): Promise<TaskResult> {
+    // Capture the attempt: a timed-out adapter may still emit while the next attempt is running.
+    const emit: typeof emitEvent = (t, type, payload = {}) => emitEvent(t, type, { ...payload, attempt });
+    const { slices, missing } = injectSlices(store, runId, task, attempt);
     if (missing.length) throw new TaskFailure(`missing:${missing[0]}`, false);
     const ws = d.workspace;
     const shared = useShared(task);
@@ -350,23 +359,26 @@ async function runDagInner(d: RunDeps): Promise<Record<string, Outcome>> {
   async function runTaskInner(task: TaskSpec) {
     // A task that already started in this run (timed out, failed or interrupted) left its partial work on its branch; the worktree reuses it.
     const resumed = !useShared(task) && store.eventsOfType(runId, ["task_started"]).some((e) => e.task_id === task.id);
+    attempts.set(task.id, 1);
     store.setTaskStatus(runId, task.id, "running");
     emit(task, "task_started", { runtime: task.runtime, tier: task.tier, role: task.role, worktree: useShared(task) ? "shared" : "own", unsafe: d.unsafe === true, ...(d.workspace ? { repo: task.repo ?? "*" } : {}) });
     const budget = new BudgetTracker(task.budgetTokens ?? d.defaultBudgetTokens);
     let extra = resumed ? RESUME_NOTE : "";
-    const max = d.maxRetries !== undefined ? Math.max(0, Math.floor(d.maxRetries)) + 1 : d.maxAttempts ?? 1;
+    const max = d.healEnabled === false ? 1 : d.maxRetries !== undefined ? Math.max(0, Math.floor(d.maxRetries)) + 1 : d.maxAttempts ?? 1;
     let lastReason = "";
     for (let n = 1; n <= max; n++) {
+      attempts.set(task.id, n);
       // Final retry of a self-healing task: a stronger tier, or the other runtime when already at the top tier.
       let current = task;
-      if (d.maxRetries !== undefined && n > 1 && n === max) {
+      if (d.maxRetries !== undefined && d.escalateOnRetry !== false && n > 1 && n === max) {
         const tier = NEXT_TIER[task.tier];
         if (tier) current = { ...task, tier };
         else if (d.maxBudgetUsdPerTask === undefined) current = { ...task, runtime: task.runtime === "claude" ? "codex" : "claude" };
       }
       if (n > 1) bestEffort(() => emit(task, "task_retry", { attempt: n, max, reason: lastReason, escalated: current !== task, tier: current.tier, runtime: current.runtime }));
+      if (n > 1) bestEffort(() => emit(current, "heal_started", { reason: lastReason, tier: current.tier, runtime: current.runtime }));
       try {
-        const res = await attemptOnce(current, extra, budget);
+        const res = await attemptOnce(current, extra, budget, n);
         // Full report goes to its own table (redacted), never the blackboard. A failed save must not fail a good task.
         let reportSaved = false;
         const report = res.report ? redact(res.report) : "";
@@ -375,13 +387,15 @@ async function runDagInner(d: RunDeps): Promise<Record<string, Outcome>> {
           try { store.saveReport(runId, task.id, report); reportSaved = true; }
           catch { /* report dropped; recorded as reportSaved:false below */ }
         }
-        publishResult(store, runId, task.id, res);
+        publishResult(store, runId, task.id, res, n);
         emit(task, "task_finished", { tokens: budget.used, report_chars: reportChars, reportSaved });
         store.setTaskStatus(runId, task.id, "done");
         outcome.set(task.id, "done");
+        if (n > 1) bestEffort(() => emit(current, "heal_finished"));
         return;
       } catch (e) {
         const msg = redact(e instanceof Error ? e.message : String(e)).slice(0, 300);
+        if (n > 1) bestEffort(() => emit(current, "heal_failed", { reason: msg }));
         const retryable = !(e instanceof TaskFailure) || e.retryable;
         if (n >= max || !retryable || d.signal?.aborted) {
           outcome.set(task.id, "failed");

@@ -611,8 +611,8 @@ describe("runDag verify gate", () => {
     expect(await runDag(deps)).toEqual({ a: "done" });
     expect(order).toEqual(["commit", "verify"]);
     expect(o.calls).toEqual([{ cwd: "/wt/a", commands: ["pnpm test"], timeoutMs: 1000, signal: true }]);
-    expect(events(store, "verify_started")[0].payload).toEqual({ commands: ["pnpm test"] });
-    expect(events(store, "verify_passed")[0].payload).toEqual({ ms: 5 });
+    expect(events(store, "verify_started")[0].payload).toEqual({ attempt: 1, commands: ["pnpm test"] });
+    expect(events(store, "verify_passed")[0].payload).toEqual({ attempt: 1, ms: 5 });
     expect(store.latestBb("r", "a/summary")?.body).toBe("A-RESULT");
     expect(o.removed).toEqual(["a"]);
   });
@@ -829,7 +829,7 @@ describe("runDag dependency merge conflicts and predicted conflicts", () => {
     const over = withChanged({ a: ["a/x.ts", "b/stolen.ts"] });
     const { store, deps } = harness([T("a"), T("b")], () => ok(), { ...over });
     await runDag(deps);
-    expect(ev(store, "predicted_conflict").map((x) => x.payload)).toEqual([{ tasks: ["a", "b"], files: ["b/stolen.ts"] }]);
+    expect(ev(store, "predicted_conflict").map((x) => x.payload)).toEqual([{ attempt: 1, tasks: ["a", "b"], files: ["b/stolen.ts"] }]);
   });
   it("no prediction for ordered tasks or disjoint violations", async () => {
     const over = withChanged({ a: ["a/x.ts", "s.txt"], b: ["b/y.ts", "s.txt"], c: ["c/q.ts", "own.txt"], d: ["d/q.ts", "own2.txt"] });

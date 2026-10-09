@@ -15,11 +15,11 @@ export function fitList(items: string[]): string {
   return clip(`…(+${n} more)`);
 }
 
-export function publishResult(store: Store, runId: string, taskId: string, r: TaskResult): BbEntry[] {
+export function publishResult(store: Store, runId: string, taskId: string, r: TaskResult, attempt?: number): BbEntry[] {
   const out: BbEntry[] = [];
   const put = (suffix: string, kind: BbEntry["kind"], body: string, refs: string[] = []) => {
     const e = store.writeBb({ run_id: runId, key: `${taskId}/${suffix}`, author_task: taskId, kind, body: clip(redact(body)), refs });
-    store.appendEvent({ run_id: runId, task_id: taskId, agent_id: taskId, type: "blackboard_write", payload: { key: e.key, version: e.version, kind } });
+    store.appendEvent({ run_id: runId, task_id: taskId, agent_id: taskId, type: "blackboard_write", payload: { key: e.key, version: e.version, kind, ...(attempt === undefined ? {} : { attempt }) } });
     out.push(e);
   };
   // Every key is ALWAYS written (explicit "(none)" for empty lists) so a dependent's `needs` never misses a key
@@ -35,7 +35,7 @@ export function publishResult(store: Store, runId: string, taskId: string, r: Ta
   return out;
 }
 
-export function injectSlices(store: Store, runId: string, task: TaskSpec) {
+export function injectSlices(store: Store, runId: string, task: TaskSpec, attempt?: number) {
   const slices: { key: string; version: number; body: string; tokens: number }[] = [];
   const missing: string[] = [];
   for (const key of task.needs) {
@@ -43,7 +43,7 @@ export function injectSlices(store: Store, runId: string, task: TaskSpec) {
     if (!e) { missing.push(key); continue; }
     const tokens = estimateTokens(e.body);
     slices.push({ key, version: e.version, body: e.body, tokens });
-    store.appendEvent({ run_id: runId, task_id: task.id, agent_id: task.id, type: "blackboard_read", payload: { key, version: e.version, tokens, author: e.author_task } });
+    store.appendEvent({ run_id: runId, task_id: task.id, agent_id: task.id, type: "blackboard_read", payload: { key, version: e.version, tokens, author: e.author_task, ...(attempt === undefined ? {} : { attempt }) } });
   }
   return { slices, missing };
 }
