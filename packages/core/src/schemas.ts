@@ -71,3 +71,28 @@ export interface BbWrite {
   run_id: string; key: string; author_task: string; kind: BbKind; body: string; refs: string[];
 }
 export type BbEntry = BbWrite & { id: number; version: number; ts: number };
+
+// Knowledge base (.mar/knowledge/): one markdown file per entry plus an index.json describing them.
+export const KbSection = z.enum(["structure", "stack", "conventions", "commands"]);
+export type KbSection = z.infer<typeof KbSection>;
+
+export const KbEntry = z.object({
+  id: z.string().regex(/^[a-z0-9_-]+$/, "kb entry id must be lowercase [a-z0-9_-]"),
+  section: KbSection,
+  title: z.string().min(1).max(120),
+  file: z.string().min(1), // path relative to the knowledge dir
+  hash: z.string().regex(/^[0-9a-f]{64}$/), // sha256 of the (redacted) markdown as last written
+  source: z.enum(["scan", "manual"]), // "manual": edited or added by a person; scans never overwrite it
+  createdAt: z.number().int().nonnegative(),
+  updatedAt: z.number().int().nonnegative(),
+  scannedAt: z.number().int().nonnegative().optional(), // last scan that still produced this entry
+});
+export type KbEntry = z.infer<typeof KbEntry>;
+
+export const KbIndex = z.object({
+  version: z.literal(1),
+  createdAt: z.number().int().nonnegative(),
+  updatedAt: z.number().int().nonnegative(),
+  entries: z.array(KbEntry).default([]),
+});
+export type KbIndex = z.infer<typeof KbIndex>;
