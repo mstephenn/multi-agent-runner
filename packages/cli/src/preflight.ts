@@ -1,11 +1,16 @@
 import { execFile } from "node:child_process";
+import { resolveWindowsCommand } from "@mar/adapters";
 
 export type Runner = (cmd: string, args: string[]) => Promise<{ code: number; out: string }>;
 
 /** Real runner: execFile (no shell), bound to `cwd`. Never throws; 127 = binary not found, 124 = timed out (child killed). */
 export function nodeRunner(cwd: string, timeoutMs = 15_000): Runner {
   return (cmd, args) => new Promise((resolve) => {
-    execFile(cmd, args, { cwd, maxBuffer: 16 * 1024 * 1024, timeout: timeoutMs, killSignal: "SIGKILL" }, (err, stdout) => {
+    // Windows: execFile does not apply PATHEXT; resolve claude.exe / codex.cmd first. A .cmd shim needs cmd.exe, so run it via ComSpec.
+    const win = process.platform === "win32";
+    const file = win ? resolveWindowsCommand(cmd) : cmd;
+    const shim = win && /\.(cmd|bat)$/i.test(file);
+    execFile(shim ? (process.env.ComSpec ?? "cmd.exe") : file, shim ? ["/d", "/c", file, ...args] : args, { windowsHide: true, cwd, maxBuffer: 16 * 1024 * 1024, timeout: timeoutMs, killSignal: "SIGKILL" }, (err, stdout) => {
       if (!err) return resolve({ code: 0, out: String(stdout) });
       const e = err as NodeJS.ErrnoException & { killed?: boolean };
       if (e.killed) return resolve({ code: 124, out: String(stdout ?? "") });

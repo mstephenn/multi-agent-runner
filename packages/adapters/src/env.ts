@@ -13,13 +13,20 @@ const EXACT = new Set([
   "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy",
   "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
 ]);
+// Windows: the CLIs and cmd.exe need these to start and to find the login (%USERPROFILE%, %APPDATA%).
+const WINDOWS = new Set([
+  "USERPROFILE", "USERNAME", "APPDATA", "LOCALAPPDATA", "HOMEDRIVE", "HOMEPATH", "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR",
+  "COMSPEC", "PATHEXT", "TEMP", "TMP", "PROGRAMDATA", "PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMW6432", "COMMONPROGRAMFILES",
+  "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE", "OS",
+]);
 const PREFIXES = ["LC_", "XDG_", "CLAUDE_", "ANTHROPIC_", "CODEX_", "OPENAI_"];
 
-export function workerEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+export function workerEnv(base: NodeJS.ProcessEnv = process.env, win: boolean = process.platform === "win32"): NodeJS.ProcessEnv {
   const out: NodeJS.ProcessEnv = {};
   for (const [k, v] of Object.entries(base)) {
     if (v === undefined) continue;
-    if (EXACT.has(k) || PREFIXES.some((p) => k.startsWith(p))) out[k] = v;
+    const key = win ? k.toUpperCase() : k; // Windows env names are case-insensitive ("Path")
+    if (EXACT.has(key) || (win && WINDOWS.has(key)) || PREFIXES.some((p) => key.startsWith(p))) out[k] = v;
   }
   return out;
 }

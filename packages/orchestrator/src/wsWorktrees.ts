@@ -1,4 +1,5 @@
 import { rm, rmdir, symlink } from "node:fs/promises";
+import { dirLinkType } from "@mar/adapters";
 import { join, resolve } from "node:path";
 import { DependencyMergeConflict, IDENT, SAFE, branchExists, conflictedFiles, createWorktrees, discardWorktree, git, ok, type CreateCtx, type Worktrees } from "./worktree.js";
 import type { WorkspaceRepo } from "./workspace.js";
@@ -131,7 +132,7 @@ export function createWorkspaceWorktrees(root: string, runId: string, repos: rea
         let m = ownViews.get(taskId); if (!m) ownViews.set(taskId, (m = new Map()));
         m.set(r.name, target);
       }
-      await symlink(target, link);
+      await symlink(target, link, dirLinkType());
       links.push(link);
     }
   }

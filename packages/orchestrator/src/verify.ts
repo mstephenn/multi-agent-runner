@@ -1,6 +1,5 @@
-import { spawn } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
-import { workerEnv } from "@mar/adapters";
+import { killTree, spawnPortable, workerEnv } from "@mar/adapters";
 import { redact } from "./redact.js";
 
 const TAIL_CHARS = 1500;
@@ -49,7 +48,7 @@ export interface VerifyResult {
 }
 
 // Toolchain locations the worker allowlist drops but the repo's own checks may need (pnpm/corepack/node managers).
-const TOOLCHAIN_VARS = ["PNPM_HOME", "COREPACK_HOME", "NVM_DIR", "VOLTA_HOME"];
+const TOOLCHAIN_VARS = ["PNPM_HOME", "COREPACK_HOME", "NVM_DIR", "VOLTA_HOME", "NVM_HOME", "NVM_SYMLINK"];
 const verifyEnv = (): NodeJS.ProcessEnv => {
   const env = workerEnv();
   for (const k of TOOLCHAIN_VARS) if (process.env[k] !== undefined) env[k] = process.env[k];
@@ -97,14 +96,13 @@ type One = { kind: "ok" } | { kind: "exit"; code: number | null } | { kind: "spa
 
 function runOne(argv: string[], cwd: string, env: NodeJS.ProcessEnv, opts: VerifyOpts, append: (s: string) => void): Promise<One> {
   return new Promise((resolve) => {
-    const child = spawn(argv[0], argv.slice(1), { cwd, env, shell: false, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawnPortable(argv[0], argv.slice(1), { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
     let spawnError: Error | undefined;
     let why: "timeout" | "abort" | undefined;
     let closed = false;
     let killTimer: NodeJS.Timeout | undefined;
     const group = (sig: NodeJS.Signals) => {
-      try { if (child.pid !== undefined) process.kill(-child.pid, sig); else child.kill(sig); }
-      catch { try { child.kill(sig); } catch { /* already gone */ } }
+      try { killTree(child, sig); } catch { /* already gone */ }
     };
     const stop = (reason: "timeout" | "abort") => {
       if (closed || why) return;
@@ -113,8 +111,8 @@ function runOne(argv: string[], cwd: string, env: NodeJS.ProcessEnv, opts: Verif
       killTimer = setTimeout(() => group("SIGKILL"), KILL_GRACE_MS);
     };
     const decoders = [new StringDecoder("utf8"), new StringDecoder("utf8")];
-    child.stdout.on("data", (b: Buffer) => append(decoders[0].write(b)));
-    child.stderr.on("data", (b: Buffer) => append(decoders[1].write(b)));
+    child.stdout!.on("data", (b: Buffer) => append(decoders[0].write(b)));
+    child.stderr!.on("data", (b: Buffer) => append(decoders[1].write(b)));
     child.on("error", (e) => { spawnError = e; });
     const timer = setTimeout(() => stop("timeout"), opts.timeoutMs);
     const onAbort = () => stop("abort");

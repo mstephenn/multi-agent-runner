@@ -1,7 +1,7 @@
-import { spawn } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
 import { AdapterError } from "./types.js";
 import { sanitizeDiagnostic } from "./sanitize.js";
+import { killTree, spawnPortable } from "./platform.js";
 
 const DEFAULT_KILL_GRACE_MS = 2000;
 /** One stdout line may not exceed this many characters (8M); guards against unbounded memory growth. */
@@ -21,7 +21,7 @@ export interface SpawnLinesOpts {
 }
 
 /**
- * Spawns without a shell (in its own process group) and yields stdout lines.
+ * Spawns without a shell (in its own process group; a process tree via taskkill on Windows) and yields stdout lines.
  * On abort or early consumer exit the whole group gets SIGTERM, then SIGKILL after a grace period.
  * A child that ends on its own is never signalled; we just await its exit.
  */
@@ -29,24 +29,20 @@ export async function* spawnLines(cmd: string, args: string[], opts: SpawnLinesO
   if (opts.signal.aborted) return;
   const grace = opts.killGraceMs ?? DEFAULT_KILL_GRACE_MS;
   const maxLine = opts.maxLineChars ?? DEFAULT_MAX_LINE_CHARS;
-  const child = spawn(cmd, args, { cwd: opts.cwd, stdio: ["pipe", "pipe", "pipe"], shell: false, detached: true, env: opts.env });
+  const child = spawnPortable(cmd, args, { cwd: opts.cwd, stdio: ["pipe", "pipe", "pipe"], env: opts.env });
   let stderr = "";
   let spawnError: Error | null = null;
   let killTimer: NodeJS.Timeout | undefined;
   let closed = false;
   let stoppedByUs = false;
-  child.stderr.setEncoding("utf8");
-  child.stderr.on("data", (s: string) => { stderr = (stderr + s).slice(-STDERR_TAIL_CHARS); });
+  child.stderr!.setEncoding("utf8");
+  child.stderr!.on("data", (s: string) => { stderr = (stderr + s).slice(-STDERR_TAIL_CHARS); });
   child.on("error", (e) => { spawnError = e; });
-  child.stdin.on("error", () => {}); // EPIPE if the child exits before reading stdin; exit status is reported below
+  child.stdin!.on("error", () => {}); // EPIPE if the child exits before reading stdin; exit status is reported below
   const exit = new Promise<number | null>((res) => child.on("close", (code) => { closed = true; res(code); }));
   const signalGroup = (sig: NodeJS.Signals) => {
     if (closed) return;
-    try {
-      if (child.pid !== undefined) process.kill(-child.pid, sig); else child.kill(sig);
-    } catch {
-      try { child.kill(sig); } catch { /* already gone */ }
-    }
+    try { killTree(child, sig); } catch { /* already gone */ }
   };
   const stop = () => {
     if (closed) return;
@@ -57,14 +53,14 @@ export async function* spawnLines(cmd: string, args: string[], opts: SpawnLinesO
     killTimer ??= setTimeout(() => signalGroup("SIGKILL"), grace);
   };
   opts.signal.addEventListener("abort", stop, { once: true });
-  child.stdin.end(opts.stdin);
+  child.stdin!.end(opts.stdin);
   let code: number | null = null;
   let finished = false; // read loop ended naturally (stdout closed)
   try {
     const dec = new StringDecoder("utf8");
     let buf = "";
     const tooLong = () => new AdapterError(`${cmd} output line exceeds ${maxLine} characters`);
-    for await (const chunk of child.stdout) {
+    for await (const chunk of child.stdout!) {
       buf += dec.write(chunk as Buffer);
       let nl: number;
       while ((nl = buf.indexOf("\n")) >= 0) {

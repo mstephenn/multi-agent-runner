@@ -1,6 +1,6 @@
 // Parent-side supervision for bin/mar.mjs: forwards termination signals to the child, escalates to SIGKILL
 // after a grace period, and maps a signal-killed child to exit code 128+signo.
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { constants } from "node:os";
 
 /** True when `version` (e.g. "22.7.0") is >= major.minor. */
@@ -20,11 +20,14 @@ export function supervise(cmd, args, { env, graceMs = 5000, proc = process } = {
   // detached: the child leads its own process group, so a terminal Ctrl-C (SIGINT to the foreground group)
   // reaches only this supervisor, which forwards it exactly once. Otherwise the child would see it twice
   // and its "second signal force-exits" path would skip the graceful abort.
-  const child = spawn(cmd, args, { stdio: "inherit", env, detached: true });
+  // Windows has no process groups (and Ctrl-C reaches both processes), so no detach there; trees die via taskkill.
+  const win = process.platform === "win32";
+  const child = spawn(cmd, args, { stdio: "inherit", env, detached: !win, windowsHide: true });
   let timer;
   let exited = false;
   const killGroup = (sig) => {
     if (child.pid === undefined) return;
+    if (win) { spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true }); return; }
     try { process.kill(-child.pid, sig); } catch { /* group already gone */ }
   };
   const forward = (sig) => {
