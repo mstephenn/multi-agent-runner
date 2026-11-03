@@ -23,7 +23,7 @@ const uiIndex = join(uiDir, "dist/index.html");
 const uiSources = ["src", "index.html", "vite.config.ts", "package.json"].map((f) => join(uiDir, f));
 if (!existsSync(uiIndex) || newest(uiIndex) < Math.max(...uiSources.map(newest))) {
   console.log("building UI...");
-  const r = spawnSync("pnpm", ["--filter", "@mar/ui", "build"], { cwd: root, stdio: "inherit" });
+  const r = spawnSync("pnpm", ["--filter", "@mar/ui", "build"], { cwd: root, stdio: "inherit", shell: process.platform === "win32" });
   if (r.status !== 0) { console.error("UI build failed"); process.exit(r.status ?? 1); }
 }
 
